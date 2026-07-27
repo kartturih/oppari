@@ -24,6 +24,9 @@ FetchContent_MakeAvailable(raylib)
 
 add_executable(neat_car_simulation
     src/main.cpp
+    src/simulation/Track.cpp
 )
+
+target_include_directories(neat_car_simulation PRIVATE src)
 
 target_link_libraries(neat_car_simulation PRIVATE raylib)
