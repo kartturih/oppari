@@ -33,6 +33,16 @@ struct CarParams
     float turnRate = 3.2f;       // rad/s heading change at full steering and at/above maxSpeed
 };
 
+// One forward-facing distance sensor's result for the current frame. Cast
+// against Track's CPU drivable mask only; carries enough information for
+// debug rendering now and NEAT observation construction later.
+struct SensorReading
+{
+    float distance = 0.0f;           // px from the sensor origin to the first non-drivable sample
+    float normalizedDistance = 1.0f; // distance / Car::kMaxSensorDistance, in [0, 1]
+    Vector2 endPoint = {0.0f, 0.0f}; // world-space point where the ray stopped
+};
+
 // A single car with lightweight custom 2D dynamics, driven purely through
 // CarInput passed to update(). Car holds no reference to any input device.
 // Collision is resolved against a Track's CPU drivable mask by checking the
@@ -40,14 +50,25 @@ struct CarParams
 class Car
 {
 public:
+    // Sensor layout: five forward-facing rays at fixed angles relative to
+    // heading, cast in fixed 2px steps out to a fixed maximum range. Kept as
+    // explicit named constants (not a generic config framework) so they stay
+    // easy to find and change.
+    static constexpr int kSensorCount = 5;
+    static constexpr float kSensorAngleDegrees[kSensorCount] = {-60.0f, -30.0f, 0.0f, 30.0f, 60.0f};
+    static constexpr float kMaxSensorDistance = 200.0f; // px
+    static constexpr float kSensorStep = 2.0f;           // px
+
     Car(const CarParams& params, const Track& track);
 
     // Advances the car by exactly dt seconds: applies engine acceleration,
     // drag, lateral grip, steering and position integration, then checks
-    // track collision. If the car is not alive, does nothing.
+    // track collision and recasts the sensors from the resulting pose. If
+    // the car is not alive, does nothing (including no sensor recast).
     void update(const CarInput& input, float dt);
 
-    // Resets the car to a known transform: zero velocity, alive = true.
+    // Resets the car to a known transform: zero velocity, alive = true, and
+    // recasts the sensors so they are valid for the spawn pose immediately.
     void reset(Vector2 spawnPosition, float spawnHeading);
 
     Vector2 getPosition() const { return m_position; }
@@ -62,10 +83,28 @@ public:
     // rear-right). Used for both collision checks and rendering.
     std::array<Vector2, 4> getCorners() const;
 
+    // World-space origin all five sensors are cast from: the center of the
+    // car's front edge. Moves and rotates with the car.
+    Vector2 getSensorOrigin() const;
+
+    // The five sensor readings from the most recent update()/reset(), in
+    // kSensorAngleDegrees order. Fixed-size storage, no per-frame allocation.
+    const std::array<SensorReading, kSensorCount>& getSensors() const { return m_sensors; }
+
+    // Local vehicle-state values, derived on demand from current velocity
+    // and heading (no separate cached state to keep in sync).
+    float getSpeed() const;           // magnitude of world-space velocity, px/s
+    float getForwardVelocity() const; // velocity projected onto heading's forward vector, px/s
+    float getLateralVelocity() const; // velocity projected onto heading's right vector, px/s (positive = rightward)
+    float getSlipAngle() const;       // signed angle between heading and velocity direction, radians; 0 when nearly stationary
+
 private:
     // Checks all four body corners against the track mask; on any
     // non-drivable corner, kills the car and zeroes its velocity.
     void applyCollision();
+
+    // Casts all five sensors from the current pose against the track mask.
+    void updateSensors();
 
     CarParams m_params;
     const Track& m_track;
@@ -74,6 +113,8 @@ private:
     Vector2 m_velocity = {0.0f, 0.0f};
     float m_heading = 0.0f;
     bool m_alive = true;
+
+    std::array<SensorReading, kSensorCount> m_sensors{};
 };
 
 } // namespace simulation

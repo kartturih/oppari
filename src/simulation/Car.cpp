@@ -18,6 +18,7 @@ void Car::reset(Vector2 spawnPosition, float spawnHeading)
     m_velocity = {0.0f, 0.0f};
     m_heading = spawnHeading;
     m_alive = true;
+    updateSensors();
 }
 
 void Car::update(const CarInput& input, float dt)
@@ -75,6 +76,7 @@ void Car::update(const CarInput& input, float dt)
     m_position.y += m_velocity.y * dt;
 
     applyCollision();
+    updateSensors();
 }
 
 std::array<Vector2, 4> Car::getCorners() const
@@ -110,6 +112,82 @@ void Car::applyCollision()
             return;
         }
     }
+}
+
+Vector2 Car::getSensorOrigin() const
+{
+    const Vector2 forward = {std::cos(m_heading), std::sin(m_heading)};
+    const float halfLength = m_params.length * 0.5f;
+    return {m_position.x + forward.x * halfLength, m_position.y + forward.y * halfLength};
+}
+
+void Car::updateSensors()
+{
+    const Vector2 origin = getSensorOrigin();
+
+    for (int i = 0; i < kSensorCount; ++i)
+    {
+        const float angle = m_heading + kSensorAngleDegrees[i] * DEG2RAD;
+        const Vector2 direction = {std::cos(angle), std::sin(angle)};
+
+        // Default to "nothing found": the full range, in the ray's direction.
+        float distance = kMaxSensorDistance;
+        Vector2 endPoint = {origin.x + direction.x * kMaxSensorDistance, origin.y + direction.y * kMaxSensorDistance};
+
+        // Step outward in fixed increments, querying only the CPU mask via
+        // Track::isDrivable. Float sample coordinates are rounded to the
+        // nearest integer pixel (consistent with applyCollision's corner
+        // checks above); isDrivable is responsible for bounds safety.
+        for (float d = 0.0f; d <= kMaxSensorDistance; d += kSensorStep)
+        {
+            const Vector2 sample = {origin.x + direction.x * d, origin.y + direction.y * d};
+            const int mx = static_cast<int>(std::lround(sample.x));
+            const int my = static_cast<int>(std::lround(sample.y));
+
+            if (!m_track.isDrivable(mx, my))
+            {
+                distance = d;
+                endPoint = sample;
+                break;
+            }
+        }
+
+        m_sensors[i].distance = distance;
+        m_sensors[i].normalizedDistance = distance / kMaxSensorDistance;
+        m_sensors[i].endPoint = endPoint;
+    }
+}
+
+float Car::getSpeed() const
+{
+    return std::sqrt(m_velocity.x * m_velocity.x + m_velocity.y * m_velocity.y);
+}
+
+float Car::getForwardVelocity() const
+{
+    const Vector2 forward = {std::cos(m_heading), std::sin(m_heading)};
+    return m_velocity.x * forward.x + m_velocity.y * forward.y;
+}
+
+float Car::getLateralVelocity() const
+{
+    const Vector2 right = {-std::sin(m_heading), std::cos(m_heading)};
+    return m_velocity.x * right.x + m_velocity.y * right.y;
+}
+
+float Car::getSlipAngle() const
+{
+    // Below this speed, forward/lateral velocity are dominated by float
+    // noise rather than actual direction, so report a stable 0 instead of
+    // an undefined/noisy atan2 result.
+    constexpr float kMinSpeedForSlipAngle = 1.0f; // px/s
+
+    if (getSpeed() < kMinSpeedForSlipAngle)
+    {
+        return 0.0f;
+    }
+
+    return std::atan2(getLateralVelocity(), getForwardVelocity());
 }
 
 } // namespace simulation
