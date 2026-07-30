@@ -78,6 +78,11 @@ public:
 
     const CarParams& getParams() const { return m_params; }
 
+    // Configured maximum speed (px/s), the same value used internally to
+    // clamp velocity. Exposed on its own so callers that only need this one
+    // number (e.g. AI-layer normalization) don't need the full CarParams.
+    float getMaxSpeed() const { return m_params.maxSpeed; }
+
     // Four world-space corners of the car's rotated rectangular body, in
     // order around the perimeter (front-right, front-left, rear-left,
     // rear-right). Used for both collision checks and rendering.

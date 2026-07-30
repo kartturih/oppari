@@ -26,6 +26,8 @@ add_executable(neat_car_simulation
     src/main.cpp
     src/simulation/Track.cpp
     src/simulation/Car.cpp
+    src/ai/Observation.cpp
+    src/ai/NeuralNetwork.cpp
 )
 
 target_include_directories(neat_car_simulation PRIVATE src)

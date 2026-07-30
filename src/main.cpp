@@ -1,10 +1,15 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
+#include <vector>
 
 #include "raylib.h"
 
+#include "ai/NeuralNetwork.h"
+#include "ai/Observation.h"
 #include "simulation/Car.h"
 #include "simulation/Track.h"
 
@@ -242,6 +247,340 @@ void verifySensors(const simulation::Track& track)
     TraceLog(LOG_INFO, "Sensor verification: all deterministic checks passed");
 }
 
+// One-shot, deterministic sanity check of ai::buildObservation, independent
+// of keyboard/render timing. Runs once at startup.
+void verifyObservation(const simulation::Track& track)
+{
+    static_assert(ai::kObservationSize == 9, "Stage 4 requires exactly nine observation values");
+
+    simulation::Car car(makeCarParams(), track);
+    car.reset(kSpawnPosition, kSpawnHeading);
+
+    // 1: exactly nine values, fixed-size storage.
+    ai::Observation obs = ai::buildObservation(car);
+    assert(obs.values.size() == 9 && "observation must contain exactly nine values");
+
+    // 2 & 3: sensor values occupy indices 0..4, in documented order, within [0,1].
+    const auto& sensors = car.getSensors();
+    for (int i = 0; i < simulation::Car::kSensorCount; ++i)
+    {
+        assert(std::fabs(obs.values[i] - sensors[i].normalizedDistance) < 1e-6f &&
+               "observation sensor slot must match Car's own normalized sensor reading");
+        assert(obs.values[i] >= 0.0f && obs.values[i] <= 1.0f && "sensor observation values must stay within [0,1]");
+    }
+
+    // 4: speed normalization (speed / maxSpeed, clamped to [0,1]).
+    {
+        const float expected = std::clamp(car.getSpeed() / car.getMaxSpeed(), 0.0f, 1.0f);
+        assert(std::fabs(obs.values[5] - expected) < 1e-6f && "speed normalization mismatch");
+    }
+
+    // 5: forward velocity normalization (forwardVelocity / maxSpeed, clamped to [-1,1]).
+    {
+        const float expected = std::clamp(car.getForwardVelocity() / car.getMaxSpeed(), -1.0f, 1.0f);
+        assert(std::fabs(obs.values[6] - expected) < 1e-6f && "forward velocity normalization mismatch");
+    }
+
+    // 6: lateral velocity normalization (lateralVelocity / maxSpeed, clamped to [-1,1]).
+    {
+        const float expected = std::clamp(car.getLateralVelocity() / car.getMaxSpeed(), -1.0f, 1.0f);
+        assert(std::fabs(obs.values[7] - expected) < 1e-6f && "lateral velocity normalization mismatch");
+    }
+
+    // 7: slip angle normalization (slipAngle / pi, clamped to [-1,1]).
+    {
+        const float expected = std::clamp(car.getSlipAngle() / static_cast<float>(PI), -1.0f, 1.0f);
+        assert(std::fabs(obs.values[8] - expected) < 1e-6f && "slip angle normalization mismatch");
+    }
+
+    // 8: all normalized values respect their documented ranges even under active driving/sliding.
+    simulation::CarInput throttleAndSteer;
+    throttleAndSteer.throttle = 1.0f;
+    throttleAndSteer.steering = 1.0f;
+    for (int i = 0; i < 30 && car.isAlive(); ++i)
+    {
+        car.update(throttleAndSteer, kSimulationDt);
+    }
+    const ai::Observation movingObs = ai::buildObservation(car);
+    for (int i = 0; i < simulation::Car::kSensorCount; ++i)
+    {
+        assert(movingObs.values[i] >= 0.0f && movingObs.values[i] <= 1.0f && "sensor values must stay within [0,1]");
+    }
+    assert(movingObs.values[5] >= 0.0f && movingObs.values[5] <= 1.0f && "speed must stay within [0,1]");
+    assert(movingObs.values[6] >= -1.0f && movingObs.values[6] <= 1.0f && "forward velocity must stay within [-1,1]");
+    assert(movingObs.values[7] >= -1.0f && movingObs.values[7] <= 1.0f && "lateral velocity must stay within [-1,1]");
+    assert(movingObs.values[8] >= -1.0f && movingObs.values[8] <= 1.0f && "slip angle must stay within [-1,1]");
+
+    // 9: reset/spawn produces deterministic valid observation values.
+    car.reset(kSpawnPosition, kSpawnHeading);
+    const ai::Observation resetObsA = ai::buildObservation(car);
+    car.reset(kSpawnPosition, kSpawnHeading);
+    const ai::Observation resetObsB = ai::buildObservation(car);
+    for (int i = 0; i < ai::kObservationSize; ++i)
+    {
+        assert(resetObsA.values[i] == resetObsB.values[i] && "reset must produce deterministic observation values");
+    }
+
+    TraceLog(LOG_INFO, "Observation verification: all deterministic checks passed");
+}
+
+namespace nn_verify
+{
+
+// Builds the 9 Input + 1 Bias + 2 Output nodes every test network needs.
+// Input node IDs are 0..8 (Observation slot order), bias is 9, steering
+// output is 100 (first Output -> output index 0), throttle output is 101
+// (second Output -> output index 1). Deliberately not contiguous/sorted
+// with any hidden node IDs used below, so tests can prove evaluation
+// doesn't depend on ID ordering.
+std::vector<ai::Node> makeBaseNodes()
+{
+    std::vector<ai::Node> nodes;
+    for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+    {
+        nodes.push_back(ai::Node{i, ai::NodeType::Input});
+    }
+    nodes.push_back(ai::Node{9, ai::NodeType::Bias});
+    nodes.push_back(ai::Node{100, ai::NodeType::Output}); // steering
+    nodes.push_back(ai::Node{101, ai::NodeType::Output}); // throttle
+    return nodes;
+}
+
+ai::Observation makeObservation(int index, float value)
+{
+    ai::Observation obs;
+    obs.values.fill(0.0f);
+    if (index >= 0)
+    {
+        obs.values[index] = value;
+    }
+    return obs;
+}
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace nn_verify
+
+// One-shot, deterministic sanity check of ai::NeuralNetwork's construction,
+// validation and evaluation, independent of Car/Track/keyboard/render
+// timing. Runs once at startup.
+void verifyNeuralNetwork()
+{
+    using namespace nn_verify;
+    constexpr float kEps = 1e-4f;
+
+    // 1 & 9: exactly 9 inputs + 1 bias + 2 outputs can be constructed; a
+    // fully disconnected Output produces 0 (tanh of an empty sum).
+    {
+        ai::NeuralNetwork net(makeBaseNodes(), {});
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(out[0] == 0.0f && out[1] == 0.0f && "disconnected outputs must evaluate to exactly 0");
+    }
+
+    // 2: direct Input -> Output connection produces the expected tanh result.
+    {
+        ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, 100, 0.5f, true}});
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(0.5f)) < kEps && "Input->Output must equal tanh(input * weight)");
+        assert(out[1] == 0.0f && "unrelated disconnected output must stay 0");
+    }
+
+    // 3: Bias -> Output affects output correctly (bias is always 1.0).
+    {
+        ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{9, 100, 0.7f, true}});
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(std::fabs(out[0] - std::tanh(0.7f)) < kEps && "Bias->Output must equal tanh(1.0 * weight)");
+    }
+
+    // 4: multiple incoming connections are summed before activation.
+    {
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 100, 0.3f, true},
+            ai::Connection{1, 100, 0.4f, true},
+        };
+        ai::NeuralNetwork net(makeBaseNodes(), conns);
+        ai::Observation obs;
+        obs.values.fill(0.0f);
+        obs.values[0] = 1.0f;
+        obs.values[1] = 1.0f;
+        const auto out = net.evaluate(obs);
+        assert(std::fabs(out[0] - std::tanh(0.3f + 0.4f)) < kEps &&
+               "multiple incoming connections must be summed before tanh");
+    }
+
+    // 5: Input -> Hidden -> Output produces the mathematically expected result.
+    {
+        std::vector<ai::Node> nodes = makeBaseNodes();
+        nodes.push_back(ai::Node{50, ai::NodeType::Hidden});
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 50, 0.5f, true},
+            ai::Connection{50, 100, 2.0f, true},
+        };
+        ai::NeuralNetwork net(nodes, conns);
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        const float hidden = std::tanh(1.0f * 0.5f);
+        const float expected = std::tanh(hidden * 2.0f);
+        assert(std::fabs(out[0] - expected) < kEps && "Input->Hidden->Output result mismatch");
+    }
+
+    // 6: a deeper feed-forward path Input -> HiddenA -> HiddenB -> Output evaluates correctly.
+    {
+        std::vector<ai::Node> nodes = makeBaseNodes();
+        nodes.push_back(ai::Node{50, ai::NodeType::Hidden});
+        nodes.push_back(ai::Node{51, ai::NodeType::Hidden});
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 50, 1.0f, true},
+            ai::Connection{50, 51, 1.0f, true},
+            ai::Connection{51, 100, 1.0f, true},
+        };
+        ai::NeuralNetwork net(nodes, conns);
+        const auto out = net.evaluate(makeObservation(0, 0.5f));
+        const float a = std::tanh(0.5f);
+        const float b = std::tanh(a);
+        const float expected = std::tanh(b);
+        assert(std::fabs(out[0] - expected) < kEps && "deep Input->HiddenA->HiddenB->Output result mismatch");
+    }
+
+    // 7: a connection that skips hidden nodes evaluates correctly alongside a hidden path.
+    {
+        std::vector<ai::Node> nodes = makeBaseNodes();
+        nodes.push_back(ai::Node{50, ai::NodeType::Hidden});
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 50, 1.0f, true},  // input -> hidden
+            ai::Connection{50, 100, 1.0f, true}, // hidden -> output
+            ai::Connection{0, 100, 1.0f, true},  // input -> output, skipping the hidden node
+        };
+        ai::NeuralNetwork net(nodes, conns);
+        const auto out = net.evaluate(makeObservation(0, 0.5f));
+        const float hidden = std::tanh(0.5f);
+        const float expected = std::tanh(hidden * 1.0f + 0.5f * 1.0f);
+        assert(std::fabs(out[0] - expected) < kEps && "skip connection combined with hidden path result mismatch");
+    }
+
+    // 8: evaluation does not depend on node ID numerical order. Hidden node
+    // ID (999) is numerically larger than the Output node ID (100) it feeds,
+    // and larger than the Bias ID (9); topological order must still put the
+    // hidden node before the output regardless.
+    {
+        std::vector<ai::Node> nodes = makeBaseNodes();
+        nodes.push_back(ai::Node{999, ai::NodeType::Hidden});
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 999, 1.0f, true},
+            ai::Connection{999, 100, 1.0f, true},
+        };
+        ai::NeuralNetwork net(nodes, conns);
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        const float expected = std::tanh(std::tanh(1.0f));
+        assert(std::fabs(out[0] - expected) < kEps &&
+               "evaluation must follow actual dependencies, not node ID order");
+    }
+
+    // 10: invalid source/destination node IDs are rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, 12345, 0.1f, true}});
+        }) && "connection to an unknown node ID must be rejected");
+        assert(throwsInvalidArgument([]() {
+            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{12345, 100, 0.1f, true}});
+        }) && "connection from an unknown node ID must be rejected");
+    }
+
+    // 11: duplicate node IDs are rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Node> nodes = makeBaseNodes();
+            nodes.push_back(ai::Node{0, ai::NodeType::Hidden}); // reuses input 0's ID
+            ai::NeuralNetwork net(nodes, {});
+        }) && "duplicate node IDs must be rejected");
+    }
+
+    // 12: duplicate directed connections are rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Connection> conns = {
+                ai::Connection{0, 100, 0.1f, true},
+                ai::Connection{0, 100, 0.2f, true},
+            };
+            ai::NeuralNetwork net(makeBaseNodes(), conns);
+        }) && "duplicate (source, target) connections must be rejected");
+    }
+
+    // 13: a connection targeting Input is rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{100, 0, 0.1f, true}});
+        }) && "a connection targeting an Input node must be rejected");
+    }
+
+    // 14: a connection targeting Bias is rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, 9, 0.1f, true}});
+        }) && "a connection targeting the Bias node must be rejected");
+    }
+
+    // 15: a cyclic graph is rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Node> nodes = makeBaseNodes();
+            nodes.push_back(ai::Node{50, ai::NodeType::Hidden});
+            nodes.push_back(ai::Node{51, ai::NodeType::Hidden});
+            std::vector<ai::Connection> conns = {
+                ai::Connection{50, 51, 1.0f, true},
+                ai::Connection{51, 50, 1.0f, true},
+            };
+            ai::NeuralNetwork net(nodes, conns);
+        }) && "a cyclic graph must be rejected");
+    }
+
+    // 16: incorrect Input/Bias/Output counts are rejected.
+    {
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Node> nodes = makeBaseNodes();
+            nodes.erase(nodes.begin()); // drops one Input, leaving 8
+            ai::NeuralNetwork net(nodes, {});
+        }) && "fewer than kInputCount Input nodes must be rejected");
+
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Node> nodes = makeBaseNodes();
+            nodes.erase(nodes.begin() + ai::NeuralNetwork::kInputCount); // drops the Bias node
+            ai::NeuralNetwork net(nodes, {});
+        }) && "a missing Bias node must be rejected");
+
+        assert(throwsInvalidArgument([]() {
+            std::vector<ai::Node> nodes = makeBaseNodes();
+            nodes.pop_back(); // drops the throttle Output, leaving 1
+            ai::NeuralNetwork net(nodes, {});
+        }) && "fewer than kOutputCount Output nodes must be rejected");
+    }
+
+    // 17: output values are returned in deterministic steering/throttle order.
+    {
+        std::vector<ai::Connection> conns = {
+            ai::Connection{0, 100, 1.0f, true},
+            ai::Connection{0, 101, 2.0f, true},
+        };
+        ai::NeuralNetwork net(makeBaseNodes(), conns);
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(1.0f)) < kEps && "output index 0 must be the steering (first Output) node");
+        assert(std::fabs(out[1] - std::tanh(2.0f)) < kEps && "output index 1 must be the throttle (second Output) node");
+    }
+
+    TraceLog(LOG_INFO, "Neural network verification: all deterministic checks passed");
+}
+
 simulation::CarInput readInput()
 {
     simulation::CarInput input;
@@ -337,7 +676,10 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input)
         DrawText(line, x, y, 16, LIGHTGRAY);
         y += lineHeight;
     }
-    y += lineHeight;
+
+    std::snprintf(line, sizeof(line), "Observation inputs: %d", ai::kObservationSize);
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight * 2;
 
     DrawText(car.isAlive() ? "ALIVE" : "CRASHED", x, y, 20, car.isAlive() ? GREEN : RED);
     y += lineHeight * 2;
@@ -365,6 +707,8 @@ int main()
     verifyTrack(track);
     verifyCar(track);
     verifySensors(track);
+    verifyObservation(track);
+    verifyNeuralNetwork();
 
     const simulation::TrackDefinition& def = track.getDefinition();
 
