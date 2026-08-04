@@ -10,6 +10,9 @@
 
 #include "ai/NeuralNetwork.h"
 #include "ai/Observation.h"
+#include "ai/neat/ConnectionGene.h"
+#include "ai/neat/Genome.h"
+#include "ai/neat/NodeGene.h"
 #include "simulation/Car.h"
 #include "simulation/Track.h"
 
@@ -581,6 +584,282 @@ void verifyNeuralNetwork()
     TraceLog(LOG_INFO, "Neural network verification: all deterministic checks passed");
 }
 
+// One-shot, deterministic sanity check of the NEAT gene definitions
+// (NodeGene, ConnectionGene), independent of Car/Track/keyboard/render
+// timing. Runs once at startup. These are pure data structures -- no
+// runtime network is built or evaluated here.
+void verifyNeatGenes()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    auto throwsInvalidArgument = [](auto&& callable) -> bool
+    {
+        try
+        {
+            callable();
+        }
+        catch (const std::invalid_argument&)
+        {
+            return true;
+        }
+        return false;
+    };
+
+    // 1: valid construction for every node type, with getters reporting back
+    // exactly what was passed in.
+    {
+        const NodeGene input(0, NodeType::Input);
+        const NodeGene bias(1, NodeType::Bias);
+        const NodeGene hidden(2, NodeType::Hidden);
+        const NodeGene output(3, NodeType::Output);
+        assert(input.getId() == 0 && input.getType() == NodeType::Input && "Input node gene must round-trip");
+        assert(bias.getId() == 1 && bias.getType() == NodeType::Bias && "Bias node gene must round-trip");
+        assert(hidden.getId() == 2 && hidden.getType() == NodeType::Hidden && "Hidden node gene must round-trip");
+        assert(output.getId() == 3 && output.getType() == NodeType::Output && "Output node gene must round-trip");
+    }
+
+    // 2: a negative node ID is rejected.
+    {
+        assert(throwsInvalidArgument([]() { NodeGene bad(-1, NodeType::Hidden); }) &&
+               "a negative node ID must be rejected");
+    }
+
+    // 3: equality compares both ID and type; either differing breaks equality.
+    {
+        const NodeGene a(5, NodeType::Hidden);
+        const NodeGene b(5, NodeType::Hidden);
+        const NodeGene differentId(6, NodeType::Hidden);
+        const NodeGene differentType(5, NodeType::Output);
+        assert(a == b && "identical node genes must compare equal");
+        assert(a != differentId && "node genes with different IDs must not compare equal");
+        assert(a != differentType && "node genes with different types must not compare equal");
+    }
+
+    // 4: valid construction preserves source, target, weight, enabled flag,
+    // and innovation number exactly.
+    {
+        const ConnectionGene c(0, 1, 0.75f, true, 3);
+        assert(c.getSourceId() == 0 && c.getTargetId() == 1 && "source/target must round-trip");
+        assert(c.getWeight() == 0.75f && "weight must be preserved exactly, not clamped or rounded");
+        assert(c.isEnabled() && "enabled flag must round-trip");
+        assert(c.getInnovationNumber() == 3 && "innovation number must round-trip");
+    }
+
+    // 5: a negative weight is preserved exactly (weights are never clamped).
+    {
+        const ConnectionGene c(0, 1, -2.5f, false, 0);
+        assert(c.getWeight() == -2.5f && "negative weight must be preserved exactly");
+        assert(!c.isEnabled() && "enabled=false at construction must be preserved");
+    }
+
+    // 6: enable()/disable() toggle the flag and nothing else.
+    {
+        ConnectionGene c(0, 1, 1.0f, false, 0);
+        assert(!c.isEnabled() && "must start disabled");
+        c.enable();
+        assert(c.isEnabled() && "enable() must set the flag");
+        c.disable();
+        assert(!c.isEnabled() && "disable() must clear the flag");
+        assert(c.getSourceId() == 0 && c.getTargetId() == 1 && c.getWeight() == 1.0f &&
+               c.getInnovationNumber() == 0 && "enable()/disable() must not affect other fields");
+    }
+
+    // 7: negative source/target node IDs are rejected.
+    {
+        assert(throwsInvalidArgument([]() { ConnectionGene c(-1, 1, 0.0f, true, 0); }) &&
+               "a negative source node ID must be rejected");
+        assert(throwsInvalidArgument([]() { ConnectionGene c(0, -1, 0.0f, true, 0); }) &&
+               "a negative target node ID must be rejected");
+    }
+
+    // 8: a negative innovation number is rejected.
+    {
+        assert(throwsInvalidArgument([]() { ConnectionGene c(0, 1, 0.0f, true, -1); }) &&
+               "a negative innovation number must be rejected");
+    }
+
+    // 9: a self-connection (source == target) is rejected.
+    {
+        assert(throwsInvalidArgument([]() { ConnectionGene c(4, 4, 0.0f, true, 0); }) &&
+               "a self-connection must be rejected");
+    }
+
+    TraceLog(LOG_INFO, "NEAT gene verification: all deterministic checks passed");
+}
+
+// One-shot, deterministic sanity check of ai::neat::Genome, independent of
+// Car/Track/keyboard/render timing. Runs once at startup. Genome is a pure
+// genetic container -- no evaluation, mutation, or crossover is exercised
+// here.
+void verifyGenome()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    auto throwsInvalidArgument = [](auto&& callable) -> bool
+    {
+        try
+        {
+            callable();
+        }
+        catch (const std::invalid_argument&)
+        {
+            return true;
+        }
+        return false;
+    };
+
+    // 1: a default-constructed genome is empty and already valid.
+    {
+        Genome genome;
+        assert(genome.nodes().empty() && "a fresh genome must have no nodes");
+        assert(genome.connections().empty() && "a fresh genome must have no connections");
+        genome.validate(); // must not throw
+    }
+
+    // 2: addNode appends nodes and they show up in nodes().
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        genome.addNode(NodeGene{1, NodeType::Bias});
+        genome.addNode(NodeGene{2, NodeType::Output});
+        assert(genome.nodes().size() == 3 && "addNode must append to nodes()");
+        assert(genome.nodes()[0].getId() == 0 && genome.nodes()[1].getId() == 1 &&
+               genome.nodes()[2].getId() == 2 && "nodes() must preserve insertion order");
+    }
+
+    // 3: adding a node with a duplicate ID is rejected, and does not modify the genome.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        assert(throwsInvalidArgument([&]() { genome.addNode(NodeGene{0, NodeType::Hidden}); }) &&
+               "a duplicate node ID must be rejected");
+        assert(genome.nodes().size() == 1 && "a rejected addNode must not modify the genome");
+    }
+
+    // 4: hasNode/findNode report existence and identity correctly, including for missing IDs.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{7, NodeType::Hidden});
+        assert(genome.hasNode(7) && "hasNode must find an existing node ID");
+        assert(!genome.hasNode(8) && "hasNode must not find a missing node ID");
+        const NodeGene* found = genome.findNode(7);
+        assert(found != nullptr && found->getId() == 7 && found->getType() == NodeType::Hidden &&
+               "findNode must return the matching node");
+        assert(genome.findNode(8) == nullptr && "findNode must return nullptr for a missing node ID");
+    }
+
+    // 5: a valid connection between two existing nodes is accepted.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        genome.addNode(NodeGene{1, NodeType::Output});
+        genome.addConnection(ConnectionGene{0, 1, 0.5f, true, 0});
+        assert(genome.connections().size() == 1 && "addConnection must append to connections()");
+        assert(genome.connections()[0].getSourceId() == 0 && genome.connections()[0].getTargetId() == 1 &&
+               "the stored connection must match what was added");
+    }
+
+    // 6: a connection with a missing source node is rejected.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{1, NodeType::Output});
+        assert(throwsInvalidArgument([&]() { genome.addConnection(ConnectionGene{0, 1, 0.1f, true, 0}); }) &&
+               "a connection with an unknown source node must be rejected");
+        assert(genome.connections().empty() && "a rejected addConnection must not modify the genome");
+    }
+
+    // 7: a connection with a missing target node is rejected.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        assert(throwsInvalidArgument([&]() { genome.addConnection(ConnectionGene{0, 1, 0.1f, true, 0}); }) &&
+               "a connection with an unknown target node must be rejected");
+        assert(genome.connections().empty() && "a rejected addConnection must not modify the genome");
+    }
+
+    // 8: a duplicate directed connection is rejected, even with a different
+    // weight/innovation number -- only (source, target) identity matters.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        genome.addNode(NodeGene{1, NodeType::Output});
+        genome.addConnection(ConnectionGene{0, 1, 0.1f, true, 0});
+        assert(throwsInvalidArgument([&]() { genome.addConnection(ConnectionGene{0, 1, 0.9f, false, 99}); }) &&
+               "a duplicate (source, target) connection must be rejected regardless of weight/innovation");
+        assert(genome.connections().size() == 1 && "a rejected duplicate connection must not modify the genome");
+    }
+
+    // 9: hasConnection/findConnection report existence and identity correctly,
+    // including for missing (source, target) pairs, and the reverse direction
+    // is treated as a distinct, absent connection.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        genome.addNode(NodeGene{1, NodeType::Output});
+        genome.addConnection(ConnectionGene{0, 1, 0.42f, true, 5});
+
+        assert(genome.hasConnection(0, 1) && "hasConnection must find an existing (source, target) pair");
+        assert(!genome.hasConnection(1, 0) && "hasConnection must not treat the reverse direction as existing");
+
+        const ConnectionGene* found = genome.findConnection(0, 1);
+        assert(found != nullptr && found->getWeight() == 0.42f && found->getInnovationNumber() == 5 &&
+               "findConnection must return the matching connection");
+        assert(genome.findConnection(1, 0) == nullptr &&
+               "findConnection must return nullptr for a missing (source, target) pair");
+    }
+
+    // 10: validate() succeeds (does not throw) on a genome built entirely
+    // through the validated addNode/addConnection API.
+    {
+        Genome genome;
+        genome.addNode(NodeGene{0, NodeType::Input});
+        genome.addNode(NodeGene{1, NodeType::Bias});
+        genome.addNode(NodeGene{2, NodeType::Output});
+        genome.addConnection(ConnectionGene{0, 2, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{1, 2, 1.0f, true, 1});
+        genome.validate(); // must not throw
+    }
+
+    // 11: validate() rejects a genome with duplicate node IDs. Such a genome
+    // cannot be built via addNode, so it is assembled through the raw bulk
+    // constructor, which intentionally skips validation at construction time.
+    {
+        std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{0, NodeType::Hidden}};
+        Genome genome(nodes, {});
+        assert(throwsInvalidArgument([&]() { genome.validate(); }) &&
+               "validate() must reject duplicate node IDs");
+    }
+
+    // 12: validate() rejects a genome with a connection referencing a
+    // nonexistent node.
+    {
+        std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}};
+        std::vector<ConnectionGene> connections = {ConnectionGene{0, 99, 0.1f, true, 0}};
+        Genome genome(nodes, connections);
+        assert(throwsInvalidArgument([&]() { genome.validate(); }) &&
+               "validate() must reject a connection with a nonexistent endpoint");
+    }
+
+    // 13: validate() rejects a genome with duplicate directed connections.
+    {
+        std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{1, NodeType::Output}};
+        std::vector<ConnectionGene> connections = {
+            ConnectionGene{0, 1, 0.1f, true, 0},
+            ConnectionGene{0, 1, 0.2f, true, 1},
+        };
+        Genome genome(nodes, connections);
+        assert(throwsInvalidArgument([&]() { genome.validate(); }) &&
+               "validate() must reject duplicate directed connections");
+    }
+
+    TraceLog(LOG_INFO, "Genome verification: all deterministic checks passed");
+}
+
 simulation::CarInput readInput()
 {
     simulation::CarInput input;
@@ -709,6 +988,8 @@ int main()
     verifySensors(track);
     verifyObservation(track);
     verifyNeuralNetwork();
+    verifyNeatGenes();
+    verifyGenome();
 
     const simulation::TrackDefinition& def = track.getDefinition();
 
