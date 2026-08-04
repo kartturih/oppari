@@ -8,6 +8,7 @@
 
 #include "raylib.h"
 
+#include "ai/AIController.h"
 #include "ai/NeuralNetwork.h"
 #include "ai/Observation.h"
 #include "ai/neat/ConnectionGene.h"
@@ -52,6 +53,77 @@ simulation::TrackDefinition makeTrackDefinition()
 simulation::CarParams makeCarParams()
 {
     return simulation::CarParams{};
+}
+
+// How the single car currently receives its CarInput. Manual is the default;
+// TAB toggles between the two. Switching modes never resets or rebuilds the
+// AI's network -- it only changes where CarInput comes from each frame.
+enum class ControlMode
+{
+    Manual,
+    AI
+};
+
+// Builds one hand-built, deterministic demonstration Genome: 9 Input nodes
+// (IDs 0..8, matching Observation slot order -- see ai::Observation), 1 Bias
+// node, 2 Output nodes, and only direct Input/Bias -> Output connections (no
+// hidden nodes). All weights below are fixed literals chosen by hand to
+// produce visibly reactive steering/throttle -- this is NOT a trained or
+// evolved network, and no random values are used anywhere in its
+// construction.
+//
+// Observation input slots used here (see ai::Observation for the full list):
+//   0 = sensor at -60 deg (left),   1 = sensor at -30 deg (left)
+//   2 = sensor at   0 deg (center)
+//   3 = sensor at +30 deg (right),  4 = sensor at +60 deg (right)
+//
+// Steering (output ID 100, the lower Output ID -> output slot 0):
+//   left sensors  (0, 1) -> steering, weight -0.5 / -0.3  (more open space on
+//                            the left pulls steering negative)
+//   right sensors (3, 4) -> steering, weight +0.3 / +0.5  (more open space on
+//                            the right pulls steering positive)
+//   center sensor (2)    -> no connection (zero contribution, per the
+//                            "may contribute zero" guidance)
+//
+// Throttle (output ID 101, the higher Output ID -> output slot 1):
+//   Bias (9)       -> throttle, weight +0.6 (steady baseline forward drive)
+//   center sensor  -> throttle, weight +0.4 (more open space ahead adds a
+//                      little more throttle on top of the baseline)
+ai::neat::Genome createDemonstrationGenome()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeId;
+    using ai::neat::NodeType;
+
+    constexpr NodeId kSensorLeft60 = 0;
+    constexpr NodeId kSensorLeft30 = 1;
+    constexpr NodeId kSensorCenter = 2;
+    constexpr NodeId kSensorRight30 = 3;
+    constexpr NodeId kSensorRight60 = 4;
+    constexpr NodeId kBiasId = 9;
+    constexpr NodeId kSteeringOutputId = 100; // lower Output ID -> output slot 0
+    constexpr NodeId kThrottleOutputId = 101; // higher Output ID -> output slot 1
+
+    Genome genome;
+    for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+    {
+        genome.addNode(NodeGene{i, NodeType::Input});
+    }
+    genome.addNode(NodeGene{kBiasId, NodeType::Bias});
+    genome.addNode(NodeGene{kSteeringOutputId, NodeType::Output});
+    genome.addNode(NodeGene{kThrottleOutputId, NodeType::Output});
+
+    int innovation = 0;
+    genome.addConnection(ConnectionGene{kSensorLeft60, kSteeringOutputId, -0.5f, true, innovation++});
+    genome.addConnection(ConnectionGene{kSensorLeft30, kSteeringOutputId, -0.3f, true, innovation++});
+    genome.addConnection(ConnectionGene{kSensorRight30, kSteeringOutputId, 0.3f, true, innovation++});
+    genome.addConnection(ConnectionGene{kSensorRight60, kSteeringOutputId, 0.5f, true, innovation++});
+    genome.addConnection(ConnectionGene{kBiasId, kThrottleOutputId, 0.6f, true, innovation++});
+    genome.addConnection(ConnectionGene{kSensorCenter, kThrottleOutputId, 0.4f, true, innovation++});
+
+    return genome;
 }
 
 // One-shot, deterministic sanity check of the CPU mask against the known
@@ -1157,6 +1229,216 @@ void verifyPhenotypeBuilder()
     TraceLog(LOG_INFO, "Phenotype builder verification: all deterministic checks passed");
 }
 
+// One-shot, deterministic sanity check of ai::AIController, independent of
+// keyboard/render timing. Runs once at startup. Exercises the full
+// Car -> Observation -> NeuralNetwork -> AIController -> CarInput loop using
+// small hand-built genomes/networks, not the demonstration genome (so this
+// verification stays independent of createDemonstrationGenome()'s specific
+// weights).
+void verifyAIController(const simulation::Track& track)
+{
+    using ai::AIController;
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+    constexpr float kEps = 1e-4f;
+
+    // Genome with 9 Input + 1 Bias + 2 Output nodes (IDs matching
+    // createDemonstrationGenome()'s layout) and no connections, so every
+    // network output is deterministically 0 (tanh of an empty sum) unless a
+    // test adds its own connections on top.
+    auto makeDisconnectedGenome = []()
+    {
+        Genome genome;
+        for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+        {
+            genome.addNode(NodeGene{i, NodeType::Input});
+        }
+        genome.addNode(NodeGene{9, NodeType::Bias});
+        genome.addNode(NodeGene{100, NodeType::Output});
+        genome.addNode(NodeGene{101, NodeType::Output});
+        return genome;
+    };
+
+    // 1 & 12: the controller stores and uses a valid two-output network --
+    // construction and one update() succeed without throwing.
+    {
+        AIController controller(ai::neat::buildPhenotype(makeDisconnectedGenome()));
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput input = controller.update(car);
+        assert(input.steering == 0.0f && input.throttle == 0.5f &&
+               "a disconnected network must map to zero steering and neutral (0.5) throttle");
+    }
+
+    // 2 & 3: output 0 drives steering, output 1 drives throttle. Bias (always
+    // exactly 1.0, independent of any sensor/car geometry) connects only to
+    // the steering output, so this test's outcome does not depend on the
+    // car's spawn-time sensor readings: a positive weight there must move
+    // steering but leave throttle at its neutral 0.5.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{9, 100, 1.0f, true, 0});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput input = controller.update(car);
+
+        assert(input.steering > 0.5f && "output index 0 must map to steering");
+        assert(std::fabs(input.throttle - 0.5f) < kEps && "output index 1 (throttle) must be unaffected");
+    }
+
+    // 4, 5 & 6: raw throttle 0 maps to 0.5; negative raw throttle maps below
+    // 0.5; positive raw throttle maps above 0.5. Bias -> throttle with a
+    // known weight makes the raw throttle output a known, non-zero value.
+    {
+        Genome zeroGenome = makeDisconnectedGenome(); // no Bias->throttle connection: raw throttle stays 0
+        AIController zeroController(ai::neat::buildPhenotype(zeroGenome));
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput zeroInput = zeroController.update(car);
+        assert(zeroController.getRawThrottleOutput() == 0.0f && "raw throttle must be exactly 0 with no contribution");
+        assert(std::fabs(zeroInput.throttle - 0.5f) < kEps && "raw throttle 0 must map to mapped throttle 0.5");
+
+        Genome negativeGenome = makeDisconnectedGenome();
+        negativeGenome.addConnection(ConnectionGene{9, 101, -1.0f, true, 0});
+        AIController negativeController(ai::neat::buildPhenotype(negativeGenome));
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput negativeInput = negativeController.update(car);
+        assert(negativeController.getRawThrottleOutput() < 0.0f && "negative Bias->throttle weight must yield negative raw throttle");
+        assert(negativeInput.throttle < 0.5f - kEps && "negative raw throttle must map below 0.5");
+
+        Genome positiveGenome = makeDisconnectedGenome();
+        positiveGenome.addConnection(ConnectionGene{9, 101, 1.0f, true, 0});
+        AIController positiveController(ai::neat::buildPhenotype(positiveGenome));
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput positiveInput = positiveController.update(car);
+        assert(positiveController.getRawThrottleOutput() > 0.0f && "positive Bias->throttle weight must yield positive raw throttle");
+        assert(positiveInput.throttle > 0.5f + kEps && "positive raw throttle must map above 0.5");
+    }
+
+    // 7 & 8: mapped steering always stays within [-1, 1] and mapped throttle
+    // always stays within [0, 1], even when driven by saturating weights and
+    // an actively steering/accelerating car (varied Observation values).
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{0, 100, 10.0f, true, 0});
+        genome.addConnection(ConnectionGene{9, 101, 10.0f, true, 1});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput driveInput;
+        driveInput.throttle = 1.0f;
+        driveInput.steering = 1.0f;
+        for (int i = 0; i < 30 && car.isAlive(); ++i)
+        {
+            car.update(driveInput, kSimulationDt);
+            const simulation::CarInput aiInput = controller.update(car);
+            assert(aiInput.steering >= -1.0f && aiInput.steering <= 1.0f && "mapped steering must stay within [-1, 1]");
+            assert(aiInput.throttle >= 0.0f && aiInput.throttle <= 1.0f && "mapped throttle must stay within [0, 1]");
+        }
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 9: the Observation the controller evaluates against is actually built
+    // from the provided Car -- a network wired straight from sensor 2
+    // (center, ID 2) to steering must react to that specific Car's own
+    // center-sensor reading.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{2, 100, 1.0f, true, 0});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        controller.update(car);
+
+        const float expectedCenterSensor = car.getSensors()[2].normalizedDistance;
+        assert(std::fabs(controller.getLastObservation().values[2] - expectedCenterSensor) < kEps &&
+               "AIController's Observation must be built from the provided Car's own sensor readings");
+    }
+
+    // 10: repeated calls with unchanged Car state are deterministic.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{0, 100, 0.7f, true, 0});
+        genome.addConnection(ConnectionGene{9, 101, -0.3f, true, 1});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+
+        const simulation::CarInput first = controller.update(car);
+        const simulation::CarInput second = controller.update(car);
+        assert(first.steering == second.steering && first.throttle == second.throttle &&
+               "repeated updates against an unchanged Car must produce identical CarInput");
+    }
+
+    // 11: the controller does not mutate the Car it reads from.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const Vector2 positionBefore = car.getPosition();
+        const Vector2 velocityBefore = car.getVelocity();
+        const float headingBefore = car.getHeading();
+
+        controller.update(car);
+
+        assert(car.getPosition().x == positionBefore.x && car.getPosition().y == positionBefore.y &&
+               "AIController::update must not move the Car");
+        assert(car.getVelocity().x == velocityBefore.x && car.getVelocity().y == velocityBefore.y &&
+               "AIController::update must not change the Car's velocity");
+        assert(car.getHeading() == headingBefore && "AIController::update must not change the Car's heading");
+    }
+
+    // 13: a disabled Genome connection remains behaviorally inactive after
+    // phenotype construction -- disabling the same steering connection used
+    // in test 2 must leave steering at its neutral 0.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{0, 100, 1.0f, false, 0});
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput input = controller.update(car);
+        assert(input.steering == 0.0f && "a disabled connection must not affect evaluation after phenotype construction");
+    }
+
+    // Dead car: the controller must not keep evaluating the network, and
+    // must apply neutral CarInput instead.
+    {
+        Genome genome = makeDisconnectedGenome();
+        genome.addConnection(ConnectionGene{9, 101, 1.0f, true, 0}); // would otherwise raise throttle above 0.5
+        AIController controller(ai::neat::buildPhenotype(genome));
+
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput driveOffTrack;
+        driveOffTrack.throttle = 1.0f;
+        driveOffTrack.steering = 0.0f;
+        for (int i = 0; i < 300 && car.isAlive(); ++i)
+        {
+            car.update(driveOffTrack, kSimulationDt);
+        }
+        assert(!car.isAlive() && "driving straight for 5s must leave the road band and kill the car");
+
+        const simulation::CarInput deadInput = controller.update(car);
+        assert(deadInput.steering == 0.0f && deadInput.throttle == 0.0f &&
+               "a dead car must receive neutral CarInput from AIController, not a network-derived one");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    TraceLog(LOG_INFO, "AI controller verification: all deterministic checks passed");
+}
+
 simulation::CarInput readInput()
 {
     simulation::CarInput input;
@@ -1204,7 +1486,8 @@ void drawCar(const simulation::Car& car)
     }
 }
 
-void drawPanel(const simulation::Car& car, const simulation::CarInput& input)
+void drawPanel(const simulation::Car& car, const simulation::CarInput& input, ControlMode mode,
+               const ai::AIController& controller)
 {
     DrawRectangle(kSimWidth, 0, kPanelWidth, kScreenHeight, Color{30, 30, 30, 255});
 
@@ -1212,10 +1495,15 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input)
     int y = 20;
     const int lineHeight = 22;
 
-    DrawText("STAGE 3 - SENSORS", x, y, 20, RAYWHITE);
-    y += lineHeight * 2;
+    DrawText("STAGE 7 - AI CONTROLLER", x, y, 20, RAYWHITE);
+    y += lineHeight;
 
     char line[128];
+
+    const bool aiMode = (mode == ControlMode::AI);
+    std::snprintf(line, sizeof(line), "CONTROL MODE: %s", aiMode ? "AI" : "MANUAL");
+    DrawText(line, x, y, 18, aiMode ? SKYBLUE : RAYWHITE);
+    y += lineHeight * 2;
 
     std::snprintf(line, sizeof(line), "Speed: %.1f px/s", static_cast<double>(car.getSpeed()));
     DrawText(line, x, y, 18, RAYWHITE);
@@ -1240,6 +1528,28 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input)
     std::snprintf(line, sizeof(line), "Steering: %.2f", static_cast<double>(input.steering));
     DrawText(line, x, y, 18, RAYWHITE);
     y += lineHeight * 2;
+
+    if (aiMode)
+    {
+        DrawText("AI outputs:", x, y, 18, SKYBLUE);
+        y += lineHeight;
+
+        std::snprintf(line, sizeof(line), "Raw steering:    %+.3f", static_cast<double>(controller.getRawSteeringOutput()));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+
+        std::snprintf(line, sizeof(line), "Raw throttle:    %+.3f", static_cast<double>(controller.getRawThrottleOutput()));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+
+        std::snprintf(line, sizeof(line), "Mapped steering: %+.3f", static_cast<double>(input.steering));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+
+        std::snprintf(line, sizeof(line), "Mapped throttle: %+.3f", static_cast<double>(input.throttle));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight * 2;
+    }
 
     DrawText("Sensor values (normalized / raw px):", x, y, 18, RAYWHITE);
     y += lineHeight;
@@ -1268,6 +1578,8 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input)
     y += lineHeight;
     DrawText("D / Right - steer right", x, y, 16, LIGHTGRAY);
     y += lineHeight;
+    DrawText("TAB       - toggle manual/AI", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
     DrawText("R         - reset", x, y, 16, LIGHTGRAY);
 }
 
@@ -1288,20 +1600,38 @@ int main()
     verifyNeatGenes();
     verifyGenome();
     verifyPhenotypeBuilder();
+    verifyAIController(track);
 
     const simulation::TrackDefinition& def = track.getDefinition();
 
     simulation::Car car(makeCarParams(), track);
     car.reset(kSpawnPosition, kSpawnHeading);
 
+    // One demonstration AIController, built once from one hand-built,
+    // deterministic Genome. Toggling control modes never rebuilds or resets
+    // this network -- see createDemonstrationGenome() for its fixed weights.
+    ai::AIController aiController(ai::neat::buildPhenotype(createDemonstrationGenome()));
+    ControlMode controlMode = ControlMode::Manual;
+
     while (!WindowShouldClose())
     {
+        if (IsKeyPressed(KEY_TAB))
+        {
+            controlMode = (controlMode == ControlMode::Manual) ? ControlMode::AI : ControlMode::Manual;
+        }
+
         if (IsKeyPressed(KEY_R))
         {
             car.reset(kSpawnPosition, kSpawnHeading);
         }
 
-        const simulation::CarInput input = readInput();
+        // Manual mode reads the keyboard directly; AI mode obtains CarInput
+        // only from AIController, which itself reads the Car's own
+        // already-refreshed sensors/state -- neither mode duplicates
+        // sensor casting, and keyboard input never reaches the car while in
+        // AI mode.
+        const simulation::CarInput input =
+            (controlMode == ControlMode::Manual) ? readInput() : aiController.update(car);
         car.update(input, kSimulationDt);
 
         BeginDrawing();
@@ -1315,7 +1645,7 @@ int main()
                     def.innerRadiusX, def.innerRadiusY, BLACK);
 
         drawCar(car);
-        drawPanel(car, input);
+        drawPanel(car, input, controlMode, aiController);
 
         EndDrawing();
     }
