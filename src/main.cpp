@@ -13,6 +13,7 @@
 #include "ai/neat/ConnectionGene.h"
 #include "ai/neat/Genome.h"
 #include "ai/neat/NodeGene.h"
+#include "ai/neat/PhenotypeBuilder.h"
 #include "simulation/Car.h"
 #include "simulation/Track.h"
 
@@ -860,6 +861,302 @@ void verifyGenome()
     TraceLog(LOG_INFO, "Genome verification: all deterministic checks passed");
 }
 
+namespace phenotype_verify
+{
+
+// Builds a Genome with exactly ai::NeuralNetwork::kInputCount Input nodes
+// (IDs 0..8, one per Observation slot), one Bias node (ID 9), and
+// ai::NeuralNetwork::kOutputCount Output nodes (ID 100 = steering, the
+// lower ID; ID 101 = throttle, the higher ID). Nodes are deliberately added
+// out of ID order -- Bias first, then the higher-ID Output before the
+// lower-ID one, then Inputs in descending ID order -- so any test built on
+// top of this proves buildPhenotype()'s slot ordering depends on node ID,
+// never on Genome insertion order.
+ai::neat::Genome makeBaseGenome()
+{
+    ai::neat::Genome genome;
+    genome.addNode(ai::neat::NodeGene{9, ai::neat::NodeType::Bias});
+    genome.addNode(ai::neat::NodeGene{101, ai::neat::NodeType::Output});
+    genome.addNode(ai::neat::NodeGene{100, ai::neat::NodeType::Output});
+    for (int i = ai::NeuralNetwork::kInputCount - 1; i >= 0; --i)
+    {
+        genome.addNode(ai::neat::NodeGene{i, ai::neat::NodeType::Input});
+    }
+    return genome;
+}
+
+ai::Observation makeObservation(int index, float value)
+{
+    ai::Observation obs;
+    obs.values.fill(0.0f);
+    if (index >= 0)
+    {
+        obs.values[index] = value;
+    }
+    return obs;
+}
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace phenotype_verify
+
+// One-shot, deterministic sanity check of ai::neat::buildPhenotype, covering
+// Genome -> NeuralNetwork conversion end to end. Independent of
+// Car/Track/keyboard/render timing. Runs once at startup. No mutation,
+// crossover, or evolutionary behavior is exercised here -- only phenotype
+// construction.
+void verifyPhenotypeBuilder()
+{
+    using namespace phenotype_verify;
+    using ai::neat::buildPhenotype;
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+    constexpr float kEps = 1e-4f;
+
+    // 1 & 3: a minimal valid Genome (9 Input + 1 Bias + 2 Output NodeGenes)
+    // builds successfully. This is only possible if Input/Bias/Output
+    // NodeGene types were mapped to the matching runtime NodeType -- a
+    // mismapping would make NeuralNetwork's own Input/Bias/Output count
+    // checks fail.
+    {
+        ai::NeuralNetwork net = buildPhenotype(makeBaseGenome());
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(out[0] == 0.0f && out[1] == 0.0f && "a fully disconnected phenotype must evaluate to exactly 0");
+    }
+
+    // 2 & 8: node IDs (and the source/target IDs connections reference) are
+    // preserved exactly, including when they are large and non-contiguous.
+    // If the builder silently renumbered nodes without updating connection
+    // endpoints to match, this construction would fail with unknown-node
+    // errors; if it evaluated the wrong node, the arithmetic below would not
+    // match.
+    {
+        Genome genome;
+        for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+        {
+            genome.addNode(NodeGene{1000 + i, NodeType::Input});
+        }
+        genome.addNode(NodeGene{2000, NodeType::Bias});
+        genome.addNode(NodeGene{3000, NodeType::Output});
+        genome.addNode(NodeGene{3001, NodeType::Output});
+        genome.addConnection(ConnectionGene{1000, 3000, 0.5f, true, 0});
+
+        ai::NeuralNetwork net = buildPhenotype(genome);
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(0.5f)) < kEps &&
+               "non-contiguous node IDs must be preserved through phenotype construction");
+    }
+
+    // 4: input slot ordering follows ascending node ID, independent of
+    // Genome insertion order (makeBaseGenome adds Inputs in descending ID
+    // order).
+    {
+        Genome genome = makeBaseGenome();
+        genome.addConnection(ConnectionGene{0, 100, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount - 1, 101, 1.0f, true, 1});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto outLow = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(outLow[0] - std::tanh(1.0f)) < kEps &&
+               "Observation slot 0 must drive the lowest-ID Input node");
+        assert(outLow[1] == 0.0f && "Observation slot 0 must not affect the highest-ID Input node");
+
+        const auto outHigh = net.evaluate(makeObservation(ai::NeuralNetwork::kInputCount - 1, 1.0f));
+        assert(outHigh[0] == 0.0f && "the last Observation slot must not affect the lowest-ID Input node");
+        assert(std::fabs(outHigh[1] - std::tanh(1.0f)) < kEps &&
+               "the last Observation slot must drive the highest-ID Input node");
+    }
+
+    // 5: output slot ordering follows ascending node ID, independent of
+    // Genome insertion order (makeBaseGenome adds Output 101 before 100).
+    {
+        Genome genome = makeBaseGenome();
+        genome.addConnection(ConnectionGene{0, 100, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{0, 101, 2.0f, true, 1});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(1.0f)) < kEps && "output slot 0 must be the lower-ID Output node (100)");
+        assert(std::fabs(out[1] - std::tanh(2.0f)) < kEps && "output slot 1 must be the higher-ID Output node (101)");
+    }
+
+    // 6: Bias maps correctly (always contributes 1.0) and stays internal --
+    // it is not one of the kInputCount external Observation slots.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addConnection(ConnectionGene{9, 100, 0.7f, true, 0});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(std::fabs(out[0] - std::tanh(0.7f)) < kEps &&
+               "Bias->Output must equal tanh(1.0 * weight) even with an all-zero Observation");
+    }
+
+    // 7 & 14: Hidden nodes map correctly; Input -> Hidden -> Output
+    // evaluates to the mathematically expected result.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 50, 0.5f, true, 0});
+        genome.addConnection(ConnectionGene{50, 100, 2.0f, true, 1});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        const float hidden = std::tanh(1.0f * 0.5f);
+        const float expected = std::tanh(hidden * 2.0f);
+        assert(std::fabs(out[0] - expected) < kEps && "Input->Hidden->Output result mismatch");
+    }
+
+    // 9, 10 & 11: weights and the enabled flag are preserved exactly, and a
+    // disabled connection contributes nothing to evaluation.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{60, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 100, 0.37f, true, 0});   // enabled, contributes
+        genome.addConnection(ConnectionGene{0, 60, -1.25f, false, 1}); // disabled, must not contribute
+        genome.addConnection(ConnectionGene{60, 100, 4.0f, true, 2});  // would matter if 0->60 were active
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(0.37f)) < kEps &&
+               "a disabled connection must not contribute to evaluation, and enabled weight must be exact");
+    }
+
+    // 12: direct Input -> Output phenotype evaluates correctly.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+        const auto out = net.evaluate(makeObservation(0, 1.0f));
+        assert(std::fabs(out[0] - std::tanh(0.5f)) < kEps && "Input->Output must equal tanh(input * weight)");
+    }
+
+    // 13: Bias -> Output phenotype evaluates correctly (duplicate of #6's
+    // arithmetic, kept as its own case per the required verification list).
+    {
+        Genome genome = makeBaseGenome();
+        genome.addConnection(ConnectionGene{9, 100, 1.1f, true, 0});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(std::fabs(out[0] - std::tanh(1.1f)) < kEps && "Bias->Output must equal tanh(1.0 * weight)");
+    }
+
+    // 15: a deeper feed-forward DAG (Input -> HiddenA -> HiddenB -> Output)
+    // evaluates correctly.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addNode(NodeGene{51, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 50, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{50, 51, 1.0f, true, 1});
+        genome.addConnection(ConnectionGene{51, 100, 1.0f, true, 2});
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto out = net.evaluate(makeObservation(0, 0.5f));
+        const float a = std::tanh(0.5f);
+        const float b = std::tanh(a);
+        const float expected = std::tanh(b);
+        assert(std::fabs(out[0] - expected) < kEps && "deep Input->HiddenA->HiddenB->Output result mismatch");
+    }
+
+    // 16: a skip connection alongside a hidden path evaluates correctly.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 50, 1.0f, true, 0});   // input -> hidden
+        genome.addConnection(ConnectionGene{50, 100, 1.0f, true, 1}); // hidden -> output
+        genome.addConnection(ConnectionGene{0, 100, 1.0f, true, 2});  // input -> output, skipping hidden
+        ai::NeuralNetwork net = buildPhenotype(genome);
+
+        const auto out = net.evaluate(makeObservation(0, 0.5f));
+        const float hidden = std::tanh(0.5f);
+        const float expected = std::tanh(hidden * 1.0f + 0.5f * 1.0f);
+        assert(std::fabs(out[0] - expected) < kEps && "skip connection combined with hidden path result mismatch");
+    }
+
+    // 17: an invalid Genome (duplicate node IDs, only reachable via the raw
+    // bulk constructor) fails because buildPhenotype calls genome.validate()
+    // before ever touching NeuralNetwork.
+    {
+        std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{0, NodeType::Hidden}};
+        Genome invalidGenome(nodes, {});
+        assert(throwsInvalidArgument([&]() { buildPhenotype(invalidGenome); }) &&
+               "a Genome that fails validate() must be rejected by buildPhenotype");
+    }
+
+    // 18: a Genome whose enabled connections form a cycle is structurally
+    // valid at the Genome level (validate() does not check for cycles) but
+    // must fail phenotype construction because NeuralNetwork rejects it.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addNode(NodeGene{51, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{50, 51, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{51, 50, 1.0f, true, 1});
+        genome.validate(); // must not throw -- Genome has no cycle check
+        assert(throwsInvalidArgument([&]() { buildPhenotype(genome); }) &&
+               "a cyclic enabled Genome must be rejected by the feed-forward-only NeuralNetwork");
+    }
+
+    // 19: buildPhenotype does not alter the source Genome.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 50, 0.3f, true, 0});
+        genome.addConnection(ConnectionGene{50, 100, 0.4f, true, 1});
+
+        const std::vector<NodeGene> nodesBefore = genome.nodes();
+        const std::size_t connectionCountBefore = genome.connections().size();
+
+        ai::NeuralNetwork net = buildPhenotype(genome);
+        (void)net;
+
+        assert(genome.nodes().size() == nodesBefore.size() && "buildPhenotype must not add or remove genome nodes");
+        for (std::size_t i = 0; i < nodesBefore.size(); ++i)
+        {
+            assert(genome.nodes()[i] == nodesBefore[i] && "buildPhenotype must not modify existing genome nodes");
+        }
+        assert(genome.connections().size() == connectionCountBefore &&
+               "buildPhenotype must not add or remove genome connections");
+        assert(genome.hasConnection(0, 50) && genome.hasConnection(50, 100) &&
+               "buildPhenotype must leave genome connections intact");
+    }
+
+    // 20: phenotype evaluation is deterministic across repeated builds from
+    // the same Genome.
+    {
+        Genome genome = makeBaseGenome();
+        genome.addNode(NodeGene{50, NodeType::Hidden});
+        genome.addConnection(ConnectionGene{0, 50, 0.6f, true, 0});
+        genome.addConnection(ConnectionGene{50, 100, -0.9f, true, 1});
+        genome.addConnection(ConnectionGene{9, 101, 0.2f, true, 2});
+
+        ai::NeuralNetwork netA = buildPhenotype(genome);
+        ai::NeuralNetwork netB = buildPhenotype(genome);
+
+        const auto obs = makeObservation(0, 0.8f);
+        const auto outA = netA.evaluate(obs);
+        const auto outB = netB.evaluate(obs);
+        assert(outA[0] == outB[0] && outA[1] == outB[1] &&
+               "repeated builds from the same Genome must evaluate identically");
+    }
+
+    TraceLog(LOG_INFO, "Phenotype builder verification: all deterministic checks passed");
+}
+
 simulation::CarInput readInput()
 {
     simulation::CarInput input;
@@ -990,6 +1287,7 @@ int main()
     verifyNeuralNetwork();
     verifyNeatGenes();
     verifyGenome();
+    verifyPhenotypeBuilder();
 
     const simulation::TrackDefinition& def = track.getDefinition();
 
