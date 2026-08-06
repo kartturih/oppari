@@ -1280,6 +1280,198 @@ bool throwsInvalidArgument(Callable&& callable)
     return false;
 }
 
+// Genome with only two Output nodes: Output is never a valid add-connection
+// source, so no source candidate can ever exist.
+ai::neat::Genome makeOnlyOutputsGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Output});
+    genome.addNode(NodeGene{1, NodeType::Output});
+    return genome;
+}
+
+// Genome with only two Input nodes: Input is never a valid add-connection
+// target, so no target candidate can ever exist.
+ai::neat::Genome makeOnlyInputsGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Input});
+    return genome;
+}
+
+// Genome with only two Bias nodes: like makeOnlyInputsGenome(), Bias is
+// never a valid target, so no target candidate can ever exist.
+ai::neat::Genome makeOnlyBiasGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Bias});
+    genome.addNode(NodeGene{1, NodeType::Bias});
+    return genome;
+}
+
+// The only structurally possible pair is Input(0) -> Output(1): proves
+// Input can be a source and Output can be a target.
+ai::neat::Genome makeInputToOutputGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Output});
+    return genome;
+}
+
+// The only structurally possible pair is Bias(0) -> Output(1): proves Bias
+// can be a source.
+ai::neat::Genome makeBiasToOutputGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Bias});
+    genome.addNode(NodeGene{1, NodeType::Output});
+    return genome;
+}
+
+// The only structurally possible pair is Hidden(0) -> Hidden(1): proves
+// Hidden can be both a source and a target.
+ai::neat::Genome makeHiddenToHiddenGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Hidden});
+    genome.addNode(NodeGene{1, NodeType::Hidden});
+    return genome;
+}
+
+// A single Hidden node: the only "candidate" pair is a self-connection,
+// which must never be added.
+ai::neat::Genome makeSingleHiddenGenome()
+{
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Hidden});
+    return genome;
+}
+
+// Genome with exactly one structurally possible pair, already connected:
+// proves a duplicate directed connection (enabled or disabled) is never
+// re-added.
+ai::neat::Genome makeAlreadyConnectedGenome(bool enabled)
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Output});
+    genome.addConnection(ConnectionGene{0, 1, 0.1f, enabled, 0});
+    return genome;
+}
+
+// Two Hidden nodes with a deliberately "descending" ID edge -- 10 -> 3, from
+// the numerically larger ID to the smaller one -- so a check that assumed
+// ascending IDs meant "topologically later" would get this wrong. With only
+// two nodes, exactly two directed pairs are structurally possible: the
+// existing 10 -> 3, and its reverse, 3 -> 10.
+//
+// When existingEdgeEnabled is true, 10 -> 3 blocks 3 -> 10 twice over: as an
+// existing (source, target) pair in the reverse direction it is unrelated
+// to duplication, but 3 -> 10 would close a direct 2-cycle (10 already has
+// an enabled path to 3), so it must be rejected -- leaving no valid pair at
+// all, since 10 -> 3 itself is already a duplicate.
+//
+// When existingEdgeEnabled is false, 10 -> 3 no longer contributes to the
+// *enabled* graph, so 3 -> 10 is no longer a cycle and must be accepted --
+// proving disabled edges do not participate in cycle detection.
+ai::neat::Genome makeCycleGenome(bool existingEdgeEnabled)
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{10, NodeType::Hidden});
+    genome.addNode(NodeGene{3, NodeType::Hidden});
+    genome.addConnection(ConnectionGene{10, 3, 0.1f, existingEdgeEnabled, 0});
+    return genome;
+}
+
+// Nodes 0:Input, 1:Bias, 2:Hidden, 3:Output with every valid pair already
+// connected except Bias(1) -> Output(3), out of the 6 (source, target)
+// combinations reachable by candidate selection (3 sources x 2 targets).
+// Used to exercise the deterministic exhaustive fallback: with very few
+// random attempts, it is likely that none of them land on the single
+// remaining valid pair, so the fallback scan has to find it.
+ai::neat::Genome makeSparseValidPairGenome()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Bias});
+    genome.addNode(NodeGene{2, NodeType::Hidden});
+    genome.addNode(NodeGene{3, NodeType::Output});
+    genome.addConnection(ConnectionGene{0, 2, 0.1f, true, 0});
+    genome.addConnection(ConnectionGene{0, 3, 0.1f, true, 1});
+    genome.addConnection(ConnectionGene{1, 2, 0.1f, true, 2});
+    genome.addConnection(ConnectionGene{2, 3, 0.1f, true, 3});
+    return genome;
+}
+
+// Same node set as makeSparseValidPairGenome(), but with the fifth (and
+// last remaining) valid pair, Bias(1) -> Output(3), also already connected
+// -- every valid feed-forward pair now exists, so the genome is fully
+// saturated.
+ai::neat::Genome makeSaturatedGenome()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Bias});
+    genome.addNode(NodeGene{2, NodeType::Hidden});
+    genome.addNode(NodeGene{3, NodeType::Output});
+    genome.addConnection(ConnectionGene{0, 2, 0.1f, true, 0});
+    genome.addConnection(ConnectionGene{0, 3, 0.1f, true, 1});
+    genome.addConnection(ConnectionGene{1, 2, 0.1f, true, 2});
+    genome.addConnection(ConnectionGene{1, 3, 0.1f, true, 3});
+    genome.addConnection(ConnectionGene{2, 3, 0.1f, true, 4});
+    return genome;
+}
+
 } // namespace genome_mutator_verify
 
 // One-shot, deterministic sanity check of ai::neat::GenomeMutator, covering
@@ -1936,6 +2128,478 @@ void verifyInnovationTracker()
     // main() continuing to call every earlier verify*() function unchanged.
 
     TraceLog(LOG_INFO, "Innovation tracker verification: all deterministic checks passed");
+}
+
+// One-shot, deterministic sanity check of
+// ai::neat::GenomeMutator::mutateAddConnection() (Stage 9C), independent of
+// Car/Track/AI/keyboard/render timing. Runs once at startup. No add-node
+// mutation, crossover, species, or population logic exists to verify here
+// -- only add-connection structural mutation, per Stage 9C's scope. This
+// mutation is never invoked from the normal driving loop; it is exercised
+// only by this verification.
+void verifyAddConnectionMutation()
+{
+    using namespace genome_mutator_verify;
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::GenomeMutator;
+    using ai::neat::InnovationNumber;
+    using ai::neat::InnovationTracker;
+    using ai::neat::MutationConfig;
+    using ai::neat::NodeGene;
+
+    // 1: probability 0 returns false and changes nothing.
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<NodeGene> nodesBefore = genome.nodes();
+        const std::vector<ConnectionGene> connectionsBefore = genome.connections();
+        InnovationTracker tracker(200, 300);
+        MutationConfig config;
+        config.addConnectionProbability = 0.0f;
+        GenomeMutator mutator(1u);
+
+        const bool added = mutator.mutateAddConnection(genome, tracker, config);
+        assert(!added && "probability 0 must never add a connection");
+        assert(genome.nodes().size() == nodesBefore.size() && genome.connections().size() == connectionsBefore.size() &&
+               "probability 0 must change nothing structurally");
+        for (std::size_t i = 0; i < connectionsBefore.size(); ++i)
+        {
+            assert(genome.connections()[i].getWeight() == connectionsBefore[i].getWeight() &&
+                   "probability 0 must not touch any existing connection");
+        }
+        assert(tracker.getNextAvailableNodeId() == 200 && tracker.getNextAvailableInnovation() == 300 &&
+               "probability 0 must leave the tracker unchanged");
+    }
+
+    // 2 & 6-13: probability 1 attempts (and, given an available valid
+    // pair, succeeds at) adding exactly one new, well-formed connection,
+    // without touching anything that already existed.
+    {
+        Genome genome = makeTestGenome();
+        const std::size_t nodeCountBefore = genome.nodes().size();
+        const std::vector<NodeGene> nodesBefore = genome.nodes();
+        const std::vector<ConnectionGene> connectionsBefore = genome.connections();
+
+        InnovationTracker tracker(200, 300);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(42u);
+
+        const bool added = mutator.mutateAddConnection(genome, tracker, config);
+        assert(added && "probability 1 with an available valid pair must add a connection"); // 2 & 6 (part 1)
+
+        assert(genome.nodes().size() == nodeCountBefore && "node count must remain unchanged"); // 7
+        for (std::size_t i = 0; i < nodesBefore.size(); ++i)
+        {
+            assert(genome.nodes()[i] == nodesBefore[i] && "existing node genes must remain unchanged"); // 8 (nodes)
+        }
+        for (std::size_t i = 0; i < connectionsBefore.size(); ++i)
+        {
+            const ConnectionGene& before = connectionsBefore[i];
+            const ConnectionGene& after = genome.connections()[i];
+            assert(after.getSourceId() == before.getSourceId() && after.getTargetId() == before.getTargetId() &&
+                   after.getWeight() == before.getWeight() && after.isEnabled() == before.isEnabled() &&
+                   after.getInnovationNumber() == before.getInnovationNumber() &&
+                   "existing connection genes must remain unchanged"); // 8 (connections)
+        }
+        assert(genome.connections().size() == connectionsBefore.size() + 1 &&
+               "connection count must increase by exactly one"); // 6 (part 2)
+
+        const ConnectionGene& newConnection = genome.connections().back();
+        assert(genome.hasNode(newConnection.getSourceId()) && genome.hasNode(newConnection.getTargetId()) &&
+               "new connection endpoints must reference existing nodes"); // 9
+        assert(newConnection.isEnabled() && "a newly added connection must be enabled"); // 10
+        assert(newConnection.getWeight() >= config.newConnectionWeightMin &&
+               newConnection.getWeight() <= config.newConnectionWeightMax &&
+               "new weight must lie within the configured bounds"); // 11
+
+        // 12: innovation comes from InnovationTracker -- re-requesting the
+        // same pair from the same tracker must reuse (not change) it.
+        const InnovationNumber beforeReuseCheck = tracker.getNextAvailableInnovation();
+        const InnovationNumber sameInnovation =
+            tracker.getConnectionInnovation(newConnection.getSourceId(), newConnection.getTargetId());
+        assert(sameInnovation == newConnection.getInnovationNumber() && tracker.getNextAvailableInnovation() == beforeReuseCheck &&
+               "the new connection's innovation number must come from, and already be recorded in, InnovationTracker");
+
+        // 13: tracker advances only after successful mutation -- node
+        // counter untouched (add-connection never allocates a node ID),
+        // innovation counter advanced by exactly one.
+        assert(tracker.getNextAvailableNodeId() == 200 && "add-connection mutation must never allocate a node ID");
+        assert(tracker.getNextAvailableInnovation() == 301 &&
+               "a successful mutation must advance the innovation counter by exactly one");
+    }
+
+    // 14: a failed mutation (selected, but no valid candidate exists) does
+    // not advance the tracker.
+    {
+        Genome genome = makeAlreadyConnectedGenome(/*enabled=*/true);
+        InnovationTracker tracker(50, 60);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+
+        const bool added = mutator.mutateAddConnection(genome, tracker, config);
+        assert(!added && "a genome whose only structurally possible pair already exists must fail to mutate");
+        assert(tracker.getNextAvailableNodeId() == 50 && tracker.getNextAvailableInnovation() == 60 &&
+               "a failed mutation must leave the tracker completely unchanged");
+    }
+
+    // 3: empty Genome returns false.
+    {
+        Genome empty;
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(empty, tracker, config) && "an empty genome must return false");
+        assert(tracker.getNextAvailableNodeId() == 0 && tracker.getNextAvailableInnovation() == 0 &&
+               "an empty genome must leave the tracker unchanged");
+    }
+
+    // 4 & 18: a genome with no valid source node type (only Output nodes)
+    // returns false -- Output can never be a source.
+    {
+        Genome genome = makeOnlyOutputsGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "a genome with only Output nodes must have no valid source and must return false");
+    }
+
+    // 5 & 19: a genome with no valid target node type (only Input nodes)
+    // returns false -- Input can never be a target.
+    {
+        Genome genome = makeOnlyInputsGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "a genome with only Input nodes must have no valid target and must return false");
+    }
+
+    // 20: Bias can never be a target either.
+    {
+        Genome genome = makeOnlyBiasGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "a genome with only Bias nodes must have no valid target and must return false");
+    }
+
+    // 21 & 25: Input can be a source, Output can be a target -- the only
+    // structurally possible pair must be found and added.
+    {
+        Genome genome = makeInputToOutputGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(7u);
+        assert(mutator.mutateAddConnection(genome, tracker, config) && "Input -> Output must be found as a valid candidate");
+        assert(genome.connections().size() == 1 && genome.connections()[0].getSourceId() == 0 &&
+               genome.connections()[0].getTargetId() == 1 && "the added connection must be exactly Input(0) -> Output(1)");
+    }
+
+    // 22: Bias can be a source.
+    {
+        Genome genome = makeBiasToOutputGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(7u);
+        assert(mutator.mutateAddConnection(genome, tracker, config) && "Bias -> Output must be found as a valid candidate");
+        assert(genome.connections().size() == 1 && genome.connections()[0].getSourceId() == 0 &&
+               "Bias must be usable as a source");
+    }
+
+    // 23 & 24: Hidden can be both a source and a target.
+    {
+        Genome genome = makeHiddenToHiddenGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(7u);
+        assert(mutator.mutateAddConnection(genome, tracker, config) && "Hidden -> Hidden must be found as a valid candidate");
+        assert(genome.connections().size() == 1 && genome.connections()[0].getSourceId() == 0 &&
+               genome.connections()[0].getTargetId() == 1 && "Hidden must be usable as both source and target");
+    }
+
+    // 17: self-connection is never added, even when it is the only
+    // structurally "available" pair.
+    {
+        Genome genome = makeSingleHiddenGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) && "a single node can never validly connect to itself");
+        assert(genome.connections().empty() && "no self-connection may ever be added");
+    }
+
+    // 15: duplicate directed connection is never added.
+    {
+        Genome genome = makeAlreadyConnectedGenome(/*enabled=*/true);
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "the only structurally possible pair already exists, so nothing may be added");
+        assert(genome.connections().size() == 1 && "an already-existing connection must never be duplicated");
+    }
+
+    // 16: a disabled duplicate still blocks addition.
+    {
+        Genome genome = makeAlreadyConnectedGenome(/*enabled=*/false);
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "a disabled connection between the only possible pair must still block a duplicate");
+        assert(genome.connections().size() == 1 && !genome.connections()[0].isEnabled() &&
+               "the existing disabled connection must not be re-enabled or duplicated");
+    }
+
+    // 26 & 28: a connection that would create an enabled cycle is
+    // rejected, even with a deliberately "descending" node ID edge (10 ->
+    // 3): the only other structurally possible pair, 3 -> 10, would close
+    // a direct 2-cycle and must be rejected, leaving no valid pair at all.
+    {
+        Genome genome = makeCycleGenome(/*existingEdgeEnabled=*/true);
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "3 -> 10 must be rejected as a cycle (10 already has an enabled path to 3), regardless of node ID order");
+        assert(genome.connections().size() == 1 && "a rejected cycle candidate must not be added");
+    }
+
+    // 27: disabled edges do not participate in cycle detection -- with the
+    // existing 10 -> 3 edge disabled, 3 -> 10 is no longer a cycle and must
+    // be accepted.
+    {
+        Genome genome = makeCycleGenome(/*existingEdgeEnabled=*/false);
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        const bool added = mutator.mutateAddConnection(genome, tracker, config);
+        assert(added && "with 10 -> 3 disabled, it is not an enabled path, so 3 -> 10 is not a cycle");
+        assert(genome.connections().size() == 2 && genome.connections().back().getSourceId() == 3 &&
+               genome.connections().back().getTargetId() == 10 &&
+               "the new connection must be exactly 3 -> 10, proving disabled edges do not create false cycle detection");
+    }
+
+    // 29: the deterministic exhaustive fallback finds the sole valid pair
+    // even when limited random attempts are likely to miss it. Looping
+    // over many seeds with maxAttempts = 1 makes it overwhelmingly likely
+    // that at least some of them exhaust their one random attempt without
+    // landing on the only valid pair (Bias(1) -> Output(3), 1 of 6
+    // reachable combinations), relying on the fallback scan to still find
+    // it -- every seed must still succeed and land on that same pair.
+    {
+        for (std::uint32_t seed = 1; seed <= 20; ++seed)
+        {
+            Genome genome = makeSparseValidPairGenome();
+            InnovationTracker tracker(0, 0);
+            MutationConfig config;
+            config.addConnectionProbability = 1.0f;
+            config.addConnectionMaxAttempts = 1;
+            GenomeMutator mutator(seed);
+
+            const bool added = mutator.mutateAddConnection(genome, tracker, config);
+            assert(added && genome.connections().back().getSourceId() == 1 && genome.connections().back().getTargetId() == 3 &&
+                   "the single valid pair must always be found, whether by the one random attempt or the fallback scan");
+        }
+    }
+
+    // 30: a saturated valid DAG (every valid feed-forward pair already
+    // exists) returns false.
+    {
+        Genome genome = makeSaturatedGenome();
+        InnovationTracker tracker(0, 0);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        assert(!mutator.mutateAddConnection(genome, tracker, config) &&
+               "a genome where every valid pair already exists must return false");
+        assert(genome.connections().size() == 5 && "a saturated genome must not gain a new connection");
+    }
+
+    // 31: identical seed + identical genome + identical tracker state
+    // produces the same added pair, weight, and innovation.
+    {
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+
+        Genome genomeA = makeTestGenome();
+        InnovationTracker trackerA(200, 300);
+        GenomeMutator mutatorA(777u);
+        mutatorA.mutateAddConnection(genomeA, trackerA, config);
+        const ConnectionGene& resultA = genomeA.connections().back();
+
+        Genome genomeB = makeTestGenome();
+        InnovationTracker trackerB(200, 300);
+        GenomeMutator mutatorB(777u);
+        mutatorB.mutateAddConnection(genomeB, trackerB, config);
+        const ConnectionGene& resultB = genomeB.connections().back();
+
+        assert(resultA.getSourceId() == resultB.getSourceId() && resultA.getTargetId() == resultB.getTargetId() &&
+               resultA.getWeight() == resultB.getWeight() && resultA.getInnovationNumber() == resultB.getInnovationNumber() &&
+               "identical seed, genome and tracker state must produce identical results");
+    }
+
+    // 32: different seeds can produce different valid results.
+    {
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+
+        Genome genomeA = makeTestGenome();
+        InnovationTracker trackerA(200, 300);
+        GenomeMutator mutatorA(1u);
+        mutatorA.mutateAddConnection(genomeA, trackerA, config);
+        const ConnectionGene& resultA = genomeA.connections().back();
+
+        Genome genomeB = makeTestGenome();
+        InnovationTracker trackerB(200, 300);
+        GenomeMutator mutatorB(2u);
+        mutatorB.mutateAddConnection(genomeB, trackerB, config);
+        const ConnectionGene& resultB = genomeB.connections().back();
+
+        assert((resultA.getSourceId() != resultB.getSourceId() || resultA.getTargetId() != resultB.getTargetId() ||
+                resultA.getWeight() != resultB.getWeight()) &&
+               "different seeds must be capable of producing different results");
+    }
+
+    // 33: repeated calls advance the mutator's owned RNG state.
+    {
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+
+        Genome genomeA = makeTestGenome();
+        InnovationTracker trackerA(200, 300);
+        Genome genomeB = makeTestGenome();
+        InnovationTracker trackerB(200, 300);
+
+        GenomeMutator mutator(55u);
+        mutator.mutateAddConnection(genomeA, trackerA, config);
+        mutator.mutateAddConnection(genomeB, trackerB, config);
+
+        const ConnectionGene& resultA = genomeA.connections().back();
+        const ConnectionGene& resultB = genomeB.connections().back();
+        assert((resultA.getSourceId() != resultB.getSourceId() || resultA.getTargetId() != resultB.getTargetId() ||
+                resultA.getWeight() != resultB.getWeight()) &&
+               "repeated calls from the same mutator must advance its RNG state, not repeat the same draws");
+    }
+
+    // 34, 35, 36 & 37: invalid configuration is rejected, and never
+    // touches the tracker.
+    {
+        Genome genome = makeTestGenome();
+        InnovationTracker tracker(200, 300);
+        GenomeMutator mutator(1u);
+
+        MutationConfig badProbability;
+        badProbability.addConnectionProbability = 1.5f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, badProbability); }) &&
+               "an addConnectionProbability outside [0,1] must be rejected"); // 34
+
+        MutationConfig invertedRange;
+        invertedRange.newConnectionWeightMin = 1.0f;
+        invertedRange.newConnectionWeightMax = -1.0f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, invertedRange); }) &&
+               "an inverted new-connection weight range must be rejected"); // 35
+
+        MutationConfig infiniteBound;
+        infiniteBound.newConnectionWeightMin = std::numeric_limits<float>::infinity();
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, infiniteBound); }) &&
+               "a non-finite weight bound must be rejected"); // 36
+
+        MutationConfig nanProbability;
+        nanProbability.addConnectionProbability = std::numeric_limits<float>::quiet_NaN();
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, nanProbability); }) &&
+               "a NaN probability must be rejected"); // 36 (continued)
+
+        MutationConfig zeroAttempts;
+        zeroAttempts.addConnectionMaxAttempts = 0;
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, zeroAttempts); }) &&
+               "a zero addConnectionMaxAttempts must be rejected"); // 37
+
+        MutationConfig negativeAttempts;
+        negativeAttempts.addConnectionMaxAttempts = -5;
+        assert(throwsInvalidArgument([&]() { mutator.mutateAddConnection(genome, tracker, negativeAttempts); }) &&
+               "a negative addConnectionMaxAttempts must be rejected"); // 37 (continued)
+
+        assert(tracker.getNextAvailableNodeId() == 200 && tracker.getNextAvailableInnovation() == 300 &&
+               "rejected configuration must never touch the tracker");
+    }
+
+    // 38, 39 & 40: Genome::validate() and buildPhenotype() succeed after
+    // mutation, and the resulting phenotype is deterministic.
+    {
+        Genome genome = makeTestGenome();
+        InnovationTracker tracker(200, 300);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(123u);
+
+        assert(mutator.mutateAddConnection(genome, tracker, config) && "setup for phenotype checks must succeed");
+
+        genome.validate(); // 38: must not throw
+
+        ai::NeuralNetwork phenotype = ai::neat::buildPhenotype(genome);      // 39: must not throw
+        ai::NeuralNetwork phenotypeAgain = ai::neat::buildPhenotype(genome); // 40: rebuilding must match
+
+        ai::Observation obs;
+        obs.values.fill(0.3f);
+        const auto out1 = phenotype.evaluate(obs);
+        const auto out2 = phenotypeAgain.evaluate(obs);
+        assert(out1[0] == out2[0] && out1[1] == out2[1] && "the phenotype built from a mutated genome must be deterministic");
+    }
+
+    // 41: weight mutation behavior from Stage 9A remains unchanged (spot
+    // regression check -- zero probability still changes no weights).
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<ConnectionGene> before = genome.connections();
+        MutationConfig config;
+        config.weightMutationProbability = 0.0f;
+        GenomeMutator mutator(1u);
+        mutator.mutateWeights(genome, config);
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            assert(genome.connections()[i].getWeight() == before[i].getWeight() &&
+                   "Stage 9A's mutateWeights() behavior must remain unchanged: zero probability still changes nothing");
+        }
+    }
+
+    // 42: no add-node behavior occurs -- across a batch of seeds, the
+    // tracker's node-ID counter never advances (13 already checks this
+    // once; re-confirmed here for extra confidence).
+    {
+        for (std::uint32_t seed = 1; seed <= 5; ++seed)
+        {
+            Genome genome = makeTestGenome();
+            InnovationTracker tracker(200, 300);
+            MutationConfig config;
+            config.addConnectionProbability = 1.0f;
+            GenomeMutator mutator(seed);
+            mutator.mutateAddConnection(genome, tracker, config);
+            assert(tracker.getNextAvailableNodeId() == 200 &&
+                   "add-connection mutation must never allocate a node ID (no add-node behavior)");
+        }
+    }
+
+    // 43: all previous verification suites still pass -- enforced by
+    // main() continuing to call every earlier verify*() function unchanged.
+
+    TraceLog(LOG_INFO, "Add-connection mutation verification: all deterministic checks passed");
 }
 
 // One-shot, deterministic sanity check of ai::AIController, independent of
@@ -3027,6 +3691,7 @@ int main()
     verifyPhenotypeBuilder();
     verifyGenomeMutator();
     verifyInnovationTracker();
+    verifyAddConnectionMutation();
     verifyAIController(track);
     verifyTrackProgress(track);
     verifyFitnessEvaluator(track);
