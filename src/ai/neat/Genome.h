@@ -49,6 +49,19 @@ public:
     const std::vector<NodeGene>& nodes() const { return m_nodes; }
     const std::vector<ConnectionGene>& connections() const { return m_connections; }
 
+    // Mutable access to the connection genes, for GenomeMutator. This is a
+    // deliberately narrow escape hatch: callers must only change individual
+    // genes through ConnectionGene's own limited mutable API
+    // (setWeight()/enable()/disable()) -- never resize, reorder, erase, or
+    // replace elements of the returned vector, and never mutate node genes
+    // through any comparable accessor (none is exposed). Genome does not
+    // enforce this at compile time; it is a documented contract with the
+    // one intended caller (weight mutation), chosen over a
+    // per-connection-lookup setter because it lets the mutator iterate
+    // once, in storage order, which is what makes mutation results a
+    // deterministic function of the RNG seed.
+    std::vector<ConnectionGene>& mutableConnections() { return m_connections; }
+
     // Checks every structural invariant addNode/addConnection enforce
     // incrementally: unique node IDs, connection endpoints that exist, and
     // no duplicate directed connections. Throws std::invalid_argument on the

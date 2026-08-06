@@ -16,10 +16,13 @@ using InnovationNumber = int;
 // executed. A future NEAT Genome/NeuralNetwork builder is responsible for
 // turning a collection of these into a runtime graph.
 //
-// `enabled` is the one field this class allows to change after construction
-// (via enable()/disable()), since NEAT mutation can toggle a connection off
-// and later back on without losing its identity (source, target, weight,
-// innovation number all stay fixed).
+// `enabled` and `weight` are the only fields this class allows to change
+// after construction (via enable()/disable() and setWeight()). Source,
+// target and innovation number are fixed for the gene's lifetime -- they
+// are its identity. setWeight() performs no randomness and no validation of
+// its own (e.g. it does not reject non-finite values); it exists purely as
+// the mechanical write used by GenomeMutator, which is responsible for
+// deciding what value to write.
 class ConnectionGene
 {
 public:
@@ -35,6 +38,10 @@ public:
 
     void enable() { m_enabled = true; }
     void disable() { m_enabled = false; }
+
+    // Overwrites the weight in place. Does not touch source/target ID,
+    // innovation number, or the enabled flag.
+    void setWeight(float weight) { m_weight = weight; }
 
 private:
     NodeId m_sourceId;

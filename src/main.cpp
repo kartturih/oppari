@@ -2,7 +2,9 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -14,6 +16,8 @@
 #include "ai/Observation.h"
 #include "ai/neat/ConnectionGene.h"
 #include "ai/neat/Genome.h"
+#include "ai/neat/GenomeMutator.h"
+#include "ai/neat/MutationConfig.h"
 #include "ai/neat/NodeGene.h"
 #include "ai/neat/PhenotypeBuilder.h"
 #include "simulation/Car.h"
@@ -1231,6 +1235,415 @@ void verifyPhenotypeBuilder()
     TraceLog(LOG_INFO, "Phenotype builder verification: all deterministic checks passed");
 }
 
+namespace genome_mutator_verify
+{
+
+// A small, fixed test genome: 9 Input + 1 Bias + 2 Output nodes (matching
+// ai::NeuralNetwork::kInputCount/kOutputCount, so it can also be used to
+// build a phenotype), plus four connections with known weights -- one of
+// them disabled, specifically so mutation of disabled genes can be checked.
+ai::neat::Genome makeTestGenome()
+{
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    Genome genome;
+    for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+    {
+        genome.addNode(NodeGene{i, NodeType::Input});
+    }
+    genome.addNode(NodeGene{9, NodeType::Bias});
+    genome.addNode(NodeGene{100, NodeType::Output});
+    genome.addNode(NodeGene{101, NodeType::Output});
+
+    genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
+    genome.addConnection(ConnectionGene{1, 100, -0.3f, true, 1});
+    genome.addConnection(ConnectionGene{9, 101, 0.2f, false, 2}); // disabled on purpose
+    genome.addConnection(ConnectionGene{2, 101, 0.9f, true, 3});
+    return genome;
+}
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace genome_mutator_verify
+
+// One-shot, deterministic sanity check of ai::neat::GenomeMutator, covering
+// connection-weight mutation end to end. Independent of Car/Track/AI/
+// keyboard/render timing. Runs once at startup. No structural mutation,
+// InnovationTracker, crossover, species, or population logic exists to
+// verify here -- only weight mutation, per Stage 9A's scope.
+void verifyGenomeMutator()
+{
+    using namespace genome_mutator_verify;
+    using ai::neat::ConnectionGene;
+    using ai::neat::Genome;
+    using ai::neat::GenomeMutator;
+    using ai::neat::MutationConfig;
+    using ai::neat::NodeGene;
+    constexpr float kEps = 1e-5f;
+
+    // 1: zero mutation probability changes no weights.
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<ConnectionGene> before = genome.connections();
+        MutationConfig config;
+        config.weightMutationProbability = 0.0f;
+        GenomeMutator mutator(12345u);
+        mutator.mutateWeights(genome, config);
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            assert(genome.connections()[i].getWeight() == before[i].getWeight() &&
+                   "zero mutation probability must leave every weight unchanged");
+        }
+    }
+
+    // 2: mutation probability 1 selects every connection -- every weight
+    // must change (a perturb/replace mix drawing continuous random values
+    // colliding exactly with the original weight is astronomically
+    // unlikely, so strict inequality is a safe deterministic check here).
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<ConnectionGene> before = genome.connections();
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        GenomeMutator mutator(1u);
+        mutator.mutateWeights(genome, config);
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            assert(genome.connections()[i].getWeight() != before[i].getWeight() &&
+                   "mutation probability 1 must select and change every connection's weight");
+        }
+    }
+
+    // 3: perturb probability 1 performs perturbation only -- every changed
+    // weight stays within oldWeight +/- perturbStrength.
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<ConnectionGene> before = genome.connections();
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        config.weightPerturbProbability = 1.0f;
+        config.perturbStrength = 0.3f;
+        GenomeMutator mutator(7u);
+        mutator.mutateWeights(genome, config);
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            const float delta = genome.connections()[i].getWeight() - before[i].getWeight();
+            assert(std::fabs(delta) <= config.perturbStrength + kEps &&
+                   "perturb probability 1 must only ever perturb, never replace outright");
+        }
+    }
+
+    // 4: perturb probability 0 performs replacement only -- every changed
+    // weight lands within [replacementWeightMin, replacementWeightMax].
+    {
+        Genome genome = makeTestGenome();
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        config.weightPerturbProbability = 0.0f;
+        config.replacementWeightMin = -2.0f;
+        config.replacementWeightMax = 2.0f;
+        GenomeMutator mutator(9u);
+        mutator.mutateWeights(genome, config);
+        for (const ConnectionGene& c : genome.connections())
+        {
+            assert(c.getWeight() >= config.replacementWeightMin && c.getWeight() <= config.replacementWeightMax &&
+                   "perturb probability 0 must always replace within the configured range");
+        }
+    }
+
+    // 5: zero perturb strength preserves the selected weight exactly (a
+    // perturbation by +/-0 is a no-op).
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<ConnectionGene> before = genome.connections();
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        config.weightPerturbProbability = 1.0f;
+        config.perturbStrength = 0.0f;
+        GenomeMutator mutator(3u);
+        mutator.mutateWeights(genome, config);
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            assert(genome.connections()[i].getWeight() == before[i].getWeight() &&
+                   "zero perturb strength must preserve the selected weight exactly");
+        }
+    }
+
+    // 6: replacement weights remain within the configured range, checked
+    // across many seeds for confidence.
+    {
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        config.weightPerturbProbability = 0.0f;
+        config.replacementWeightMin = -0.75f;
+        config.replacementWeightMax = 1.25f;
+        for (std::uint32_t seed = 0; seed < 20; ++seed)
+        {
+            Genome genome = makeTestGenome();
+            GenomeMutator mutator(seed);
+            mutator.mutateWeights(genome, config);
+            for (const ConnectionGene& c : genome.connections())
+            {
+                assert(c.getWeight() >= config.replacementWeightMin && c.getWeight() <= config.replacementWeightMax &&
+                       "replacement weights must always stay within the configured range");
+            }
+        }
+    }
+
+    // 7: a disabled connection's weight is also eligible for mutation.
+    {
+        Genome genome = makeTestGenome();
+        const ConnectionGene* disabledBefore = genome.findConnection(9, 101);
+        assert(disabledBefore != nullptr && !disabledBefore->isEnabled() &&
+               "test genome must contain a disabled connection");
+        const float disabledWeightBefore = disabledBefore->getWeight();
+
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        GenomeMutator mutator(11u);
+        mutator.mutateWeights(genome, config);
+
+        const ConnectionGene* disabledAfter = genome.findConnection(9, 101);
+        assert(disabledAfter->getWeight() != disabledWeightBefore &&
+               "a disabled connection's weight must still be eligible for mutation");
+        assert(!disabledAfter->isEnabled() && "mutating weights must not change the enabled state");
+    }
+
+    // 8, 9, 10, 11 & 12: enabled states, node genes, connection endpoints,
+    // innovation numbers, and node/connection counts all remain unchanged.
+    {
+        Genome genome = makeTestGenome();
+        const std::vector<NodeGene> nodesBefore = genome.nodes();
+        const std::vector<ConnectionGene> connectionsBefore = genome.connections();
+
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        GenomeMutator mutator(21u);
+        mutator.mutateWeights(genome, config);
+
+        assert(genome.nodes().size() == nodesBefore.size() && "mutation must not change node count");
+        assert(genome.connections().size() == connectionsBefore.size() && "mutation must not change connection count");
+
+        for (std::size_t i = 0; i < nodesBefore.size(); ++i)
+        {
+            assert(genome.nodes()[i] == nodesBefore[i] && "mutation must not change any node gene");
+        }
+        for (std::size_t i = 0; i < connectionsBefore.size(); ++i)
+        {
+            const ConnectionGene& before = connectionsBefore[i];
+            const ConnectionGene& after = genome.connections()[i];
+            assert(after.getSourceId() == before.getSourceId() && after.getTargetId() == before.getTargetId() &&
+                   "mutation must not change connection endpoints");
+            assert(after.getInnovationNumber() == before.getInnovationNumber() &&
+                   "mutation must not change innovation numbers");
+            assert(after.isEnabled() == before.isEnabled() && "mutation must not change enabled state");
+        }
+    }
+
+    // 13: Genome::validate() succeeds after mutation.
+    {
+        Genome genome = makeTestGenome();
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        GenomeMutator mutator(33u);
+        mutator.mutateWeights(genome, config);
+        genome.validate(); // must not throw
+    }
+
+    // 14: identical seed + identical genome produces identical results.
+    {
+        Genome genomeA = makeTestGenome();
+        Genome genomeB = makeTestGenome();
+        MutationConfig config;
+        GenomeMutator mutatorA(555u);
+        GenomeMutator mutatorB(555u);
+        mutatorA.mutateWeights(genomeA, config);
+        mutatorB.mutateWeights(genomeB, config);
+        for (std::size_t i = 0; i < genomeA.connections().size(); ++i)
+        {
+            assert(genomeA.connections()[i].getWeight() == genomeB.connections()[i].getWeight() &&
+                   "identical seed and genome must produce identical mutation results");
+        }
+    }
+
+    // 15: different seeds can produce different results.
+    {
+        Genome genomeA = makeTestGenome();
+        Genome genomeB = makeTestGenome();
+        MutationConfig config;
+        GenomeMutator mutatorA(1u);
+        GenomeMutator mutatorB(2u);
+        mutatorA.mutateWeights(genomeA, config);
+        mutatorB.mutateWeights(genomeB, config);
+
+        bool anyDifferent = false;
+        for (std::size_t i = 0; i < genomeA.connections().size(); ++i)
+        {
+            if (genomeA.connections()[i].getWeight() != genomeB.connections()[i].getWeight())
+            {
+                anyDifferent = true;
+                break;
+            }
+        }
+        assert(anyDifferent && "different seeds must be capable of producing different results");
+    }
+
+    // 16: repeated mutations advance the owned RNG state -- a second
+    // mutation from the same mutator must continue from where the first
+    // left off, not repeat the same draws.
+    {
+        Genome genomeA = makeTestGenome();
+        Genome genomeB = makeTestGenome();
+        MutationConfig config;
+        GenomeMutator mutator(77u);
+        mutator.mutateWeights(genomeA, config);
+        mutator.mutateWeights(genomeB, config);
+
+        bool anyDifferent = false;
+        for (std::size_t i = 0; i < genomeA.connections().size(); ++i)
+        {
+            if (genomeA.connections()[i].getWeight() != genomeB.connections()[i].getWeight())
+            {
+                anyDifferent = true;
+                break;
+            }
+        }
+        assert(anyDifferent &&
+               "repeated mutations from the same mutator must advance its RNG state, not repeat the same draws");
+    }
+
+    // 17: invalid probabilities are rejected.
+    {
+        Genome genome = makeTestGenome();
+        GenomeMutator mutator(1u);
+
+        MutationConfig tooHigh;
+        tooHigh.weightMutationProbability = 1.5f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, tooHigh); }) &&
+               "a weightMutationProbability outside [0,1] must be rejected");
+
+        MutationConfig tooLow;
+        tooLow.weightPerturbProbability = -0.1f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, tooLow); }) &&
+               "a weightPerturbProbability outside [0,1] must be rejected");
+    }
+
+    // 18: negative perturb strength is rejected.
+    {
+        Genome genome = makeTestGenome();
+        GenomeMutator mutator(1u);
+        MutationConfig config;
+        config.perturbStrength = -0.01f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, config); }) &&
+               "a negative perturbStrength must be rejected");
+    }
+
+    // 19: inverted replacement range is rejected.
+    {
+        Genome genome = makeTestGenome();
+        GenomeMutator mutator(1u);
+        MutationConfig config;
+        config.replacementWeightMin = 1.0f;
+        config.replacementWeightMax = -1.0f;
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, config); }) &&
+               "an inverted replacement range must be rejected");
+    }
+
+    // 20: non-finite values are rejected.
+    {
+        Genome genome = makeTestGenome();
+        GenomeMutator mutator(1u);
+
+        MutationConfig nanConfig;
+        nanConfig.weightMutationProbability = std::numeric_limits<float>::quiet_NaN();
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, nanConfig); }) &&
+               "a NaN probability must be rejected");
+
+        MutationConfig infConfig;
+        infConfig.perturbStrength = std::numeric_limits<float>::infinity();
+        assert(throwsInvalidArgument([&]() { mutator.mutateWeights(genome, infConfig); }) &&
+               "an infinite perturbStrength must be rejected");
+    }
+
+    // 21: empty Genome mutation succeeds without error.
+    {
+        Genome empty;
+        MutationConfig config;
+        GenomeMutator mutator(1u);
+        mutator.mutateWeights(empty, config); // must not throw
+        assert(empty.connections().empty() && empty.nodes().empty() && "an empty genome must remain empty after mutation");
+    }
+
+    // 22 & 23: phenotype can still be built after mutation, and changed
+    // weights produce a deterministic changed phenotype output.
+    {
+        Genome genome = makeTestGenome();
+        ai::NeuralNetwork before = ai::neat::buildPhenotype(genome);
+
+        MutationConfig config;
+        config.weightMutationProbability = 1.0f;
+        GenomeMutator mutator(999u);
+        mutator.mutateWeights(genome, config);
+
+        ai::NeuralNetwork after = ai::neat::buildPhenotype(genome); // must not throw
+
+        ai::Observation obs;
+        obs.values.fill(0.5f);
+        const auto outBefore = before.evaluate(obs);
+        const auto outAfter = after.evaluate(obs);
+        assert((outBefore[0] != outAfter[0] || outBefore[1] != outAfter[1]) &&
+               "mutated weights must produce a changed phenotype output");
+
+        // Determinism: repeating the exact same mutation from the same seed
+        // on a fresh identical genome must reproduce the same phenotype
+        // output.
+        Genome genomeRepeat = makeTestGenome();
+        GenomeMutator mutatorRepeat(999u);
+        mutatorRepeat.mutateWeights(genomeRepeat, config);
+        ai::NeuralNetwork afterRepeat = ai::neat::buildPhenotype(genomeRepeat);
+        const auto outAfterRepeat = afterRepeat.evaluate(obs);
+        assert(outAfter[0] == outAfterRepeat[0] && outAfter[1] == outAfterRepeat[1] &&
+               "identical seed and genome must produce a deterministic phenotype output after mutation");
+    }
+
+    // 24: no structural genes are added or removed, re-confirmed across a
+    // batch of different seeds.
+    {
+        for (std::uint32_t seed = 100; seed < 110; ++seed)
+        {
+            Genome genome = makeTestGenome();
+            const std::size_t nodeCountBefore = genome.nodes().size();
+            const std::size_t connectionCountBefore = genome.connections().size();
+            MutationConfig config;
+            config.weightMutationProbability = 1.0f;
+            GenomeMutator mutator(seed);
+            mutator.mutateWeights(genome, config);
+            assert(genome.nodes().size() == nodeCountBefore && genome.connections().size() == connectionCountBefore &&
+                   "no structural genes may be added or removed by weight mutation");
+        }
+    }
+
+    // 25: all previous verification suites still pass -- enforced by main()
+    // continuing to call every earlier verify*() function unchanged.
+
+    TraceLog(LOG_INFO, "Genome mutator verification: all deterministic checks passed");
+}
+
 // One-shot, deterministic sanity check of ai::AIController, independent of
 // keyboard/render timing. Runs once at startup. Exercises the full
 // Car -> Observation -> NeuralNetwork -> AIController -> CarInput loop using
@@ -2318,6 +2731,7 @@ int main()
     verifyNeatGenes();
     verifyGenome();
     verifyPhenotypeBuilder();
+    verifyGenomeMutator();
     verifyAIController(track);
     verifyTrackProgress(track);
     verifyFitnessEvaluator(track);
