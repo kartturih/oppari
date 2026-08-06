@@ -17,6 +17,7 @@
 #include "ai/neat/ConnectionGene.h"
 #include "ai/neat/Genome.h"
 #include "ai/neat/GenomeMutator.h"
+#include "ai/neat/InnovationTracker.h"
 #include "ai/neat/MutationConfig.h"
 #include "ai/neat/NodeGene.h"
 #include "ai/neat/PhenotypeBuilder.h"
@@ -1644,6 +1645,299 @@ void verifyGenomeMutator()
     TraceLog(LOG_INFO, "Genome mutator verification: all deterministic checks passed");
 }
 
+namespace innovation_tracker_verify
+{
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+template <typename Callable>
+bool throwsOverflowError(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::overflow_error&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace innovation_tracker_verify
+
+// One-shot, deterministic sanity check of ai::neat::InnovationTracker,
+// independent of Car/Track/AI/Genome/keyboard/render timing. Runs once at
+// startup. InnovationTracker's API takes no Genome parameter anywhere, so
+// every check below -- construction and every operation on it -- needed no
+// Genome and could not have mutated one even in principle; that guarantee
+// is enforced by the type signatures themselves, not by a runtime check.
+// No structural mutation is implemented or exercised here -- only the
+// historical-marking bookkeeping itself, per Stage 9B's scope.
+void verifyInnovationTracker()
+{
+    using namespace innovation_tracker_verify;
+    using ai::neat::InnovationNumber;
+    using ai::neat::InnovationTracker;
+    using ai::neat::NodeId;
+    using ai::neat::NodeSplitInnovation;
+
+    // 1: constructor preserves initial counters.
+    {
+        InnovationTracker tracker(5, 20);
+        assert(tracker.getNextAvailableNodeId() == 5 && tracker.getNextAvailableInnovation() == 20 &&
+               "constructor must preserve the initial node ID and innovation counters");
+    }
+
+    // 2: invalid initial node ID rejected.
+    {
+        assert(throwsInvalidArgument([]() { InnovationTracker tracker(-1, 0); }) &&
+               "a negative firstAvailableNodeId must be rejected");
+    }
+
+    // 3: invalid initial innovation rejected.
+    {
+        assert(throwsInvalidArgument([]() { InnovationTracker tracker(0, -1); }) &&
+               "a negative firstAvailableInnovation must be rejected");
+    }
+
+    // 4-10: connection innovation behavior.
+    {
+        InnovationTracker tracker(5, 20);
+
+        // 4: first new connection receives the initial innovation value.
+        const InnovationNumber first = tracker.getConnectionInnovation(0, 1);
+        assert(first == 20 && "the first new connection must receive the initial innovation value");
+
+        // 5: the same directed connection reuses its innovation.
+        const InnovationNumber firstAgain = tracker.getConnectionInnovation(0, 1);
+        assert(firstAgain == first && tracker.getNextAvailableInnovation() == 21 &&
+               "requesting the same directed connection again must reuse its innovation, not allocate a new one");
+
+        // 6: reversed connection receives a different innovation.
+        const InnovationNumber reversed = tracker.getConnectionInnovation(1, 0);
+        assert(reversed != first && reversed == 21 && "the reversed connection must be a distinct structural connection");
+
+        // 7: different connections receive unique, monotonically increasing innovations.
+        const InnovationNumber c1 = tracker.getConnectionInnovation(2, 3);
+        const InnovationNumber c2 = tracker.getConnectionInnovation(3, 4);
+        const InnovationNumber c3 = tracker.getConnectionInnovation(4, 5);
+        assert(c1 == 22 && c2 == 23 && c3 == 24 &&
+               "distinct new connections must receive unique, monotonically increasing innovations");
+
+        // 8: negative source rejected.
+        assert(throwsInvalidArgument([&]() { tracker.getConnectionInnovation(-1, 0); }) &&
+               "a negative source ID must be rejected");
+
+        // 9: negative target rejected.
+        assert(throwsInvalidArgument([&]() { tracker.getConnectionInnovation(0, -1); }) &&
+               "a negative target ID must be rejected");
+
+        // 10: self-connection rejected.
+        assert(throwsInvalidArgument([&]() { tracker.getConnectionInnovation(2, 2); }) &&
+               "a self-connection must be rejected");
+    }
+
+    // 11-18: node-split innovation behavior.
+    {
+        InnovationTracker tracker(100, 200);
+
+        // 11: first node split receives the initial available node ID.
+        const NodeSplitInnovation split1 = tracker.getNodeSplitInnovation(50, 1, 2);
+        assert(split1.newNodeId == 100 && "the first node split must receive the initial available node ID");
+
+        // 12: split allocates two distinct connection innovations.
+        assert(split1.incomingInnovation == 200 && split1.outgoingInnovation == 201 &&
+               split1.incomingInnovation != split1.outgoingInnovation &&
+               "a split must allocate two distinct connection innovations");
+        assert(tracker.getNextAvailableNodeId() == 101 && tracker.getNextAvailableInnovation() == 202 &&
+               "a fresh split must advance both counters");
+
+        // 13: repeated identical split reuses the complete record.
+        const NodeSplitInnovation split1Again = tracker.getNodeSplitInnovation(50, 1, 2);
+        assert(split1Again.newNodeId == split1.newNodeId && split1Again.incomingInnovation == split1.incomingInnovation &&
+               split1Again.outgoingInnovation == split1.outgoingInnovation &&
+               "requesting the same split again must reuse the complete stored record");
+
+        // 14: repeated split does not advance counters.
+        assert(tracker.getNextAvailableNodeId() == 101 && tracker.getNextAvailableInnovation() == 202 &&
+               "repeating a split must not allocate anything new");
+
+        // 15 & 16: a different split receives a different node ID and
+        // distinct connection innovations.
+        const NodeSplitInnovation split2 = tracker.getNodeSplitInnovation(60, 3, 4);
+        assert(split2.newNodeId == 101 && split2.newNodeId != split1.newNodeId &&
+               "a different split must receive a different node ID");
+        assert(split2.incomingInnovation == 202 && split2.outgoingInnovation == 203 &&
+               split2.incomingInnovation != split1.incomingInnovation && split2.outgoingInnovation != split1.outgoingInnovation &&
+               "a different split must receive distinct connection innovations");
+
+        // 17: inconsistent source/target for an existing split innovation is rejected.
+        assert(throwsInvalidArgument([&]() { tracker.getNodeSplitInnovation(50, 1, 3); }) &&
+               "requesting an already-recorded split innovation with a different target must be rejected");
+        assert(throwsInvalidArgument([&]() { tracker.getNodeSplitInnovation(50, 9, 2); }) &&
+               "requesting an already-recorded split innovation with a different source must be rejected");
+
+        // 18: negative split innovation rejected.
+        assert(throwsInvalidArgument([&]() { tracker.getNodeSplitInnovation(-1, 1, 2); }) &&
+               "a negative splitConnectionInnovation must be rejected");
+    }
+
+    // 19 & 20: split-created connection innovations are registered in the
+    // same global connection history -- later direct requests for
+    // source->newNode and newNode->target reuse them exactly.
+    {
+        InnovationTracker tracker(100, 200);
+        const NodeSplitInnovation split = tracker.getNodeSplitInnovation(50, 1, 2);
+
+        const InnovationNumber directIncoming = tracker.getConnectionInnovation(1, split.newNodeId);
+        assert(directIncoming == split.incomingInnovation && tracker.getNextAvailableInnovation() == 202 &&
+               "a split's incoming connection must be reusable via a direct getConnectionInnovation call, "
+               "allocating nothing new");
+
+        const InnovationNumber directOutgoing = tracker.getConnectionInnovation(split.newNodeId, 2);
+        assert(directOutgoing == split.outgoingInnovation && tracker.getNextAvailableInnovation() == 202 &&
+               "a split's outgoing connection must be reusable via a direct getConnectionInnovation call, "
+               "allocating nothing new");
+    }
+
+    // 21: a direct connection innovation created before a split is reused
+    // by a later split that needs the exact same (source, newNode) pair.
+    {
+        InnovationTracker tracker(10, 100);
+
+        const InnovationNumber preExisting = tracker.getConnectionInnovation(1, 10); // 10 is what the split below will allocate
+        assert(preExisting == 100 && tracker.getNextAvailableInnovation() == 101 &&
+               "setup: the pre-existing direct connection must be the first allocated innovation");
+
+        const NodeSplitInnovation split = tracker.getNodeSplitInnovation(999, 1, 2);
+        assert(split.newNodeId == 10 &&
+               "the split's new node ID must be the next available one, matching the pre-existing connection's target");
+        assert(split.incomingInnovation == preExisting &&
+               "a connection innovation already registered directly must be reused by a later split needing the same pair");
+        assert(tracker.getNextAvailableInnovation() == 102 &&
+               "only the split's new (outgoing) connection should allocate a fresh innovation -- the incoming one was reused");
+    }
+
+    // 22 & 23: no node ID or connection innovation is ever reused for a
+    // different structure, across a batch of distinct splits. Node IDs are
+    // allocated starting well above the source/target range used below, so
+    // a freshly allocated new node ID can never coincide with one of them.
+    {
+        InnovationTracker tracker(1000, 0);
+        std::vector<NodeId> nodeIds;
+        std::vector<InnovationNumber> innovations;
+
+        for (int i = 0; i < 5; ++i)
+        {
+            const NodeSplitInnovation split = tracker.getNodeSplitInnovation(i, i, i + 100);
+            nodeIds.push_back(split.newNodeId);
+            innovations.push_back(split.incomingInnovation);
+            innovations.push_back(split.outgoingInnovation);
+        }
+
+        for (std::size_t i = 0; i < nodeIds.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < nodeIds.size(); ++j)
+            {
+                assert(nodeIds[i] != nodeIds[j] && "no node ID may ever be reused for a different split");
+            }
+        }
+        for (std::size_t i = 0; i < innovations.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < innovations.size(); ++j)
+            {
+                assert(innovations[i] != innovations[j] &&
+                       "no innovation number may ever be reused for a different directed pair");
+            }
+        }
+    }
+
+    // 24: a fixed request sequence is deterministic across two identically
+    // constructed trackers. Node IDs start at 100, well above the 0..3
+    // source/target range the sequence below uses, so the split's freshly
+    // allocated new node ID can never collide with one of them.
+    {
+        InnovationTracker trackerA(100, 0);
+        InnovationTracker trackerB(100, 0);
+
+        auto runSequence = [](InnovationTracker& t)
+        {
+            std::vector<InnovationNumber> results;
+            results.push_back(t.getConnectionInnovation(0, 1));
+            results.push_back(t.getConnectionInnovation(1, 2));
+            const NodeSplitInnovation split = t.getNodeSplitInnovation(0, 0, 1);
+            results.push_back(split.newNodeId);
+            results.push_back(split.incomingInnovation);
+            results.push_back(split.outgoingInnovation);
+            results.push_back(t.getConnectionInnovation(2, 3));
+            return results;
+        };
+
+        const std::vector<InnovationNumber> resultsA = runSequence(trackerA);
+        const std::vector<InnovationNumber> resultsB = runSequence(trackerB);
+        assert(resultsA == resultsB &&
+               "an identical request sequence on two identically constructed trackers must be fully deterministic");
+    }
+
+    // 25: a different (still valid) request order may produce different
+    // numbering for the same pair, while each tracker remains internally
+    // consistent.
+    {
+        InnovationTracker trackerD(0, 50);
+        InnovationTracker trackerE(0, 50);
+
+        const InnovationNumber d_first = trackerD.getConnectionInnovation(1, 2);
+        const InnovationNumber d_second = trackerD.getConnectionInnovation(3, 4);
+
+        const InnovationNumber e_first = trackerE.getConnectionInnovation(3, 4);
+        const InnovationNumber e_second = trackerE.getConnectionInnovation(1, 2);
+
+        assert(d_first == 50 && d_second == 51 && "requesting (1,2) before (3,4) must give (1,2) the earlier innovation");
+        assert(e_first == 50 && e_second == 51 && "requesting (3,4) before (1,2) must give (3,4) the earlier innovation");
+        assert(d_first != e_second &&
+               "different valid request orders may assign different innovation numbers to the same pair");
+
+        assert(trackerD.getConnectionInnovation(1, 2) == d_first && trackerE.getConnectionInnovation(1, 2) == e_second &&
+               "each tracker must remain internally self-consistent regardless of request order");
+    }
+
+    // 26: node-counter overflow is rejected.
+    {
+        InnovationTracker exhaustedNodes(std::numeric_limits<NodeId>::max(), 0);
+        assert(throwsOverflowError([&]() { exhaustedNodes.getNodeSplitInnovation(0, 1, 2); }) &&
+               "a node split when the node ID counter is exhausted must throw std::overflow_error");
+    }
+
+    // 27: innovation-counter overflow is rejected.
+    {
+        InnovationTracker exhaustedInnovations(0, std::numeric_limits<InnovationNumber>::max());
+        assert(throwsOverflowError([&]() { exhaustedInnovations.getConnectionInnovation(1, 2); }) &&
+               "a new connection when the innovation counter is exhausted must throw std::overflow_error");
+    }
+
+    // 28 & 29: an InnovationTracker requires no Genome to construct or use
+    // -- see the function's doc comment; enforced by the absence of any
+    // Genome parameter anywhere in its API, not by a runtime check.
+
+    // 30: all previous verification suites still pass -- enforced by
+    // main() continuing to call every earlier verify*() function unchanged.
+
+    TraceLog(LOG_INFO, "Innovation tracker verification: all deterministic checks passed");
+}
+
 // One-shot, deterministic sanity check of ai::AIController, independent of
 // keyboard/render timing. Runs once at startup. Exercises the full
 // Car -> Observation -> NeuralNetwork -> AIController -> CarInput loop using
@@ -2732,6 +3026,7 @@ int main()
     verifyGenome();
     verifyPhenotypeBuilder();
     verifyGenomeMutator();
+    verifyInnovationTracker();
     verifyAIController(track);
     verifyTrackProgress(track);
     verifyFitnessEvaluator(track);
