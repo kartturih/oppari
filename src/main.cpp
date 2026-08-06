@@ -9,6 +9,7 @@
 #include "raylib.h"
 
 #include "ai/AIController.h"
+#include "ai/FitnessEvaluator.h"
 #include "ai/NeuralNetwork.h"
 #include "ai/Observation.h"
 #include "ai/neat/ConnectionGene.h"
@@ -17,6 +18,7 @@
 #include "ai/neat/PhenotypeBuilder.h"
 #include "simulation/Car.h"
 #include "simulation/Track.h"
+#include "simulation/TrackProgress.h"
 
 namespace
 {
@@ -1439,6 +1441,704 @@ void verifyAIController(const simulation::Track& track)
     TraceLog(LOG_INFO, "AI controller verification: all deterministic checks passed");
 }
 
+namespace track_progress_verify
+{
+
+// Inverse of TrackProgress's angle-to-progress mapping (see TrackProgress.h
+// for the forward mapping this undoes): returns a world position on the
+// track's mid-band ellipse at the given lap position. Lets tests place the
+// car at exact, hand-computed lap positions via Car::reset() instead of
+// relying on real driving physics for anything but the one "real driving"
+// sanity check below.
+Vector2 positionAtLapPosition(const simulation::TrackDefinition& def, float refX, float refY, float lapPos)
+{
+    const float rawAngle = -lapPos * 2.0f * static_cast<float>(PI);
+    return Vector2{def.center.x + std::cos(rawAngle) * refX, def.center.y + std::sin(rawAngle) * refY};
+}
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace track_progress_verify
+
+// One-shot, deterministic sanity check of simulation::TrackProgress,
+// independent of keyboard/render timing. Runs once at startup. TrackProgress
+// never controls the Car -- only Car::reset() (to place the car at precise,
+// hand-computed positions) and the Track's own TrackDefinition are used
+// here, plus one short real-driving check for direction sanity.
+void verifyTrackProgress(const simulation::Track& track)
+{
+    using track_progress_verify::positionAtLapPosition;
+    using track_progress_verify::throwsInvalidArgument;
+    constexpr float kEps = 1e-3f;
+
+    const simulation::TrackDefinition& def = track.getDefinition();
+    const float refX = (def.outerRadiusX + def.innerRadiusX) * 0.5f;
+    const float refY = (def.outerRadiusY + def.innerRadiusY) * 0.5f;
+
+    simulation::Car car(makeCarParams(), track);
+
+    // 1 & 13 (setup half): reset() computes lap position from the car's
+    // current position using the exact documented formula, and clears every
+    // accumulated field to its baseline.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+
+        const float dx = kSpawnPosition.x - def.center.x;
+        const float dy = kSpawnPosition.y - def.center.y;
+        const float rawAngle = std::atan2(dy / refY, dx / refX);
+        float expectedLapPosition = -rawAngle / (2.0f * static_cast<float>(PI));
+        if (expectedLapPosition < 0.0f)
+        {
+            expectedLapPosition += 1.0f;
+        }
+
+        assert(std::fabs(progress.getLapPosition() - expectedLapPosition) < kEps &&
+               "reset must compute lap position from the car's current spawn position");
+
+        // Expected checkpoint after reset is the first checkpoint strictly
+        // ahead of the car, in order -- not unconditionally 0, since the
+        // car may spawn anywhere around the fixed checkpoint ring.
+        const int expectedCheckpointIndex =
+            (static_cast<int>(std::floor(expectedLapPosition * simulation::TrackProgress::kCheckpointCount)) + 1) %
+            simulation::TrackProgress::kCheckpointCount;
+
+        assert(progress.getContinuousProgress() == 0.0f && progress.getBestProgress() == 0.0f &&
+               progress.getLapCount() == 0 && progress.getExpectedCheckpoint() == expectedCheckpointIndex &&
+               progress.getTotalCheckpointsPassed() == 0 && "reset must clear all accumulated state");
+    }
+
+    // 2: normalized lap position stays within [0,1) at several distinct
+    // positions around the oval.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        progress.reset(car);
+
+        for (float p = 0.0f; p < 1.0f; p += 0.1f)
+        {
+            car.reset(positionAtLapPosition(def, refX, refY, p), kSpawnHeading);
+            progress.update(car);
+            assert(progress.getLapPosition() >= 0.0f && progress.getLapPosition() < 1.0f &&
+                   "lap position must always stay within [0,1)");
+        }
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 3: progress increases in the intended forward direction -- driven
+    // with real Car physics (throttle only, no steering) from the actual
+    // spawn pose, not with synthetic positions.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+
+        simulation::CarInput driveForward;
+        driveForward.throttle = 1.0f;
+        driveForward.steering = 0.0f;
+        for (int i = 0; i < 30 && car.isAlive(); ++i)
+        {
+            car.update(driveForward, kSimulationDt);
+            progress.update(car);
+        }
+        assert(car.isAlive() && "the car must still be on the bottom straight after 0.5s from spawn");
+        assert(progress.getContinuousProgress() > 0.0f &&
+               "driving forward from spawn must increase continuous progress");
+        assert(progress.getBestProgress() == progress.getContinuousProgress() &&
+               "purely forward driving must keep best progress equal to continuous progress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 4 & 12: backward movement decreases continuous progress but never
+    // reduces best progress.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        progress.reset(car);
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.10f), kSpawnHeading);
+        progress.update(car);
+        const float bestAfterForward = progress.getBestProgress();
+        assert(bestAfterForward > 0.09f && "forward synthetic movement must register as progress");
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.07f), kSpawnHeading);
+        progress.update(car);
+        assert(progress.getContinuousProgress() < bestAfterForward - kEps &&
+               "backward movement must decrease continuous progress");
+        assert(progress.getBestProgress() == bestAfterForward && "backward movement must not change best progress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 5 & 6: a forward seam (0/1) crossing increments continuous progress
+    // and lap count correctly; a subsequent backward seam crossing does not
+    // award an extra completed lap and cannot raise best progress.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        progress.reset(car);
+
+        const float toSeam[] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 0.98f};
+        for (float p : toSeam)
+        {
+            car.reset(positionAtLapPosition(def, refX, refY, p), kSpawnHeading);
+            progress.update(car);
+        }
+        assert(progress.getLapCount() == 0 && "lap must not be counted before crossing the seam");
+
+        // Forward seam crossing: 0.98 -> 0.02, i.e. delta corrects to +0.04.
+        car.reset(positionAtLapPosition(def, refX, refY, 0.02f), kSpawnHeading);
+        progress.update(car);
+        assert(progress.getContinuousProgress() > 1.0f &&
+               "a forward seam crossing must push continuous progress past 1.0");
+        assert(progress.getLapCount() == 1 && "a valid forward seam crossing must complete lap 1");
+        const float bestAfterLap = progress.getBestProgress();
+
+        // Backward seam crossing back across 0.02 -> 0.98 must not grant an
+        // additional lap, and must not exceed the existing best.
+        car.reset(positionAtLapPosition(def, refX, refY, 0.98f), kSpawnHeading);
+        progress.update(car);
+        assert(progress.getLapCount() <= 1 && "a backward seam crossing must never award a completed forward lap");
+        assert(progress.getBestProgress() == bestAfterLap && "a backward seam crossing must not raise best progress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 7, 8 & review-requirement 2/3/6: checkpoints are ordered-traversal
+    // state computed independently from raw position deltas (never from
+    // getBestProgress()) -- they advance strictly in order, several can be
+    // credited within one valid forward update, and a lap is counted
+    // exactly once a full ordered cycle of kCheckpointCount checkpoints has
+    // been awarded since reset. Reset at a position that does NOT coincide
+    // with a checkpoint boundary (0.03), so completing one lap requires the
+    // full kCheckpointCount checkpoints, not one fewer.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.03f), kSpawnHeading);
+        progress.reset(car);
+        assert(progress.getExpectedCheckpoint() == 1 && progress.getTotalCheckpointsPassed() == 0 &&
+               "reset at lap position 0.03 must expect checkpoint 1 next");
+
+        // Six forward steps of 0.15 laps each starting from 0.03, each
+        // spanning one or more checkpoint boundaries -- exact expected
+        // (total passed, next expected) after each step, worked out from
+        // the fixed checkpoint positions i/16.
+        struct Step
+        {
+            float targetLapPosition;
+            int expectedTotalPassed;
+            int expectedNextCheckpoint;
+        };
+        const Step steps[] = {
+            {0.18f, 2, 3},   // awards checkpoints 1, 2
+            {0.33f, 5, 6},   // awards checkpoints 3, 4, 5 -- several in one update (review req. 3)
+            {0.48f, 7, 8},   // awards checkpoints 6, 7
+            {0.63f, 10, 11}, // awards checkpoints 8, 9, 10
+            {0.78f, 12, 13}, // awards checkpoints 11, 12
+            {0.93f, 14, 15}, // awards checkpoints 13, 14
+        };
+        for (const Step& step : steps)
+        {
+            car.reset(positionAtLapPosition(def, refX, refY, step.targetLapPosition), kSpawnHeading);
+            progress.update(car);
+            assert(progress.getTotalCheckpointsPassed() == step.expectedTotalPassed &&
+                   progress.getExpectedCheckpoint() == step.expectedNextCheckpoint &&
+                   "checkpoints must advance strictly in order by exactly the boundaries actually crossed");
+        }
+        assert(progress.getLapCount() == 0 &&
+               "14 of 16 checkpoints passed must not yet complete a lap (review req. 6, negative case)");
+
+        // Forward seam crossing 0.93 -> 0.08 (delta corrects to +0.15) is
+        // exactly the update that awards the final two checkpoints (15 and
+        // the wrap to 0) -- the lap must complete here, in the same update
+        // that both validates the last checkpoints AND crosses the seam
+        // (review req. 5: seam crossing alone is not what completes it).
+        car.reset(positionAtLapPosition(def, refX, refY, 0.08f), kSpawnHeading);
+        progress.update(car);
+        assert(progress.getTotalCheckpointsPassed() == 17 && progress.getExpectedCheckpoint() == 2 &&
+               progress.getLapCount() == 1 &&
+               "a full ordered traversal of all checkpoints must complete the lap exactly once, at the seam crossing that finishes it");
+
+        // Review requirement 1: jumping to a later angular position without
+        // crossing the intervening checkpoints in order (an implausible,
+        // teleport-sized delta) must not award anything, even though the
+        // raw angle itself does move forward.
+        const int totalBeforeJump = progress.getTotalCheckpointsPassed();
+        const int expectedBeforeJump = progress.getExpectedCheckpoint();
+        const int lapsBeforeJump = progress.getLapCount();
+        car.reset(positionAtLapPosition(def, refX, refY, 0.43f), kSpawnHeading); // 0.08 -> 0.43 is a 0.35 jump, > the plausibility threshold
+        progress.update(car);
+        assert(std::fabs(progress.getLapPosition() - 0.43f) < kEps &&
+               "the raw lap position must still reflect the car's actual (teleported) position");
+        assert(progress.getTotalCheckpointsPassed() == totalBeforeJump && progress.getExpectedCheckpoint() == expectedBeforeJump &&
+               progress.getLapCount() == lapsBeforeJump &&
+               "an implausible jump must not award checkpoints or laps even if it lands at a later angle");
+
+        // Review requirement 4: backward movement (still within the
+        // plausible-delta range) must not award checkpoints either.
+        car.reset(positionAtLapPosition(def, refX, refY, 0.35f), kSpawnHeading); // 0.43 -> 0.35 is backward
+        progress.update(car);
+        assert(progress.getTotalCheckpointsPassed() == totalBeforeJump && progress.getExpectedCheckpoint() == expectedBeforeJump &&
+               progress.getLapCount() == lapsBeforeJump && "backward movement must not award checkpoints or laps");
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // Review requirement 7: reset restores expected checkpoint, checkpoint
+    // count and lap count correctly for whatever position it is given, not
+    // just back to a fixed baseline.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.55f), kSpawnHeading);
+        progress.reset(car);
+        assert(progress.getExpectedCheckpoint() == 9 && progress.getTotalCheckpointsPassed() == 0 && progress.getLapCount() == 0 &&
+               "reset at lap position 0.55 must expect checkpoint 9 next, with checkpoint/lap counts at zero");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 11: repeated updates at an unchanged position do not change progress.
+    {
+        simulation::TrackProgress progress(def);
+        const Vector2 pos = positionAtLapPosition(def, refX, refY, 0.3f);
+        car.reset(pos, kSpawnHeading);
+        progress.reset(car);
+        car.reset(pos, kSpawnHeading);
+        progress.update(car);
+
+        const float lapPos1 = progress.getLapPosition();
+        const float cont1 = progress.getContinuousProgress();
+        const float best1 = progress.getBestProgress();
+        const int laps1 = progress.getLapCount();
+        const int checkpoints1 = progress.getTotalCheckpointsPassed();
+
+        for (int i = 0; i < 5; ++i)
+        {
+            car.reset(pos, kSpawnHeading);
+            progress.update(car);
+        }
+        assert(progress.getLapPosition() == lapPos1 && progress.getContinuousProgress() == cont1 &&
+               progress.getBestProgress() == best1 && progress.getLapCount() == laps1 &&
+               progress.getTotalCheckpointsPassed() == checkpoints1 &&
+               "repeated updates at an unchanged position must not change progress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 12 (extended): best progress never decreases across a longer mixed
+    // forward/backward sequence.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        progress.reset(car);
+
+        float lastBest = progress.getBestProgress();
+        const float waypoints[] = {0.05f, 0.15f, 0.08f, 0.20f, 0.10f, 0.25f, 0.15f, 0.30f};
+        for (float p : waypoints)
+        {
+            car.reset(positionAtLapPosition(def, refX, refY, p), kSpawnHeading);
+            progress.update(car);
+            assert(progress.getBestProgress() >= lastBest - kEps && "best progress must never decrease");
+            lastBest = std::max(lastBest, progress.getBestProgress());
+        }
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 13: reset clears accumulated state built up from nonzero progress.
+    {
+        simulation::TrackProgress progress(def);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        progress.reset(car);
+        car.reset(positionAtLapPosition(def, refX, refY, 0.19f), kSpawnHeading);
+        progress.update(car);
+        assert(progress.getBestProgress() > 0.0f && progress.getTotalCheckpointsPassed() > 0 &&
+               "setup for the reset-clears test must have accumulated nonzero state");
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        const int expectedCheckpointAtSpawn =
+            (static_cast<int>(std::floor(progress.getLapPosition() * simulation::TrackProgress::kCheckpointCount)) + 1) %
+            simulation::TrackProgress::kCheckpointCount;
+        assert(progress.getContinuousProgress() == 0.0f && progress.getBestProgress() == 0.0f &&
+               progress.getLapCount() == 0 && progress.getExpectedCheckpoint() == expectedCheckpointAtSpawn &&
+               progress.getTotalCheckpointsPassed() == 0 && "reset must clear all previously accumulated state");
+    }
+
+    // 14: TrackProgress derives lap position from its own injected
+    // TrackDefinition, not a second hardcoded track shape.
+    {
+        simulation::TrackDefinition otherDef = def;
+        otherDef.center = {def.center.x + 50.0f, def.center.y - 30.0f};
+
+        simulation::TrackProgress progressA(def);
+        simulation::TrackProgress progressB(otherDef);
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progressA.reset(car);
+        progressB.reset(car);
+
+        assert(progressA.getLapPosition() != progressB.getLapPosition() &&
+               "TrackProgress must derive lap position from its own injected TrackDefinition, not a hardcoded shape");
+    }
+
+    // 15: invalid track dimensions/radii are rejected clearly.
+    {
+        simulation::TrackDefinition badOuter = def;
+        badOuter.outerRadiusX = 0.0f;
+        assert(throwsInvalidArgument([&]() { simulation::TrackProgress p(badOuter); }) &&
+               "a non-positive outer radius must be rejected");
+
+        simulation::TrackDefinition badInner = def;
+        badInner.innerRadiusX = badInner.outerRadiusX + 1.0f;
+        assert(throwsInvalidArgument([&]() { simulation::TrackProgress p(badInner); }) &&
+               "an inner radius not smaller than the outer radius must be rejected");
+
+        simulation::TrackDefinition badSize = def;
+        badSize.simWidth = 0;
+        assert(throwsInvalidArgument([&]() { simulation::TrackProgress p(badSize); }) &&
+               "a non-positive simulation width must be rejected");
+    }
+
+    TraceLog(LOG_INFO, "Track progress verification: all deterministic checks passed");
+}
+
+// One-shot, deterministic sanity check of ai::FitnessEvaluator, independent
+// of keyboard/render timing. Runs once at startup. FitnessEvaluator reads
+// only simulation::Car::isAlive() and simulation::TrackProgress's getters --
+// no Genome or NeuralNetwork is touched here. Its update() signature has no
+// mode parameter at all, so manual and AI control paths need no separate
+// fitness logic -- both simply call the same update() with whatever Car
+// state resulted from that frame.
+void verifyFitnessEvaluator(const simulation::Track& track)
+{
+    using track_progress_verify::positionAtLapPosition;
+
+    const simulation::TrackDefinition& def = track.getDefinition();
+    const float refX = (def.outerRadiusX + def.innerRadiusX) * 0.5f;
+    const float refY = (def.outerRadiusY + def.innerRadiusY) * 0.5f;
+
+    simulation::Car car(makeCarParams(), track);
+
+    // 16: reset() produces exactly zero fitness/elapsed time and a fresh,
+    // unfinished evaluation.
+    {
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+        assert(evaluator.getFitness() == 0.0f && evaluator.getElapsedTime() == 0.0f &&
+               !evaluator.isEvaluationFinished() && evaluator.getFinishReason() == ai::EvaluationFinishReason::None &&
+               "reset must produce zero fitness/elapsed time and an unfinished evaluation");
+    }
+
+    // 17: forward progress increases fitness.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        evaluator.update(car, progress, kSimulationDt);
+        const float fitnessBefore = evaluator.getFitness();
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.10f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        assert(evaluator.getFitness() > fitnessBefore && "forward progress must increase fitness");
+    }
+
+    // 18: backward movement must not increase the progress-derived part of
+    // fitness (best progress, checkpoints, laps). Survival time still ticks
+    // up regardless of movement direction, so this checks the
+    // progress-derived TrackProgress state directly rather than raw
+    // getFitness(), which also includes that small survival term.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.15f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        const float bestProgressAfterForward = progress.getBestProgress();
+        const int checkpointsAfterForward = progress.getTotalCheckpointsPassed();
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.05f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        assert(progress.getBestProgress() == bestProgressAfterForward &&
+               progress.getTotalCheckpointsPassed() == checkpointsAfterForward &&
+               "backward movement must not increase the progress-derived part of fitness");
+    }
+
+    // 19: passing a checkpoint increases fitness.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        evaluator.update(car, progress, kSimulationDt);
+        const float fitnessAtStart = evaluator.getFitness();
+
+        car.reset(positionAtLapPosition(def, refX, refY, 1.0f / static_cast<float>(simulation::TrackProgress::kCheckpointCount)),
+                  kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        assert(progress.getTotalCheckpointsPassed() >= 1 && "the setup must actually pass at least one checkpoint");
+        assert(evaluator.getFitness() > fitnessAtStart && "passing a checkpoint must increase fitness");
+    }
+
+    // 20: completing a lap increases fitness with a distinct lap bonus on
+    // top of the progress reward already earned.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        const float toAlmostFull[] = {0.15f, 0.30f, 0.45f, 0.60f, 0.75f, 0.90f, 0.95f};
+        for (float p : toAlmostFull)
+        {
+            car.reset(positionAtLapPosition(def, refX, refY, p), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        const float fitnessBeforeLap = evaluator.getFitness();
+        assert(progress.getLapCount() == 0 && "setup must not have completed a lap yet");
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.05f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        assert(progress.getLapCount() == 1 && "the final step must complete exactly one lap");
+        assert(evaluator.getFitness() > fitnessBeforeLap && "completing a lap must increase fitness");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 21: survival reward alone stays small relative to progress's scale
+    // (1000 points/lap) even after several seconds with no movement.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        for (int i = 0; i < 240 && !evaluator.isEvaluationFinished(); ++i) // 4s of no movement, under the 5s timeout
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(!evaluator.isEvaluationFinished() && "4 seconds of no movement must stay under the no-progress timeout");
+        assert(evaluator.getFitness() < 10.0f &&
+               "survival-only fitness must stay small relative to the progress scale (1000 points/lap)");
+    }
+
+    // 22: a collided (dead) car ends the evaluation with Collision.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        simulation::CarInput driveOffTrack;
+        driveOffTrack.throttle = 1.0f;
+        driveOffTrack.steering = 0.0f;
+        for (int i = 0; i < 300 && car.isAlive(); ++i)
+        {
+            car.update(driveOffTrack, kSimulationDt);
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(!car.isAlive() && "driving straight for 5s must leave the road band and kill the car");
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::Collision &&
+               "a dead car must end the evaluation with Collision");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 23: reaching the maximum evaluation time ends it with TimeLimit --
+    // progress is nudged forward every simulated second so the no-progress
+    // timeout cannot pre-empt it.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        float p = 0.0f;
+        for (int second = 0; second < 61 && !evaluator.isEvaluationFinished(); ++second)
+        {
+            p += 0.01f;
+            car.reset(positionAtLapPosition(def, refX, refY, std::fmod(p, 1.0f)), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, 1.0f);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
+               "reaching the maximum evaluation time must end the evaluation with TimeLimit");
+        assert(evaluator.getElapsedTime() >= 60.0f && "elapsed time at TimeLimit must reach the configured maximum");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 24: standing still for the no-progress timeout ends the evaluation
+    // with NoProgress.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
+               "standing still past the no-progress timeout must end the evaluation with NoProgress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 25: meaningful progress resets the no-progress timer.
+    {
+        car.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        // Stand still for 3 seconds (under the 5s timeout).
+        for (int i = 0; i < 180; ++i)
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(!evaluator.isEvaluationFinished() && "3 seconds of no movement must stay under the timeout");
+
+        // A meaningful forward nudge must reset the no-progress timer.
+        car.reset(positionAtLapPosition(def, refX, refY, 0.05f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+
+        // A further 4 seconds of standing still (< 5s since the nudge)
+        // must still not finish the evaluation, proving the timer reset.
+        for (int i = 0; i < 240; ++i)
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(!evaluator.isEvaluationFinished() &&
+               "meaningful progress must reset the no-progress timer, not merely delay the original deadline");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 26: a finished evaluation does not continue changing fitness, elapsed
+    // time, or finish reason on further update() calls.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(evaluator.isEvaluationFinished() && "setup must have already finished the evaluation");
+
+        const float fitnessAtFinish = evaluator.getFitness();
+        const float elapsedAtFinish = evaluator.getElapsedTime();
+        const ai::EvaluationFinishReason reasonAtFinish = evaluator.getFinishReason();
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.5f), kSpawnHeading); // would otherwise be a big progress jump
+        progress.update(car);
+        evaluator.update(car, progress, 10.0f); // would otherwise add a large survival reward and elapsed time
+
+        assert(evaluator.getFitness() == fitnessAtFinish && evaluator.getElapsedTime() == elapsedAtFinish &&
+               evaluator.getFinishReason() == reasonAtFinish &&
+               "a finished evaluation must not change fitness, elapsed time, or finish reason on further updates");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 27: fitness is deterministic -- two independently constructed
+    // evaluators driven through an identical sequence of states produce
+    // identical fitness.
+    {
+        auto runScenario = [&](simulation::Car& localCar) -> float
+        {
+            localCar.reset(positionAtLapPosition(def, refX, refY, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(def);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator localEvaluator;
+            localEvaluator.reset();
+
+            const float waypoints[] = {0.05f, 0.12f, 0.20f, 0.30f};
+            for (float p : waypoints)
+            {
+                localCar.reset(positionAtLapPosition(def, refX, refY, p), kSpawnHeading);
+                localProgress.update(localCar);
+                localEvaluator.update(localCar, localProgress, kSimulationDt);
+            }
+            return localEvaluator.getFitness();
+        };
+
+        simulation::Car carA(makeCarParams(), track);
+        simulation::Car carB(makeCarParams(), track);
+        const float fitnessA = runScenario(carA);
+        const float fitnessB = runScenario(carB);
+        assert(fitnessA == fitnessB && "identical state sequences must produce identical fitness");
+    }
+
+    // 28: reset() permits a fresh evaluation after a finished one (the same
+    // effect the R key has in main()).
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(def);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(evaluator.isEvaluationFinished() && "setup must have already finished the evaluation");
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        evaluator.reset();
+        assert(!evaluator.isEvaluationFinished() && evaluator.getFitness() == 0.0f &&
+               evaluator.getElapsedTime() == 0.0f && "reset must permit a fresh, unfinished evaluation");
+
+        car.reset(positionAtLapPosition(def, refX, refY, 0.05f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, kSimulationDt);
+        assert(evaluator.getFitness() > 0.0f && "the fresh evaluation after reset must respond normally to new progress");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    TraceLog(LOG_INFO, "Fitness evaluator verification: all deterministic checks passed");
+}
+
 simulation::CarInput readInput()
 {
     simulation::CarInput input;
@@ -1459,6 +2159,22 @@ simulation::CarInput readInput()
     }
 
     return input;
+}
+
+const char* finishReasonLabel(ai::EvaluationFinishReason reason)
+{
+    switch (reason)
+    {
+        case ai::EvaluationFinishReason::None:
+            return "-";
+        case ai::EvaluationFinishReason::Collision:
+            return "Collision";
+        case ai::EvaluationFinishReason::TimeLimit:
+            return "TimeLimit";
+        case ai::EvaluationFinishReason::NoProgress:
+            return "NoProgress";
+    }
+    return "-";
 }
 
 void drawCar(const simulation::Car& car)
@@ -1487,7 +2203,8 @@ void drawCar(const simulation::Car& car)
 }
 
 void drawPanel(const simulation::Car& car, const simulation::CarInput& input, ControlMode mode,
-               const ai::AIController& controller)
+               const ai::AIController& controller, const simulation::TrackProgress& progress,
+               const ai::FitnessEvaluator& evaluator)
 {
     DrawRectangle(kSimWidth, 0, kPanelWidth, kScreenHeight, Color{30, 30, 30, 255});
 
@@ -1495,7 +2212,7 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input, Co
     int y = 20;
     const int lineHeight = 22;
 
-    DrawText("STAGE 7 - AI CONTROLLER", x, y, 20, RAYWHITE);
+    DrawText("STAGE 8 - PROGRESS & FITNESS", x, y, 20, RAYWHITE);
     y += lineHeight;
 
     char line[128];
@@ -1505,53 +2222,63 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input, Co
     DrawText(line, x, y, 18, aiMode ? SKYBLUE : RAYWHITE);
     y += lineHeight * 2;
 
-    std::snprintf(line, sizeof(line), "Speed: %.1f px/s", static_cast<double>(car.getSpeed()));
-    DrawText(line, x, y, 18, RAYWHITE);
+    DrawText("PROGRESS", x, y, 18, YELLOW);
     y += lineHeight;
-
-    std::snprintf(line, sizeof(line), "Forward velocity: %.1f px/s", static_cast<double>(car.getForwardVelocity()));
-    DrawText(line, x, y, 18, RAYWHITE);
+    std::snprintf(line, sizeof(line), "Lap pos: %.3f  Cont: %.3f  Best: %.3f",
+                  static_cast<double>(progress.getLapPosition()), static_cast<double>(progress.getContinuousProgress()),
+                  static_cast<double>(progress.getBestProgress()));
+    DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
-
-    std::snprintf(line, sizeof(line), "Lateral velocity: %.1f px/s", static_cast<double>(car.getLateralVelocity()));
-    DrawText(line, x, y, 18, RAYWHITE);
-    y += lineHeight;
-
-    std::snprintf(line, sizeof(line), "Slip angle: %.1f deg", static_cast<double>(car.getSlipAngle() * RAD2DEG));
-    DrawText(line, x, y, 18, RAYWHITE);
+    std::snprintf(line, sizeof(line), "Laps: %d   Checkpoints: %d (next: %d/%d)", progress.getLapCount(),
+                  progress.getTotalCheckpointsPassed(), progress.getExpectedCheckpoint(),
+                  simulation::TrackProgress::kCheckpointCount);
+    DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight * 2;
 
-    std::snprintf(line, sizeof(line), "Throttle: %.2f", static_cast<double>(input.throttle));
-    DrawText(line, x, y, 18, RAYWHITE);
+    DrawText("FITNESS", x, y, 18, YELLOW);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Fitness: %.1f   Time: %.1fs", static_cast<double>(evaluator.getFitness()),
+                  static_cast<double>(evaluator.getElapsedTime()));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "State: %s (%s)", evaluator.isEvaluationFinished() ? "FINISHED" : "RUNNING",
+                  finishReasonLabel(evaluator.getFinishReason()));
+    DrawText(line, x, y, 16, evaluator.isEvaluationFinished() ? RED : GREEN);
+    y += lineHeight * 2;
+
+    std::snprintf(line, sizeof(line), "Speed: %.0f  Fwd: %.0f  Lat: %.0f px/s", static_cast<double>(car.getSpeed()),
+                  static_cast<double>(car.getForwardVelocity()), static_cast<double>(car.getLateralVelocity()));
+    DrawText(line, x, y, 16, RAYWHITE);
     y += lineHeight;
 
-    std::snprintf(line, sizeof(line), "Steering: %.2f", static_cast<double>(input.steering));
-    DrawText(line, x, y, 18, RAYWHITE);
+    std::snprintf(line, sizeof(line), "Slip: %.1f deg", static_cast<double>(car.getSlipAngle() * RAD2DEG));
+    DrawText(line, x, y, 16, RAYWHITE);
+    y += lineHeight;
+
+    std::snprintf(line, sizeof(line), "Throttle: %.2f  Steering: %.2f", static_cast<double>(input.throttle),
+                  static_cast<double>(input.steering));
+    DrawText(line, x, y, 16, RAYWHITE);
     y += lineHeight * 2;
 
     if (aiMode)
     {
-        DrawText("AI outputs:", x, y, 18, SKYBLUE);
+        DrawText("AI outputs:", x, y, 16, SKYBLUE);
         y += lineHeight;
 
-        std::snprintf(line, sizeof(line), "Raw steering:    %+.3f", static_cast<double>(controller.getRawSteeringOutput()));
+        std::snprintf(line, sizeof(line), "raw    steer %+.2f throttle %+.2f",
+                      static_cast<double>(controller.getRawSteeringOutput()),
+                      static_cast<double>(controller.getRawThrottleOutput()));
         DrawText(line, x, y, 16, LIGHTGRAY);
         y += lineHeight;
 
-        std::snprintf(line, sizeof(line), "Raw throttle:    %+.3f", static_cast<double>(controller.getRawThrottleOutput()));
-        DrawText(line, x, y, 16, LIGHTGRAY);
-        y += lineHeight;
-
-        std::snprintf(line, sizeof(line), "Mapped steering: %+.3f", static_cast<double>(input.steering));
-        DrawText(line, x, y, 16, LIGHTGRAY);
-        y += lineHeight;
-
-        std::snprintf(line, sizeof(line), "Mapped throttle: %+.3f", static_cast<double>(input.throttle));
+        std::snprintf(line, sizeof(line), "mapped steer %+.2f throttle %+.2f", static_cast<double>(input.steering),
+                      static_cast<double>(input.throttle));
         DrawText(line, x, y, 16, LIGHTGRAY);
         y += lineHeight * 2;
     }
 
-    DrawText("Sensor values (normalized / raw px):", x, y, 18, RAYWHITE);
+    std::snprintf(line, sizeof(line), "Sensors (%d, obs=%d):", simulation::Car::kSensorCount, ai::kObservationSize);
+    DrawText(line, x, y, 16, RAYWHITE);
     y += lineHeight;
     for (int i = 0; i < simulation::Car::kSensorCount; ++i)
     {
@@ -1562,25 +2289,16 @@ void drawPanel(const simulation::Car& car, const simulation::CarInput& input, Co
         DrawText(line, x, y, 16, LIGHTGRAY);
         y += lineHeight;
     }
-
-    std::snprintf(line, sizeof(line), "Observation inputs: %d", ai::kObservationSize);
-    DrawText(line, x, y, 16, LIGHTGRAY);
-    y += lineHeight * 2;
+    y += lineHeight;
 
     DrawText(car.isAlive() ? "ALIVE" : "CRASHED", x, y, 20, car.isAlive() ? GREEN : RED);
     y += lineHeight * 2;
 
     DrawText("Controls:", x, y, 18, RAYWHITE);
     y += lineHeight;
-    DrawText("W / Up    - throttle", x, y, 16, LIGHTGRAY);
+    DrawText("W/Up throttle   A/D or Left/Right steer", x, y, 16, LIGHTGRAY);
     y += lineHeight;
-    DrawText("A / Left  - steer left", x, y, 16, LIGHTGRAY);
-    y += lineHeight;
-    DrawText("D / Right - steer right", x, y, 16, LIGHTGRAY);
-    y += lineHeight;
-    DrawText("TAB       - toggle manual/AI", x, y, 16, LIGHTGRAY);
-    y += lineHeight;
-    DrawText("R         - reset", x, y, 16, LIGHTGRAY);
+    DrawText("TAB toggle manual/AI   R reset", x, y, 16, LIGHTGRAY);
 }
 
 } // namespace
@@ -1601,17 +2319,30 @@ int main()
     verifyGenome();
     verifyPhenotypeBuilder();
     verifyAIController(track);
+    verifyTrackProgress(track);
+    verifyFitnessEvaluator(track);
 
     const simulation::TrackDefinition& def = track.getDefinition();
 
     simulation::Car car(makeCarParams(), track);
     car.reset(kSpawnPosition, kSpawnHeading);
 
+    simulation::TrackProgress trackProgress(track.getDefinition());
+    trackProgress.reset(car);
+
+    ai::FitnessEvaluator fitnessEvaluator;
+    fitnessEvaluator.reset();
+
     // One demonstration AIController, built once from one hand-built,
     // deterministic Genome. Toggling control modes never rebuilds or resets
     // this network -- see createDemonstrationGenome() for its fixed weights.
     ai::AIController aiController(ai::neat::buildPhenotype(createDemonstrationGenome()));
     ControlMode controlMode = ControlMode::Manual;
+
+    // Reflects the CarInput actually applied on the most recent simulation
+    // step. Declared outside the loop so it keeps showing that final input
+    // once the evaluation finishes and the sim step below stops running.
+    simulation::CarInput input;
 
     while (!WindowShouldClose())
     {
@@ -1623,16 +2354,27 @@ int main()
         if (IsKeyPressed(KEY_R))
         {
             car.reset(kSpawnPosition, kSpawnHeading);
+            trackProgress.reset(car);
+            fitnessEvaluator.reset();
         }
 
-        // Manual mode reads the keyboard directly; AI mode obtains CarInput
-        // only from AIController, which itself reads the Car's own
-        // already-refreshed sensors/state -- neither mode duplicates
-        // sensor casting, and keyboard input never reaches the car while in
-        // AI mode.
-        const simulation::CarInput input =
-            (controlMode == ControlMode::Manual) ? readInput() : aiController.update(car);
-        car.update(input, kSimulationDt);
+        // Once the evaluation has finished, the simulation step is skipped
+        // entirely: no further input is applied, the car/progress/fitness
+        // state stays exactly as it was at the moment of finishing, and only
+        // R (above) starts a fresh evaluation.
+        if (!fitnessEvaluator.isEvaluationFinished())
+        {
+            // Manual mode reads the keyboard directly; AI mode obtains
+            // CarInput only from AIController, which itself reads the Car's
+            // own already-refreshed sensors/state -- neither mode
+            // duplicates sensor casting, and keyboard input never reaches
+            // the car while in AI mode. Both modes feed the exact same
+            // TrackProgress/FitnessEvaluator update calls below.
+            input = (controlMode == ControlMode::Manual) ? readInput() : aiController.update(car);
+            car.update(input, kSimulationDt);
+            trackProgress.update(car);
+            fitnessEvaluator.update(car, trackProgress, kSimulationDt);
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -1645,7 +2387,7 @@ int main()
                     def.innerRadiusX, def.innerRadiusY, BLACK);
 
         drawCar(car);
-        drawPanel(car, input, controlMode, aiController);
+        drawPanel(car, input, controlMode, aiController, trackProgress, fitnessEvaluator);
 
         EndDrawing();
     }

@@ -26,9 +26,11 @@ add_executable(neat_car_simulation
     src/main.cpp
     src/simulation/Track.cpp
     src/simulation/Car.cpp
+    src/simulation/TrackProgress.cpp
     src/ai/Observation.cpp
     src/ai/NeuralNetwork.cpp
     src/ai/AIController.cpp
+    src/ai/FitnessEvaluator.cpp
     src/ai/neat/NodeGene.cpp
     src/ai/neat/ConnectionGene.cpp
     src/ai/neat/Genome.cpp
