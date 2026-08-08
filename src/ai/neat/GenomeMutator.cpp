@@ -66,6 +66,18 @@ void validateAddConnectionConfig(const MutationConfig& config)
     }
 }
 
+// Deliberately independent of the other two validate*Config() functions, for
+// the same reason validateAddConnectionConfig() is independent of
+// validateWeightMutationConfig(): each mutation kind must keep behaving
+// exactly as it did in its own stage, regardless of fields it never reads.
+void validateAddNodeConfig(const MutationConfig& config)
+{
+    if (!isProbability(config.addNodeProbability))
+    {
+        throw std::invalid_argument("MutationConfig: addNodeProbability must be finite and within [0,1]");
+    }
+}
+
 bool isValidSourceType(NodeType type)
 {
     return type == NodeType::Input || type == NodeType::Bias || type == NodeType::Hidden;
@@ -260,6 +272,151 @@ bool GenomeMutator::mutateAddConnection(Genome& genome, InnovationTracker& innov
     const float weight = newWeight(m_rng);
 
     genome.addConnection(ConnectionGene(chosenSource, chosenTarget, weight, true, innovation));
+    return true;
+}
+
+bool GenomeMutator::mutateAddNode(Genome& genome, InnovationTracker& innovationTracker, const MutationConfig& config)
+{
+    validateAddNodeConfig(config);
+
+    std::uniform_real_distribution<float> selectForMutation(0.0f, 1.0f);
+    if (selectForMutation(m_rng) >= config.addNodeProbability)
+    {
+        return false;
+    }
+
+    std::vector<std::size_t> eligibleIndices;
+    const std::vector<ConnectionGene>& connections = genome.connections();
+    for (std::size_t i = 0; i < connections.size(); ++i)
+    {
+        if (connections[i].isEnabled())
+        {
+            eligibleIndices.push_back(i);
+        }
+    }
+
+    if (eligibleIndices.empty())
+    {
+        return false;
+    }
+
+    // A single random starting point into the eligible set, then a
+    // deterministic wraparound scan from there -- gives a randomized
+    // candidate order without needing a full shuffle, while keeping the
+    // result a pure function of (seed, genome, tracker state).
+    std::uniform_int_distribution<std::size_t> pickStart(0, eligibleIndices.size() - 1);
+    const std::size_t startOffset = pickStart(m_rng);
+
+    // Inspection phase: purely read-only with respect to innovationTracker
+    // -- only findNodeSplitInnovation() (never allocates) and
+    // getNextAvailableNodeId() (a pure query, used only to predict what a
+    // not-yet-recorded split's node ID would be) are used here. No
+    // candidate that is skipped or that causes a throw before a selection
+    // is made can ever consume a node ID or innovation number.
+    bool found = false;
+    std::size_t selectedIndex = 0;
+
+    for (std::size_t step = 0; step < eligibleIndices.size() && !found; ++step)
+    {
+        const std::size_t candidateIndex = eligibleIndices[(startOffset + step) % eligibleIndices.size()];
+        const ConnectionGene& candidate = connections[candidateIndex];
+
+        const NodeId source = candidate.getSourceId();
+        const NodeId target = candidate.getTargetId();
+        const InnovationNumber oldInnovation = candidate.getInnovationNumber();
+
+        const NodeSplitInnovation* recordedSplit = innovationTracker.findNodeSplitInnovation(oldInnovation, source, target);
+        if (recordedSplit != nullptr)
+        {
+            const NodeGene* existingNode = genome.findNode(recordedSplit->newNodeId);
+            if (existingNode == nullptr)
+            {
+                // Recorded (possibly by another genome) but not yet present
+                // here: a clean, reusable candidate.
+                selectedIndex = candidateIndex;
+                found = true;
+                continue;
+            }
+
+            if (existingNode->getType() != NodeType::Hidden)
+            {
+                throw std::invalid_argument(
+                    "GenomeMutator: node-split innovation's new node ID conflicts with an existing non-Hidden node");
+            }
+
+            const ConnectionGene* existingIncoming = genome.findConnection(source, recordedSplit->newNodeId);
+            if (existingIncoming != nullptr && existingIncoming->getInnovationNumber() != recordedSplit->incomingInnovation)
+            {
+                throw std::invalid_argument(
+                    "GenomeMutator: existing source->newNode connection has a conflicting innovation number");
+            }
+
+            const ConnectionGene* existingOutgoing = genome.findConnection(recordedSplit->newNodeId, target);
+            if (existingOutgoing != nullptr && existingOutgoing->getInnovationNumber() != recordedSplit->outgoingInnovation)
+            {
+                throw std::invalid_argument(
+                    "GenomeMutator: existing newNode->target connection has a conflicting innovation number");
+            }
+
+            // This exact structural event (the node and/or one of its two
+            // connections) already exists in this genome -- unsuitable for
+            // a new split. Move on without touching genome or the tracker.
+            continue;
+        }
+
+        // No split recorded yet for this connection: predict the node ID a
+        // fresh allocation would receive, without allocating it.
+        const NodeId predictedNewNodeId = innovationTracker.getNextAvailableNodeId();
+        const NodeGene* existingNode = genome.findNode(predictedNewNodeId);
+        if (existingNode == nullptr)
+        {
+            // Nothing occupies the ID a fresh split would allocate: a
+            // clean, brand-new candidate.
+            selectedIndex = candidateIndex;
+            found = true;
+            continue;
+        }
+
+        if (existingNode->getType() != NodeType::Hidden)
+        {
+            throw std::invalid_argument(
+                "GenomeMutator: node-split innovation's new node ID conflicts with an existing non-Hidden node");
+        }
+        if (genome.hasConnection(source, predictedNewNodeId) || genome.hasConnection(predictedNewNodeId, target))
+        {
+            // A connection already occupies one of the split's directed
+            // pairs, but no historical marking for this split has ever
+            // been issued -- no legitimate innovation could justify it.
+            throw std::invalid_argument(
+                "GenomeMutator: existing connection occupies a split endpoint with no matching historical innovation");
+        }
+
+        // An unrelated Hidden node happens to occupy the ID a fresh split
+        // would receive, but no connection conflicts -- unsuitable, move
+        // on without touching genome or the tracker.
+    }
+
+    if (!found)
+    {
+        return false;
+    }
+
+    const ConnectionGene& chosen = connections[selectedIndex];
+    const NodeId source = chosen.getSourceId();
+    const NodeId target = chosen.getTargetId();
+    const float oldWeight = chosen.getWeight();
+    const InnovationNumber oldInnovation = chosen.getInnovationNumber();
+
+    // The only point at which the tracker's state can change -- reached for
+    // exactly the one candidate selected for an actual mutation. Idempotent
+    // when oldInnovation was already recorded (the cross-genome reuse
+    // case), so this never allocates a second time for the same split.
+    const NodeSplitInnovation split = innovationTracker.getNodeSplitInnovation(oldInnovation, source, target);
+
+    genome.addNode(NodeGene(split.newNodeId, NodeType::Hidden));
+    genome.mutableConnections()[selectedIndex].disable();
+    genome.addConnection(ConnectionGene(source, split.newNodeId, 1.0f, true, split.incomingInnovation));
+    genome.addConnection(ConnectionGene(split.newNodeId, target, oldWeight, true, split.outgoingInnovation));
     return true;
 }
 

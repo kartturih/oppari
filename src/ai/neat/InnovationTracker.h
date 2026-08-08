@@ -101,6 +101,38 @@ public:
     // simply never assigned to anything, which is harmless).
     NodeSplitInnovation getNodeSplitInnovation(InnovationNumber splitConnectionInnovation, NodeId sourceId, NodeId targetId);
 
+    // Read-only counterpart to getNodeSplitInnovation(): never allocates a
+    // node ID or connection innovation, and so can never advance
+    // getNextAvailableNodeId() or getNextAvailableInnovation(), even as a
+    // side effect -- unlike getNodeSplitInnovation(), which allocates on a
+    // first request. Intended for a caller (e.g. GenomeMutator) that must
+    // inspect whether/how a split was already historically recorded before
+    // committing to actually performing it, without prematurely consuming
+    // new historical markings for a candidate that may end up rejected.
+    //
+    // Returns nullptr if splitConnectionInnovation has not been recorded by
+    // any prior getNodeSplitInnovation() call. Otherwise returns a pointer
+    // to the stored record (valid until the next call to
+    // getNodeSplitInnovation() for the same splitConnectionInnovation,
+    // which -- being idempotent -- never actually changes it).
+    //
+    // Throws std::invalid_argument if splitConnectionInnovation, sourceId
+    // or targetId is negative, if sourceId == targetId, or if
+    // splitConnectionInnovation has already been recorded with a different
+    // sourceId/targetId -- the same consistency check
+    // getNodeSplitInnovation() performs, so a caller that only ever peeks
+    // through this method still cannot observe a corrupted/mismatched
+    // split silently.
+    const NodeSplitInnovation* findNodeSplitInnovation(InnovationNumber splitConnectionInnovation, NodeId sourceId,
+                                                         NodeId targetId) const;
+
+    // True exactly when splitConnectionInnovation has already been
+    // recorded by a prior getNodeSplitInnovation() call. A pure, read-only
+    // existence check -- never allocates.
+    //
+    // Throws std::invalid_argument if splitConnectionInnovation is negative.
+    bool hasNodeSplitInnovation(InnovationNumber splitConnectionInnovation) const;
+
     // The node ID / innovation number that the next new allocation would
     // receive, given everything requested so far. Overflow: allocation
     // throws std::overflow_error, instead of wrapping, exactly when the

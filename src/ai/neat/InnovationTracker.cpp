@@ -101,4 +101,42 @@ NodeSplitInnovation InnovationTracker::getNodeSplitInnovation(InnovationNumber s
     return innovation;
 }
 
+const NodeSplitInnovation* InnovationTracker::findNodeSplitInnovation(InnovationNumber splitConnectionInnovation,
+                                                                        NodeId sourceId, NodeId targetId) const
+{
+    if (splitConnectionInnovation < 0)
+    {
+        throw std::invalid_argument("InnovationTracker: splitConnectionInnovation must be non-negative");
+    }
+    if (sourceId < 0 || targetId < 0)
+    {
+        throw std::invalid_argument("InnovationTracker: node IDs must be non-negative");
+    }
+    if (sourceId == targetId)
+    {
+        throw std::invalid_argument("InnovationTracker: source and target must differ");
+    }
+
+    const auto existing = m_splits.find(splitConnectionInnovation);
+    if (existing == m_splits.end())
+    {
+        return nullptr;
+    }
+    if (existing->second.sourceId != sourceId || existing->second.targetId != targetId)
+    {
+        throw std::invalid_argument(
+            "InnovationTracker: splitConnectionInnovation already recorded with a different source/target");
+    }
+    return &existing->second.innovation;
+}
+
+bool InnovationTracker::hasNodeSplitInnovation(InnovationNumber splitConnectionInnovation) const
+{
+    if (splitConnectionInnovation < 0)
+    {
+        throw std::invalid_argument("InnovationTracker: splitConnectionInnovation must be non-negative");
+    }
+    return m_splits.find(splitConnectionInnovation) != m_splits.end();
+}
+
 } // namespace ai::neat

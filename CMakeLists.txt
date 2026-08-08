@@ -37,6 +37,12 @@ add_executable(neat_car_simulation
     src/ai/neat/PhenotypeBuilder.cpp
     src/ai/neat/GenomeMutator.cpp
     src/ai/neat/InnovationTracker.cpp
+    src/ai/neat/GenomeCrossover.cpp
+    src/ai/neat/CompatibilityDistance.cpp
+    src/ai/neat/Species.cpp
+    src/ai/neat/Speciator.cpp
+    src/ai/neat/Individual.cpp
+    src/ai/neat/Population.cpp
 )
 
 target_include_directories(neat_car_simulation PRIVATE src)

@@ -32,9 +32,15 @@ namespace ai::neat
 // algorithm. It never touches an existing node or connection gene, and
 // never adds or removes a node.
 //
-// This stage (9C) implements add-connection structural mutation only. No
-// add-node mutation, crossover, species, or population logic exists here or
-// anywhere else in the codebase yet.
+// mutateAddNode() (Stage 9D) splits at most one existing enabled
+// ConnectionGene per call into two new connections through one new Hidden
+// node -- see its own doc comment below for the full algorithm. It disables
+// the split connection but never removes it, and never touches any other
+// existing node or connection gene.
+//
+// This stage (9D) implements add-node structural mutation only. No
+// crossover, species, or population logic exists here or anywhere else in
+// the codebase yet.
 class GenomeMutator
 {
 public:
@@ -96,6 +102,67 @@ public:
     // Genome::addConnection(). Returns true. No existing node or
     // connection gene is touched, and no node is ever added.
     bool mutateAddConnection(Genome& genome, InnovationTracker& innovationTracker, const MutationConfig& config);
+
+    // Attempts to split exactly one existing enabled connection of genome
+    // into two, through one new Hidden node.
+    //
+    // Throws std::invalid_argument if config.addNodeProbability is
+    // non-finite or outside [0,1]. This check runs first, before any RNG
+    // draw or access to genome/innovationTracker -- even if the mutation
+    // ends up not being selected.
+    //
+    // Otherwise: draws once against config.addNodeProbability; if not
+    // selected, returns false, leaving genome and innovationTracker
+    // completely unchanged (no further draws, no allocation).
+    //
+    // If selected: collects every currently *enabled* connection gene
+    // (disabled connections are never eligible). If none exist, returns
+    // false, leaving genome and innovationTracker unchanged. Otherwise
+    // draws one random starting index into that eligible set from the
+    // owned generator, then *inspects* candidates in that order, wrapping
+    // around at most once, without modifying genome and -- critically --
+    // without allocating anything from innovationTracker: only
+    // innovationTracker.findNodeSplitInnovation() (a read-only lookup) and
+    // innovationTracker.getNextAvailableNodeId() (a pure query) are used
+    // during inspection, so a candidate that ends up rejected or skipped
+    // never consumes a node ID or innovation number. For the candidate
+    // source -> target (innovation oldInnovation):
+    //   - If innovationTracker.findNodeSplitInnovation(oldInnovation,
+    //     source, target) returns a previously recorded split (this exact
+    //     structural event already happened, possibly in another genome):
+    //       - If genome has no node with that split's newNodeId, this is a
+    //         clean, reusable candidate -- select it immediately.
+    //       - If genome already has a node there: throws
+    //         std::invalid_argument if it is not Hidden, or if either new
+    //         connection's slot is already occupied by a gene with a
+    //         conflicting innovation number (a structural inconsistency,
+    //         never silently repaired). Otherwise this exact split already
+    //         exists in genome; unsuitable, move on to the next candidate.
+    //   - If no split has been recorded yet, predicts the node ID a fresh
+    //     allocation would receive (innovationTracker.getNextAvailableNodeId(),
+    //     unread, not allocated) and checks it against genome the same
+    //     way: an existing non-Hidden node there throws, an existing
+    //     connection already occupying either of the split's directed
+    //     pairs throws (no historical marking could legitimately justify
+    //     it yet), an existing unrelated Hidden node with no conflicting
+    //     connection is skipped as unsuitable, and no existing node at all
+    //     means a clean, brand-new candidate -- select it immediately.
+    // Once a candidate is selected (not merely inspected), exactly one call
+    // to innovationTracker.getNodeSplitInnovation(oldInnovation, source,
+    // target) is made -- the *only* point at which the tracker's state can
+    // change, reused idempotently if this exact split was already
+    // recorded. The original connection is then disabled (never removed),
+    // a new Hidden NodeGene is added with the returned newNodeId, and
+    // source -> newNodeId (weight exactly 1.0, enabled, innovation
+    // incomingInnovation) and newNodeId -> target (weight exactly
+    // oldWeight, enabled, innovation outgoingInnovation) are added via
+    // Genome::addConnection(). Returns true.
+    // If every eligible candidate turns out unsuitable (already split in
+    // this exact genome), returns false without modifying genome or
+    // innovationTracker. No existing node or connection gene's identity
+    // (source/target ID, innovation number) is ever changed, and no gene
+    // besides the disabled original connection is altered.
+    bool mutateAddNode(Genome& genome, InnovationTracker& innovationTracker, const MutationConfig& config);
 
 private:
     std::mt19937 m_rng;

@@ -26,6 +26,15 @@ namespace ai::neat
 //      scan if none of them validate.
 //   3. A newly added connection's initial weight is drawn uniformly from
 //      [newConnectionWeightMin, newConnectionWeightMax].
+//
+// Add-node structural mutation (Stage 9D) -- see
+// GenomeMutator::mutateAddNode() for the full algorithm:
+//   1. With probability addNodeProbability, an existing enabled connection
+//      is split into two; otherwise nothing happens.
+//   2. If attempted, one enabled connection is selected (via a randomized
+//      starting point over the eligible set) and split into
+//      source -> newNode -> target, with newNode's identity and the two new
+//      connections' innovation numbers coming from InnovationTracker.
 struct MutationConfig
 {
     float weightMutationProbability = 0.8f; // chance each connection is selected for mutation at all, in [0,1]
@@ -38,6 +47,8 @@ struct MutationConfig
     float newConnectionWeightMin = -1.0f;   // inclusive lower bound for a newly added connection's initial weight
     float newConnectionWeightMax = 1.0f;    // inclusive upper bound for a newly added connection's initial weight
     int addConnectionMaxAttempts = 20;      // random (source, target) candidates tried before the deterministic fallback scan
+
+    float addNodeProbability = 0.03f; // chance an add-node (connection-split) mutation is attempted at all, in [0,1]
 };
 
 } // namespace ai::neat
