@@ -4966,10 +4966,18 @@ ai::neat::Genome makeSimpleGenome(float weight)
 // end to end. Independent of Car/Track/AI/keyboard/render timing. Runs
 // once at startup. No Population, Individual/Agent wrapper, fitness
 // storage, adjusted fitness, fitness sharing, champion tracking, parent
-// selection, reproduction, elitism, mutation orchestration, crossover
-// orchestration, persistent cross-generation species, representative
-// reselection, stagnation, extinction, or generation-loop logic is
-// exercised here -- only species assignment, per Stage 12's scope.
+// selection, reproduction, elitism, mutation orchestration, or crossover
+// orchestration is exercised here -- only species assignment, per Stage
+// 12's original scope. As of Stage 17, Speciator's persistent
+// cross-generation identity/representative-reselection/fitness-history/
+// stagnation behavior is dedicated its own suite,
+// verifyPersistentSpeciesAndStagnation() below; the single test in this
+// function that directly asserted the OLD (pre-Stage-17, non-persistent)
+// cross-call behavior -- originally items 28 & 29 -- has been updated
+// in place to assert the new, intentional persistent behavior instead
+// (search "28 & 29" below). Every other test here only ever calls
+// speciate() once per Speciator instance, so persistence never changes
+// its outcome, and remains unmodified.
 void verifySpeciation()
 {
     using namespace compatibility_verify;
@@ -5339,8 +5347,15 @@ void verifySpeciation()
                "a very large threshold must group all genomes into a single species");
     }
 
-    // 28 & 29: SpeciesIds keep increasing monotonically across separate
-    // speciate() calls on the same Speciator, never reusing earlier IDs.
+    // 28 & 29 (updated for Stage 17 persistence -- see this function's own
+    // doc comment): SpeciesIds keep increasing monotonically across
+    // separate speciate() calls on the same Speciator, and an extinct id is
+    // never reused -- but, as of Stage 17, a genome that remains compatible
+    // with an existing persistent species' representative now rejoins that
+    // species' SAME SpeciesId, rather than unconditionally founding a new
+    // one every call (that was the pre-Stage-17 behavior this test used to
+    // assert; see verifyPersistentSpeciesAndStagnation() for the dedicated
+    // persistence suite).
     {
         Speciator speciator;
         CompatibilityConfig compatConfig;
@@ -5351,11 +5366,18 @@ void verifySpeciation()
         assert(firstSpecies.size() == 3 && firstSpecies[0].getId() == 0 && firstSpecies[1].getId() == 1 &&
                firstSpecies[2].getId() == 2 && "the first call must allocate SpeciesIds 0, 1, 2");
 
+        // weight 0.0 is still compatible with species 0's representative
+        // (still 0.0) and rejoins SpeciesId 0; weight 30.0 is compatible
+        // with none of the three old representatives and founds a new
+        // species with the next monotonically increasing id (3). Species 1
+        // and 2 go extinct this pass (nothing in secondBatch matched
+        // them) -- their ids are never reused.
         std::vector<Genome> secondBatch = {makeSimpleGenome(0.0f), makeSimpleGenome(30.0f)};
         const std::vector<Species> secondSpecies = speciator.speciate(secondBatch, compatConfig, speciationConfig);
-        assert(secondSpecies.size() == 2 && secondSpecies[0].getId() == 3 && secondSpecies[1].getId() == 4 &&
-               "a second call on the same Speciator must continue the SpeciesId counter monotonically, never "
-               "reusing IDs 0-2"); // 28 & 29
+        assert(secondSpecies.size() == 2 && secondSpecies[0].getId() == 0 && secondSpecies[1].getId() == 3 &&
+               "a genome compatible with a persistent species must rejoin its existing SpeciesId, while a "
+               "genuinely new species still receives the next monotonically increasing id -- extinct ids 1 and 2 "
+               "are never reused"); // 28 & 29
     }
 
     // 30: an empty call sandwiched between non-empty calls does not
@@ -6933,9 +6955,32 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
                   static_cast<int>(population.getFinishedCount()));
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
-    std::snprintf(line, sizeof(line), "Species: %d", static_cast<int>(population.getSpeciesCount()));
-    DrawText(line, x, y, 16, LIGHTGRAY);
-    y += lineHeight;
+    // Stage 17: active vs. stagnant species counts, folded onto the same
+    // line as the species total to keep the panel compact -- read straight
+    // from the persistent Species collection (never from
+    // Population::getReproductionStats(), which is empty before the first
+    // generation transition). Purely informational, never mutates
+    // Population state.
+    {
+        int activeCount = 0;
+        int stagnantCount = 0;
+        for (const ai::neat::Species& s : population.getCurrentSpecies())
+        {
+            if (s.isStagnant())
+            {
+                ++stagnantCount;
+            }
+            else
+            {
+                ++activeCount;
+            }
+        }
+        std::snprintf(line, sizeof(line), "Species: %d (active %d, stagnant %d)", static_cast<int>(population.getSpeciesCount()),
+                      activeCount, stagnantCount);
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+    }
+
     DrawText("REPRODUCTION: SPECIES-AWARE", x, y, 16, SKYBLUE);
     y += lineHeight * 2;
 
@@ -6964,6 +7009,20 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
             std::snprintf(line, sizeof(line), "Species ID: %d   Size: %d", highlightedSpecies->getId(),
                           static_cast<int>(highlightedSpecies->size()));
             DrawText(line, x, y, 16, LIGHTGRAY);
+            y += lineHeight;
+
+            // Stage 17: persistent species history, read straight from the
+            // Species object itself -- valid immediately (age/historical
+            // best all start at their documented "never evaluated" state
+            // for a brand-new species; see Species.h).
+            std::snprintf(line, sizeof(line), "Age: %d   Historical best: %.1f", static_cast<int>(highlightedSpecies->getAge()),
+                          static_cast<double>(highlightedSpecies->getHistoricalBestFitness()));
+            DrawText(line, x, y, 16, LIGHTGRAY);
+            y += lineHeight;
+            std::snprintf(line, sizeof(line), "No-improve: %d gens   Stagnant: %s",
+                          static_cast<int>(highlightedSpecies->getGenerationsSinceImprovement()),
+                          highlightedSpecies->isStagnant() ? "YES" : "NO");
+            DrawText(line, x, y, 16, highlightedSpecies->isStagnant() ? RED : LIGHTGRAY);
             y += lineHeight;
 
             const ai::neat::Population::SpeciesReproductionStats* stats = nullptr;
@@ -8211,6 +8270,518 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
     TraceLog(LOG_INFO, "Species-aware reproduction verification: all deterministic checks passed");
 }
 
+// Stage 17 dedicated verification suite: persistent species identity and
+// stagnation management. Exercises Speciator's persistent cross-call
+// lifecycle (SpeciesId retention/extinction, representative reselection
+// ordering) and Species::recordGeneration()'s fitness-history/stagnation
+// rule directly and deterministically (no simulation, no RNG, hand-computed
+// expected values), then a real multi-generation Population run to verify
+// the reproduction-side integration (stagnant species excluded from normal
+// offspring allocation, global elites still protected, the all-stagnant
+// safety fallback) holds as a set of invariants that are safe to check
+// regardless of exactly which species/stagnation pattern this run's RNG
+// happens to produce. Deliberately does not re-test what Stage 17 left
+// untouched (crossover/mutation pipeline, InnovationTracker sharing,
+// compatibility distance itself, Fitness v2, the hard track) beyond
+// confirming those code paths still run cleanly -- verifyPopulation() and
+// verifySpeciesAwareReproduction() above already cover them thoroughly.
+void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
+{
+    using namespace population_verify;
+    using namespace speciation_verify;
+    using ai::neat::allocateSpeciesOffspring;
+    using ai::neat::Speciator;
+    using ai::neat::Species;
+    using ai::neat::SpeciesId;
+
+    // 1: speciesStagnationLimit == 0 is rejected.
+    {
+        const Genome base = createDemonstrationGenome();
+        PopulationConfig config = makeTestPopulationConfig(6, 1u);
+        config.speciesStagnationLimit = 0;
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+        assert(throwsInvalidArgument(
+                   [&]()
+                   {
+                       Population population(base, track, makeCarParams(), kSpawnPosition, kSpawnHeading, config,
+                                              mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+                       (void)population;
+                   }) &&
+               "speciesStagnationLimit of 0 must be rejected"); // 1
+    }
+
+    // 2-14, 39 & 40: persistent Speciator lifecycle, driven directly (no
+    // Population/simulation involved) across three hand-controlled
+    // generations, so every expected id/membership/representative value
+    // below is exactly computable by hand from compatibilityDistance's
+    // simple formula for makeSimpleGenome() genomes (distance = 0.4 *
+    // |weightA - weightB|, see speciation_verify's own comment) rather than
+    // depending on any simulation outcome. Threshold = 0.5 throughout (so
+    // "compatible" means a weight difference of at most 1.25).
+    {
+        Speciator speciator;
+        CompatibilityConfig compatConfig;
+        SpeciationConfig speciationConfig;
+        speciationConfig.compatibilityThreshold = 0.5f;
+
+        // Generation 1: weight 0.0 (idx0) founds species 0 (rep = 0.0);
+        // weight 1.0 (idx1) joins it (dist 0.4*1.0=0.4<=0.5); weight 20.0
+        // (idx2) is incompatible with species 0 (dist 8.0>0.5) and founds
+        // species 1. Reselection at the end of THIS call is a no-op for
+        // both: each founder is already its own lowest-index member (see
+        // Speciator.h's own reasoning) -- species 0's rep stays 0.0,
+        // species 1's stays 20.0.
+        std::vector<Genome> gen1 = {makeSimpleGenome(0.0f), makeSimpleGenome(1.0f), makeSimpleGenome(20.0f)};
+        const std::vector<Species>& afterGen1 = speciator.speciate(gen1, compatConfig, speciationConfig);
+        assert(afterGen1.size() == 2 && afterGen1[0].getId() == 0 && afterGen1[1].getId() == 1 &&
+               afterGen1[0].getMemberIndices() == (std::vector<std::size_t>{0, 1}) &&
+               afterGen1[1].getMemberIndices() == (std::vector<std::size_t>{2}) &&
+               "setup: generation 1 must produce species 0 (2 members) and species 1 (1 member)");
+        // 2: a newly created species' documented initial history state.
+        for (const Species& s : afterGen1)
+        {
+            assert(s.getAge() == 0 && s.getHistoricalBestFitness() == 0.0f && s.getGenerationsSinceImprovement() == 0 &&
+                   !s.isStagnant() && !s.hasFitnessHistory() &&
+                   "a newly created species must start in the documented 'never evaluated' history state"); // 2
+        }
+
+        // Generation 2: weight 1.05 (idx0) and weight 0.05 (idx1) are both
+        // compared against species 0's OLD representative (still 0.0, from
+        // generation 1): dist(0.0,1.05)=0.42<=0.5 and dist(0.0,0.05)=0.02<=0.5
+        // -- BOTH join species 0 (proving assignment used the persistent old
+        // representative, item 9 -- their own compatibility with each other
+        // is irrelevant to first-match assignment). Species 1's rep (20.0)
+        // matches neither (dist >= 7.58) -- it goes EXTINCT (item 13),
+        // never resurfacing (its id, 1, is never reused, item 6).
+        // Reselection at the end of THIS call picks species 0's lowest
+        // CURRENT member index (0, weight 1.05) as its NEW representative
+        // -- a genuine change from the old 0.0 (proving items 7, 8 & 14).
+        std::vector<Genome> gen2 = {makeSimpleGenome(1.05f), makeSimpleGenome(0.05f)};
+        const std::vector<Species>& afterGen2 = speciator.speciate(gen2, compatConfig, speciationConfig);
+        assert(afterGen2.size() == 1 && afterGen2[0].getId() == 0 &&
+               "a lineage remaining compatible with its persistent representative must keep the same SpeciesId "
+               "across generations, and the extinct species must be removed"); // 3, 6 & 13
+        assert(afterGen2[0].getMemberIndices() == (std::vector<std::size_t>{0, 1}) &&
+               "member lists must be cleared and rebuilt fresh each pass, not accumulated across generations"); // 7
+
+        // Generation 3: weight 2.0. dist to generation 2's RESELECTED
+        // representative (1.05) = 0.4*0.95=0.38<=0.5 -> joins species 0. If
+        // assignment had instead (incorrectly) used generation 1's original
+        // representative (0.0), dist(0.0,2.0)=0.8>0.5 -> would NOT have
+        // joined. If reselection had instead (incorrectly) picked the
+        // LOWEST-WEIGHT generation-2 member (0.05, at index 1) rather than
+        // the lowest-INDEX one (1.05, at index 0), dist(0.05,2.0)=0.78>0.5
+        // -> would ALSO not have joined. Observing that it DOES join
+        // therefore proves, simultaneously: the representative changes only
+        // AFTER a full pass's assignment completes and takes effect
+        // starting with the NEXT call (item 10); a persistent
+        // representative genuinely exists between passes (item 8); and
+        // reselection specifically picks the lowest MEMBER INDEX, not the
+        // lowest weight or any fitness-based criterion -- Speciator has no
+        // fitness to consult at all (item 11). A second genome, weight
+        // 20.0 -- the same weight species 1 (now long extinct) was founded
+        // with -- is incompatible with species 0's representative and
+        // founds a BRAND NEW species with the next monotonically
+        // increasing id (2, never the extinct 1), starting in the same
+        // fresh 'never evaluated' state as any other new species -- proving
+        // an extinct species' identity/history never resurfaces, even when
+        // a numerically identical genome reappears later (items 4, 5, 39 &
+        // 40).
+        std::vector<Genome> gen3 = {makeSimpleGenome(2.0f), makeSimpleGenome(20.0f)};
+        const std::vector<Species>& afterGen3 = speciator.speciate(gen3, compatConfig, speciationConfig);
+        assert(afterGen3.size() == 2 && afterGen3[0].getId() == 0 && afterGen3[1].getId() == 2 &&
+               afterGen3[0].getMemberIndices() == (std::vector<std::size_t>{0}) &&
+               afterGen3[1].getMemberIndices() == (std::vector<std::size_t>{1}) &&
+               "reselection must use the previous pass's own lowest-index member as the new representative, "
+               "taking effect only starting with this call -- and a new species with the same weight as a "
+               "long-extinct one must receive a fresh id and fresh history"); // 4, 5, 8, 9, 10, 11, 39 & 40
+        assert(!afterGen3[1].hasFitnessHistory() && afterGen3[1].getAge() == 0 &&
+               "a disappeared species' history must not resurface on a differently-numbered new species"); // 40
+
+        // 12: no RNG state exists anywhere in Speciator or Species --
+        // neither class declares a std::mt19937 (or any other generator)
+        // member, and Speciator's constructor takes no seed (see
+        // Speciator.h/Species.h). Determinism (see the fixed-seed
+        // Population comparison further below) is a direct consequence.
+    }
+
+    // 15-24: fitness-history/stagnation rules, driven directly through
+    // Speciator::updateFitnessHistory() -- fully hand-computed, no
+    // simulation involved.
+    {
+        Speciator speciator;
+        CompatibilityConfig compatConfig;
+        SpeciationConfig speciationConfig;
+        speciationConfig.compatibilityThreshold = 1.0f;
+        const std::size_t stagnationLimit = 3;
+
+        std::vector<Genome> gen1 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen1 = speciator.speciate(gen1, compatConfig, speciationConfig);
+        assert(afterGen1.size() == 1 && "setup: one species with two members");
+
+        // 15, 16 & 23: the first recorded generation initializes
+        // historicalBestFitness from the RAW species best, and age
+        // increments exactly once.
+        const std::vector<float> fitness1 = {10.0f, 25.0f}; // currentSpeciesBest = 25.0 (RAW, member 1)
+        speciator.updateFitnessHistory(fitness1, stagnationLimit);
+        assert(afterGen1[0].getAge() == 1 &&
+               "age must increment exactly once per completed evaluated generation"); // 15
+        assert(afterGen1[0].hasFitnessHistory() && afterGen1[0].getHistoricalBestFitness() == 25.0f &&
+               afterGen1[0].getGenerationsSinceImprovement() == 0 &&
+               "the first recorded generation must initialize historicalBestFitness from the RAW species best"); // 16 & 23
+
+        std::vector<Genome> gen2 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen2 = speciator.speciate(gen2, compatConfig, speciationConfig);
+        assert(afterGen2.size() == 1 && afterGen2[0].getId() == 0 && "setup: same species persists into generation 2");
+        const std::vector<float> fitness2 = {30.0f, 12.0f}; // currentSpeciesBest = 30.0 > 25.0 -> improvement
+        speciator.updateFitnessHistory(fitness2, stagnationLimit);
+        assert(afterGen2[0].getHistoricalBestFitness() == 30.0f && afterGen2[0].getGenerationsSinceImprovement() == 0 &&
+               afterGen2[0].getAge() == 2 &&
+               "a strictly greater current-best must update historicalBestFitness and reset "
+               "generationsSinceImprovement"); // 17 & 18
+
+        std::vector<Genome> gen3 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen3 = speciator.speciate(gen3, compatConfig, speciationConfig);
+        const std::vector<float> fitness3 = {30.0f, 5.0f}; // currentSpeciesBest = 30.0, EXACTLY equal
+        speciator.updateFitnessHistory(fitness3, stagnationLimit);
+        assert(afterGen3[0].getHistoricalBestFitness() == 30.0f && afterGen3[0].getGenerationsSinceImprovement() == 1 &&
+               "an exactly-equal current-best must NOT count as improvement"); // 19
+
+        std::vector<Genome> gen4 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen4 = speciator.speciate(gen4, compatConfig, speciationConfig);
+        const std::vector<float> fitness4 = {8.0f, 9.0f}; // currentSpeciesBest = 9.0 < 30.0
+        speciator.updateFitnessHistory(fitness4, stagnationLimit);
+        assert(afterGen4[0].getHistoricalBestFitness() == 30.0f && afterGen4[0].getGenerationsSinceImprovement() == 2 &&
+               !afterGen4[0].isStagnant() &&
+               "a worse current-best must increment generationsSinceImprovement without touching "
+               "historicalBestFitness, and must not yet be stagnant below the limit"); // 20
+
+        std::vector<Genome> gen5 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen5 = speciator.speciate(gen5, compatConfig, speciationConfig);
+        const std::vector<float> fitness5 = {1.0f, 2.0f};
+        speciator.updateFitnessHistory(fitness5, stagnationLimit);
+        assert(afterGen5[0].getGenerationsSinceImprovement() == 3 && afterGen5[0].isStagnant() &&
+               "stagnation must begin exactly when generationsSinceImprovement reaches speciesStagnationLimit"); // 21
+
+        std::vector<Genome> gen6 = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
+        const std::vector<Species>& afterGen6 = speciator.speciate(gen6, compatConfig, speciationConfig);
+        const std::vector<float> fitness6 = {50.0f, 1.0f}; // 50.0 > 30.0 -> improvement
+        speciator.updateFitnessHistory(fitness6, stagnationLimit);
+        assert(!afterGen6[0].isStagnant() && afterGen6[0].getGenerationsSinceImprovement() == 0 &&
+               afterGen6[0].getHistoricalBestFitness() == 50.0f &&
+               "an improving generation must clear stagnation and reset generationsSinceImprovement"); // 22
+
+        // 24: adjusted fitness never affects historical best -- structural:
+        // updateFitnessHistory()'s only parameter besides the stagnation
+        // limit is rawFitnessByGenomeIndex (see Speciator.h), and it is fed
+        // directly into Species::recordGeneration() with no division or
+        // scaling of any kind (see Speciator.cpp) -- there is no adjusted
+        // fitness value anywhere in this call path for it to be affected
+        // by.
+    }
+
+    // 25 & 34 (allocateSpeciesOffspring's role in Stage 17's eligibility
+    // filtering): a species excluded from the eligible subset passed to
+    // allocateSpeciesOffspring() -- exactly what Population::reproduce()
+    // does for every stagnant, non-fallback species (see Population.cpp
+    // step 6) -- contributes NOTHING to the allocation, regardless of how
+    // large its own effective fitness would have been, since it is not
+    // part of the input at all.
+    {
+        const std::vector<SpeciesId> eligibleOnly = {1};
+        const std::vector<float> eligibleOnlySums = {2.0f}; // deliberately small vs. the excluded species' implied sum
+        const std::vector<std::size_t> allocation = allocateSpeciesOffspring(eligibleOnly, eligibleOnlySums, 10);
+        assert(allocation.size() == 1 && allocation[0] == 10 &&
+               "a species excluded from the eligible subset must receive none of the remaining slots"); // 25 & 34
+    }
+
+    // 26-33, 35, 36 & 41-48: a real, multi-generation Population run,
+    // verified through invariants that hold no matter which exact
+    // species/stagnation pattern this run's simulation/RNG happens to
+    // produce (never a hardcoded species count or id).
+    {
+        const Genome crashGenome = makeCrashGenome();
+        PopulationConfig popConfig = makeTestPopulationConfig(10, 4242u);
+        popConfig.speciesStagnationLimit = 2; // small on purpose for testing -- see this suite's own doc comment;
+                                               // the production default (15) is never changed.
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        SpeciationConfig speciationConfig;
+        speciationConfig.compatibilityThreshold = 1.0f;
+
+        Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                               mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+
+        const std::size_t targetGeneration = 6;
+        for (int step = 0; step < 4000 * (static_cast<int>(targetGeneration) + 2) &&
+                            population.getGeneration() + 1 < targetGeneration;
+             ++step)
+        {
+            population.update(kSimulationDt);
+        }
+        assert(population.getGeneration() + 1 >= targetGeneration &&
+               "setup: the population must reach at least generation targetGeneration-1 within the step budget");
+
+        // Snapshot exactly (re-snapshotting every iteration, same technique
+        // as verifyPopulation's items 15-20 and verifySpeciesAwareReproduction
+        // above) across the FINAL transition, so the fitness/genome values
+        // used below are provably what reproduce() itself used.
+        std::vector<Genome> genomeSnapshot;
+        std::vector<float> fitnessSnapshot;
+        std::size_t finishedBeforeTransitionCall = 0;
+        const std::size_t generationBeforeFinal = population.getGeneration();
+        for (int step = 0; step < 4000 && population.getGeneration() == generationBeforeFinal; ++step)
+        {
+            genomeSnapshot.clear();
+            fitnessSnapshot.clear();
+            for (std::size_t i = 0; i < population.size(); ++i)
+            {
+                genomeSnapshot.push_back(population.getIndividual(i).getGenome());
+                fitnessSnapshot.push_back(population.getIndividual(i).getFitness());
+            }
+            finishedBeforeTransitionCall = population.getFinishedCount();
+            population.update(kSimulationDt);
+        }
+        assert(population.getGeneration() == generationBeforeFinal + 1 &&
+               "setup: the final tracked transition must occur within the step budget"); // 43
+        const bool snapshotIsExact = (finishedBeforeTransitionCall == genomeSnapshot.size());
+
+        const std::vector<Population::SpeciesReproductionStats>& stats = population.getReproductionStats();
+        assert(!stats.empty() && "setup: at least one species must exist");
+
+        // 35 & 44: offspring allocation + elites reconstructs the exact
+        // configured population size, and the population itself stays that
+        // size.
+        std::size_t totalAllocated = 0;
+        for (const Population::SpeciesReproductionStats& s : stats)
+        {
+            totalAllocated += s.allocatedOffspring;
+        }
+        assert(totalAllocated + popConfig.eliteCount == popConfig.populationSize &&
+               "allocated offspring across every species plus elites must reconstruct the full population size"); // 35
+        assert(population.size() == popConfig.populationSize && "population size must remain exactly constant"); // 44
+
+        // 45 & 46: every offspring genome validates and builds a phenotype.
+        for (std::size_t i = 0; i < population.size(); ++i)
+        {
+            population.getIndividual(i).getGenome().validate(); // 45
+            ai::neat::buildPhenotype(population.getIndividual(i).getGenome()); // 46
+        }
+
+        // 26, 27 & 36: a stagnant, non-eligible species receives zero
+        // offspring (and therefore, per Stage 16's still-intact rule, both
+        // its parent-selection calls -- see selectParentFromSpecies() in
+        // Population.cpp -- never execute for it, since the inner offspring
+        // loop bound is exactly allocatedOffspring); a non-stagnant species
+        // always remains eligible.
+        bool anyEligible = false;
+        for (const Population::SpeciesReproductionStats& s : stats)
+        {
+            if (s.stagnant && !s.reproductionEligible)
+            {
+                assert(s.allocatedOffspring == 0 &&
+                       "a stagnant, non-fallback-eligible species must receive zero normal offspring"); // 26 & 36
+            }
+            if (!s.stagnant)
+            {
+                assert(s.reproductionEligible &&
+                       "a non-stagnant species must always remain reproduction-eligible"); // 27
+            }
+            anyEligible = anyEligible || s.reproductionEligible;
+        }
+        assert(anyEligible && "at least one species must always remain reproduction-eligible"); // (collapse safety)
+
+        // 30, 31, 32 & 33: the all-stagnant safety fallback, whenever this
+        // run's generation actually hit it -- exactly one species is
+        // eligible, it has the highest historicalBestFitness (ties broken
+        // by lower SpeciesId), and the override never clears the
+        // underlying species' own stagnant flag.
+        const bool allStagnant =
+            std::all_of(stats.begin(), stats.end(), [](const Population::SpeciesReproductionStats& s) { return s.stagnant; });
+        if (allStagnant)
+        {
+            std::size_t eligibleCount = 0;
+            std::size_t expectedFallback = 0;
+            for (std::size_t s = 1; s < stats.size(); ++s)
+            {
+                if (stats[s].historicalBestFitness > stats[expectedFallback].historicalBestFitness)
+                {
+                    expectedFallback = s;
+                }
+            }
+            for (std::size_t s = 0; s < stats.size(); ++s)
+            {
+                if (stats[s].reproductionEligible)
+                {
+                    ++eligibleCount;
+                    assert(s == expectedFallback &&
+                           "the all-stagnant fallback must select the species with the highest "
+                           "historicalBestFitness, ties broken by lower SpeciesId"); // 30 & 31
+                    assert(stats[s].stagnant &&
+                           "the all-stagnant fallback must NOT clear the underlying species' own stagnant "
+                           "flag -- it is a reproduction-time override only"); // 33
+                }
+            }
+            assert(eligibleCount == 1 &&
+                   "the all-stagnant fallback must activate exactly one species for reproduction"); // 32
+        }
+
+        // 28 & 29: the global elite mechanism is untouched by species
+        // stagnation -- elite slot 0 must be an unchanged copy of whichever
+        // snapshot individual had the strictly highest raw fitness,
+        // regardless of that individual's species' stagnation state, and
+        // (structurally -- see Population.cpp step 5, byte-for-byte
+        // unchanged from Stage 16) elitism ranking never reads or writes
+        // any Species/stagnation field, so it cannot reset stagnation
+        // history either way.
+        if (snapshotIsExact)
+        {
+            std::size_t topIndex = 0;
+            for (std::size_t i = 1; i < fitnessSnapshot.size(); ++i)
+            {
+                if (fitnessSnapshot[i] > fitnessSnapshot[topIndex])
+                {
+                    topIndex = i;
+                }
+            }
+            assert(connectionsMatch(population.getIndividual(0).getGenome().connections(),
+                                     genomeSnapshot[topIndex].connections()) &&
+                   "elite slot 0 must be an unchanged, byte-for-byte copy of the top raw-fitness genome, "
+                   "regardless of whether that genome's species was stagnant"); // 28 & 29
+
+            // 23 & 24 (integration-level): the reported historicalBestFitness
+            // for the species containing topIndex, if it is this
+            // generation's new best, reflects the RAW snapshot value, never
+            // divided by species size.
+            const std::vector<Species>& currentSpecies = population.getCurrentSpecies();
+            for (const Species& species : currentSpecies)
+            {
+                const std::vector<std::size_t>& members = species.getMemberIndices();
+                if (std::find(members.begin(), members.end(), topIndex) == members.end())
+                {
+                    continue;
+                }
+                float expectedSpeciesBest = fitnessSnapshot[members.front()];
+                for (std::size_t memberIndex : members)
+                {
+                    expectedSpeciesBest = std::max(expectedSpeciesBest, fitnessSnapshot[memberIndex]);
+                }
+                assert(species.getHistoricalBestFitness() >= expectedSpeciesBest - 1e-3f &&
+                       "historicalBestFitness must reflect RAW member fitness, never fitness divided by species "
+                       "size"); // 23 & 24
+                break;
+            }
+        }
+
+        // 37 & 38: species-local mating remains intact, and no
+        // cross-species mating was introduced -- structurally unchanged
+        // from Stage 16 (selectParentFromSpecies() still only ever samples
+        // from the one Species passed to it; see Population.cpp step 8,
+        // byte-for-byte the same loop structure as Stage 16 except the
+        // species being iterated now skips ineligible ones via zero
+        // allocation rather than any change to parent selection itself).
+
+        // 47: structural mutations still share exactly one InnovationTracker
+        // -- unchanged code path from Stage 16 (already exercised end to
+        // end by verifyPopulation's items 24-28 and this suite's genome
+        // validation above).
+    }
+
+    // 41 & 42: fixed seed + identical configs/base genome produce
+    // deterministic species ids/history/offspring across MULTIPLE
+    // generations; a different seed may diverge in species lineage while
+    // every resulting Population remains internally valid either way.
+    {
+        const Genome crashGenome = makeCrashGenome();
+        PopulationConfig popConfig = makeTestPopulationConfig(8, 909u);
+        popConfig.speciesStagnationLimit = 2;
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        SpeciationConfig speciationConfig;
+        speciationConfig.compatibilityThreshold = 1.0f;
+
+        auto runToGeneration = [](Population& population, std::size_t targetGeneration)
+        {
+            for (int step = 0; step < 4000 * (static_cast<int>(targetGeneration) + 2) && population.getGeneration() < targetGeneration;
+                 ++step)
+            {
+                population.update(kSimulationDt);
+            }
+        };
+
+        Population populationX(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        Population populationY(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        runToGeneration(populationX, 4);
+        runToGeneration(populationY, 4);
+        assert(populationX.getGeneration() >= 4 && populationY.getGeneration() >= 4 &&
+               "setup: both populations must reach generation 4 within the step budget");
+
+        const std::vector<Species>& speciesX = populationX.getCurrentSpecies();
+        const std::vector<Species>& speciesY = populationY.getCurrentSpecies();
+        assert(speciesX.size() == speciesY.size() &&
+               "identical seed/configs/base genome must produce an identical species count after multiple "
+               "generations"); // 41
+        for (std::size_t s = 0; s < speciesX.size(); ++s)
+        {
+            assert(speciesX[s].getId() == speciesY[s].getId() && speciesX[s].getAge() == speciesY[s].getAge() &&
+                   speciesX[s].getMemberIndices() == speciesY[s].getMemberIndices() &&
+                   speciesX[s].getHistoricalBestFitness() == speciesY[s].getHistoricalBestFitness() &&
+                   speciesX[s].getGenerationsSinceImprovement() == speciesY[s].getGenerationsSinceImprovement() &&
+                   speciesX[s].isStagnant() == speciesY[s].isStagnant() &&
+                   "identical seed/configs/base genome must produce identical species ids/age/membership/history "
+                   "across multiple generations"); // 41 (continued)
+        }
+        for (std::size_t i = 0; i < populationX.size(); ++i)
+        {
+            assert(connectionsMatch(populationX.getIndividual(i).getGenome().connections(),
+                                     populationY.getIndividual(i).getGenome().connections()) &&
+                   "identical seed/configs/base genome must produce deterministic offspring genomes across "
+                   "multiple generations"); // 41 (continued)
+        }
+
+        PopulationConfig popConfigDifferentSeed = popConfig;
+        popConfigDifferentSeed.randomSeed = 111u;
+        Population populationZ(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfigDifferentSeed,
+                                mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        runToGeneration(populationZ, 4);
+        assert(populationZ.getGeneration() >= 4 && "setup: populationZ must reach generation 4 within the step budget");
+        // 42: populationZ's species lineage may or may not numerically
+        // differ from populationX's -- not asserted either way, since both
+        // are valid outcomes -- but it must remain internally valid
+        // regardless: every species' member indices must be in range, and
+        // every reported species must actually exist in getCurrentSpecies().
+        for (const Species& species : populationZ.getCurrentSpecies())
+        {
+            for (std::size_t memberIndex : species.getMemberIndices())
+            {
+                assert(memberIndex < populationZ.size() &&
+                       "every species' member indices must stay within the population's actual size"); // 42
+            }
+        }
+    }
+
+    // 48 & 49: Fitness v2 (ai::FitnessEvaluator) and the hard track
+    // (simulation::createHardTrackDefinition()) are untouched by Stage 17
+    // -- neither file is included or referenced anywhere in Species.h/.cpp
+    // or Speciator.h/.cpp, and Population.cpp's only fitness-related change
+    // is which existing raw-fitness vector it also forwards to
+    // Speciator::updateFitnessHistory().
+    //
+    // 50: all previous verification suites still pass -- enforced by
+    // main() continuing to call every earlier verify*() function,
+    // including the now Stage-17-updated verifySpeciation() (see its own
+    // doc comment), unchanged.
+
+    TraceLog(LOG_INFO, "Persistent species and stagnation verification: all deterministic checks passed");
+}
+
 } // namespace
 
 int main()
@@ -8240,6 +8811,7 @@ int main()
     verifyFitnessEvaluator(track);
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
+    verifyPersistentSpeciesAndStagnation(track);
 
     // The whole training run starts from one hand-built, deterministic
     // demonstration Genome (see createDemonstrationGenome()) -- Population

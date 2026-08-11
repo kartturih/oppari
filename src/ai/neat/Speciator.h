@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include "ai/neat/CompatibilityConfig.h"
@@ -12,93 +13,121 @@ namespace ai::neat
 
 // Deterministically groups a vector of Genomes into Species, using the
 // existing ai::neat::compatibilityDistance() (Stage 11) as its sole notion
-// of similarity. Speciator only manages membership assignment and
-// representatives for one speciate() call -- it does not reproduce, select
-// parents, track fitness, or persist species identity across calls beyond
-// the monotonic SpeciesId counter described below.
+// of similarity. Speciator manages species membership, representatives, and
+// (as of Stage 17) persistent per-species identity/history -- it still does
+// not reproduce, select parents, or compute fitness itself.
 //
-// Owns the next-SpeciesId counter, starting at 0 -- the only state
-// Speciator carries between speciate() calls. IDs allocated by one call are
-// never reused by a later call on the same instance, but the Species
-// objects themselves are not retained across calls: each speciate() call
-// starts with zero species and builds a brand-new std::vector<Species> from
-// scratch, even though the ID numbers keep counting up from wherever the
-// previous call left off. Persistent cross-generation species lineage
-// (reusing a Species object across calls, carrying its existing
-// representative and history forward, choosing a new representative when a
-// species survives) is out of scope for this stage.
+// Owns, for its entire lifetime:
+//   - the next-SpeciesId counter, starting at 0, monotonically increasing --
+//     an ID allocated once is never reused, even after the Species that held
+//     it goes extinct;
+//   - the persistent Species collection itself (m_species), carried forward
+//     across every speciate() call. Unlike before Stage 17, a Species
+//     object is no longer discarded and rebuilt from scratch on every call:
+//     a species whose representative a new generation's genomes remain
+//     compatible with keeps its SpeciesId, and keeps accumulating age/
+//     fitness-history/stagnation state, across as many generations as it
+//     keeps matching. A species that goes extinct (zero members after an
+//     assignment pass) is erased from m_species -- see speciate()'s own doc
+//     comment for the full per-call lifecycle.
 //
-// No RNG is used anywhere in this class.
+// No RNG is used anywhere in this class -- representative reselection
+// (see speciate()) is a deterministic, purely index-based rule.
 class Speciator
 {
 public:
     Speciator();
 
-    // Groups genomes into species by comparing each genome, strictly in
-    // vector-index order, against the representatives of species already
-    // assigned so far (species are evaluated in ascending SpeciesId order,
-    // which is also the order they appear in the returned vector): the
-    // genome joins the FIRST species whose representative is within
-    // speciationConfig.compatibilityThreshold of it (distance <=
-    // threshold, so a distance exactly equal to the threshold qualifies)
-    // -- never the nearest one, even if a later-evaluated species would be
-    // a strictly closer match. This first-match rule is intentional: it
-    // keeps assignment a simple, deterministic function of input order, at
-    // the cost of not always producing the tightest possible grouping. If
-    // no existing species qualifies, a new Species is created: its
-    // representative is a copy of this genome, it receives the next
-    // monotonically increasing SpeciesId, and this genome's index becomes
-    // its first (and, so far, only) member.
+    // Runs one persistent speciation pass and returns a const reference to
+    // Speciator's own, now-updated m_species (owned by this Speciator, and
+    // only valid until the next mutating call on it) -- callers that need a
+    // snapshot independent of future calls must copy it explicitly.
     //
-    // Before a genome can either join an existing species or found a new
-    // one, it is validated unconditionally -- regardless of whether any
-    // species exist yet to compare it against: first genome.validate()
-    // (structural correctness -- unique node IDs, connection endpoints
-    // that exist, no duplicate directed connections), then a
-    // self-comparison compatibilityDistance(genome, genome,
-    // compatibilityConfig) purely to reuse that function's own
-    // innovation-uniqueness check (it throws if genome contains two
-    // different ConnectionGenes with the same innovation number) without
-    // duplicating that logic here. This runs before this genome is
-    // compared against any existing representative and before any
-    // SpeciesId is allocated for it, so a genome that fails validation is
-    // never partially added as a member and never causes a SpeciesId to be
-    // consumed -- the exception propagates straight out of speciate(),
-    // leaving only whatever species earlier genomes had already validly
-    // produced. Comparisons against existing representatives also go
-    // through ai::neat::compatibilityDistance(genome, representative,
-    // compatibilityConfig), so any exception it throws there (invalid
-    // compatibilityConfig, conflicting matching endpoints between two
-    // genomes, ...) likewise propagates unchanged, and no genome is
-    // silently skipped.
+    // Exact per-call lifecycle:
+    //   1. Every existing persistent species' CURRENT member list is
+    //      cleared (Species::clearMembers()) -- its SpeciesId, its
+    //      representative (inherited from the previous call, or from its
+    //      own founding genome if it has none yet), and its age/history/
+    //      stagnation state are all left untouched.
+    //   2. Each genome in `genomes`, strictly in vector-index order, is
+    //      first validated exactly as before Stage 17 (genome.validate(),
+    //      then a self-comparison through compatibilityDistance() purely to
+    //      reuse its innovation-uniqueness check) -- an exception here
+    //      propagates immediately, before this genome joins/founds anything
+    //      and before any SpeciesId is allocated for it.
+    //   3. The genome is then compared, in ascending SpeciesId order (which
+    //      is also m_species's storage order -- see below), against each
+    //      existing persistent species' representative (still the OLD one
+    //      from before this call -- see point 5). It joins the FIRST
+    //      species within speciationConfig.compatibilityThreshold (distance
+    //      <= threshold) -- never the nearest one. If none qualifies, a new
+    //      Species is created: representative = a copy of this genome,
+    //      SpeciesId = the next monotonically increasing one, and this
+    //      genome's index becomes its first member. This first-match rule
+    //      is unchanged from before Stage 17.
+    //   4. Once every genome has been assigned, any species left with zero
+    //      members (extinct -- nothing in `genomes` this pass was
+    //      compatible with its old representative) is removed from
+    //      m_species. Its SpeciesId is never reused: m_nextSpeciesId only
+    //      ever increases, regardless of removals.
+    //   5. Finally, EVERY surviving species' representative is replaced
+    //      (Species::setRepresentative()) with a copy of its own lowest-
+    //      index current member (getMemberIndices().front(), which is
+    //      exactly the lowest index since members are always appended in
+    //      ascending genome-index order) -- deterministic, no RNG, and
+    //      never based on fitness (Speciator has no fitness to consult).
+    //      This happens strictly AFTER every membership decision in this
+    //      call, so this call's own assignments (step 3) always compared
+    //      against the OLD representative; the new representative only
+    //      takes effect starting with the NEXT speciate() call. For a
+    //      species founded during THIS call (step 3), its founding genome
+    //      is necessarily already its own lowest-index member (every other
+    //      member, if any, was processed later in index order), so this
+    //      step is a no-op for it.
+    //
+    // m_species remains sorted ascending by SpeciesId across every call:
+    // surviving species keep their relative order (step 4 preserves order),
+    // and newly founded species (step 3) always receive IDs higher than
+    // every existing one, so they are correctly appended at the end.
     //
     // Throws std::invalid_argument if speciationConfig.compatibilityThreshold
-    // is non-finite or negative. This check runs before any genome is
-    // processed or any SpeciesId is allocated.
-    //
-    // An empty genomes vector returns an empty species vector without
-    // allocating any SpeciesId.
+    // is non-finite or negative -- checked before any genome is processed,
+    // any species mutated, or any SpeciesId allocated. An empty genomes
+    // vector clears every existing species' members, then removes all of
+    // them as extinct (m_species becomes empty), without allocating any new
+    // SpeciesId.
     //
     // Neither genomes, compatibilityConfig, nor speciationConfig is ever
-    // modified; every Species's representative is an independent copy that
-    // stays fixed for the lifetime of this call. The returned vector is
-    // sorted ascending by SpeciesId (equivalently, species-creation order),
-    // and each Species's member indices are stored in the ascending
-    // genome-index order they were assigned in.
+    // modified.
+    const std::vector<Species>& speciate(const std::vector<Genome>& genomes, const CompatibilityConfig& compatibilityConfig,
+                                          const SpeciationConfig& speciationConfig);
+
+    // The species produced by the most recent speciate() call (or empty, if
+    // speciate() has never been called) -- the same reference speciate()
+    // itself returns, exposed so callers can re-read it without re-running
+    // speciation.
+    const std::vector<Species>& getSpecies() const { return m_species; }
+
+    // Updates every currently-tracked (post most-recent-speciate()) species'
+    // persistent fitness history from this generation's raw fitness values:
+    // for each species, currentSpeciesBest = the maximum of
+    // rawFitnessByGenomeIndex[i] over every member index i the most recent
+    // speciate() call assigned to that species, then
+    // Species::recordGeneration(currentSpeciesBest, speciesStagnationLimit)
+    // -- see its own doc comment for the exact history/stagnation rule.
     //
-    // Because assignment is first-match and strictly index-ordered, the
-    // order of genomes in the input vector can change the resulting
-    // grouping (which genome ends up founding a species and fixing its
-    // representative, and which later species a borderline genome ends up
-    // joining) even for the exact same underlying set of genomes -- this is
-    // intentional, documented behavior, not nondeterminism: the same input
-    // order, against the same Speciator state and configs, always produces
-    // the same result.
-    std::vector<Species> speciate(const std::vector<Genome>& genomes, const CompatibilityConfig& compatibilityConfig,
-                                   const SpeciationConfig& speciationConfig);
+    // rawFitnessByGenomeIndex must be indexed exactly like the genomes
+    // vector passed to the most recent speciate() call (same size, same
+    // order) -- the caller (Population) is responsible for calling this
+    // exactly once per fully evaluated generation, after that generation's
+    // final raw fitness values are known, and before the next speciate()
+    // call. Speciator itself never computes or stores raw fitness beyond
+    // this one pass -- only each species' resulting historical summary.
+    void updateFitnessHistory(const std::vector<float>& rawFitnessByGenomeIndex, std::size_t speciesStagnationLimit);
 
 private:
     SpeciesId m_nextSpeciesId;
+    std::vector<Species> m_species;
 };
 
 } // namespace ai::neat

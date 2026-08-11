@@ -33,6 +33,10 @@ void validatePopulationConfig(const PopulationConfig& config)
     {
         throw std::invalid_argument("PopulationConfig: tournamentSize must not exceed populationSize");
     }
+    if (config.speciesStagnationLimit == 0)
+    {
+        throw std::invalid_argument("PopulationConfig: speciesStagnationLimit must be greater than 0");
+    }
 }
 
 // One past the highest NodeId used anywhere in genome (0 if genome has no
@@ -197,7 +201,11 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
         m_individuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
     }
 
-    m_currentSpecies = computeCurrentSpecies();
+    // Establishes m_speciator's persistent species for generation 0 (for
+    // HUD display before this generation has even started evaluating) --
+    // no fitness history is recorded here; that only ever happens once a
+    // generation has actually finished (see reproduce()).
+    computeCurrentSpecies();
 }
 
 void Population::update(float deltaTime)
@@ -267,7 +275,7 @@ std::size_t Population::getFinishedCount() const
     return m_individuals.size() - getRunningCount();
 }
 
-std::vector<Species> Population::computeCurrentSpecies()
+const std::vector<Species>& Population::computeCurrentSpecies()
 {
     std::vector<Genome> genomes;
     genomes.reserve(m_individuals.size());
@@ -342,19 +350,32 @@ void Population::reproduce()
     }
     m_lastGenerationBestFitness = bestFitness;
 
-    // 2. Speciate the generation that just finished ONCE -- this single
-    // Species vector (ascending SpeciesId order, per Speciator's contract)
-    // is the sole source of species membership for every remaining step:
-    // fitness sharing, species fitness totals, offspring allocation, and
-    // species-local parent pools.
-    m_currentSpecies = computeCurrentSpecies();
-    const std::size_t speciesCount = m_currentSpecies.size();
+    // 2. Speciate the generation that just finished ONCE -- this single,
+    // persistent Species vector (ascending SpeciesId order, per Speciator's
+    // contract; a species compatible with its OLD representative keeps its
+    // SpeciesId and its accumulated age/history from earlier generations --
+    // see Speciator::speciate()) is the sole source of species membership
+    // for every remaining step: fitness sharing, species fitness totals,
+    // offspring allocation, and species-local parent pools.
+    const std::vector<Species>& currentSpecies = computeCurrentSpecies();
+    const std::size_t speciesCount = currentSpecies.size();
+
+    // 2b. Update each species' persistent fitness history from this
+    // generation's RAW fitness values, now that they are finally known --
+    // Speciator itself only manages membership; this is the one point where
+    // Population feeds it the fitness data needed to advance
+    // age/historicalBestFitness/generationsSinceImprovement/stagnant (see
+    // Species::recordGeneration()). currentSpecies (a reference into
+    // m_speciator's own storage) reflects the updated values immediately
+    // afterward, since recordGeneration() mutates each Species in place --
+    // no reallocation of the species vector happens here.
+    m_speciator.updateFitnessHistory(fitnessValues, m_populationConfig.speciesStagnationLimit);
 
     // 3. Fitness sharing: adjustedFitness[i] = rawFitness[i] / (size of
     // i's species). Exists only for reproduction below -- fitnessValues
     // (raw) is never modified.
     std::vector<float> adjustedFitness(populationSize, 0.0f);
-    for (const Species& species : m_currentSpecies)
+    for (const Species& species : currentSpecies)
     {
         const float speciesSize = static_cast<float>(species.size());
         for (std::size_t memberIndex : species.getMemberIndices())
@@ -371,15 +392,50 @@ void Population::reproduce()
     std::vector<float> speciesEffectiveFitnessSum(speciesCount, 0.0f);
     for (std::size_t s = 0; s < speciesCount; ++s)
     {
-        for (std::size_t memberIndex : m_currentSpecies[s].getMemberIndices())
+        for (std::size_t memberIndex : currentSpecies[s].getMemberIndices())
         {
             speciesAdjustedFitnessSum[s] += adjustedFitness[memberIndex];
             speciesEffectiveFitnessSum[s] += effectiveFitnessContribution(adjustedFitness[memberIndex]);
         }
     }
 
+    // 4b. Reproduction eligibility (Stage 17): a stagnant species is
+    // excluded from normal offspring allocation entirely. EXCEPTION: if
+    // every species this generation is stagnant, exactly one -- the one
+    // with the highest historicalBestFitness, ties broken by lower
+    // SpeciesId -- is temporarily treated as eligible for THIS generation's
+    // allocation only, to prevent total population collapse. Processing
+    // currentSpecies in its already-ascending-SpeciesId order and only ever
+    // replacing the fallback candidate on a STRICTLY greater
+    // historicalBestFitness gives the lower-SpeciesId tie-break for free.
+    // This override never touches the underlying Species's own stagnant/
+    // generationsSinceImprovement state -- it is a reproduction-time
+    // allocation decision only, recomputed fresh every generation.
+    std::vector<bool> reproductionEligible(speciesCount, true);
+    bool anyEligible = false;
+    for (std::size_t s = 0; s < speciesCount; ++s)
+    {
+        reproductionEligible[s] = !currentSpecies[s].isStagnant();
+        anyEligible = anyEligible || reproductionEligible[s];
+    }
+    if (!anyEligible && speciesCount > 0)
+    {
+        std::size_t fallbackIndex = 0;
+        for (std::size_t s = 1; s < speciesCount; ++s)
+        {
+            if (currentSpecies[s].getHistoricalBestFitness() > currentSpecies[fallbackIndex].getHistoricalBestFitness())
+            {
+                fallbackIndex = s;
+            }
+        }
+        reproductionEligible[fallbackIndex] = true;
+    }
+
     // 5. Global elitism ranking: indices sorted by (higher RAW fitness
-    // first, lower original index as a deterministic tie-break).
+    // first, lower original index as a deterministic tie-break). Elites are
+    // selected purely by raw fitness, regardless of their species'
+    // stagnation/eligibility -- an exceptional individual from an otherwise
+    // stagnant species can still survive as a global elite.
     std::vector<std::size_t> rankedIndices(populationSize);
     for (std::size_t i = 0; i < populationSize; ++i)
     {
@@ -395,20 +451,39 @@ void Population::reproduce()
               });
 
     // 6. Offspring allocation across species for the remaining (non-elite)
-    // slots. Deterministic proportional allocation (floor + largest
-    // fractional remainder, ties broken by lower SpeciesId) whenever any
-    // species has positive effective fitness; otherwise an even-as-possible
-    // split fallback (also tie-broken by lower SpeciesId). Global elites are
-    // copied separately below and never subtracted from any species'
-    // fitness total here -- this allocation applies only to remainingSlots.
+    // slots -- restricted to reproduction-eligible species only (Stage 17):
+    // an ineligible (stagnant, non-fallback) species is simply left out of
+    // the input to allocateSpeciesOffspring() entirely, so it contributes
+    // nothing to the effective-fitness total and the zero-total-fitness
+    // fallback (if it triggers) only ever splits slots among the eligible
+    // subset. Within that eligible subset, allocation is unchanged from
+    // Stage 16: deterministic proportional allocation (floor + largest
+    // fractional remainder, ties broken by lower SpeciesId), or an
+    // even-as-possible split if every eligible species has zero effective
+    // fitness. Global elites are copied separately above/below and never
+    // subtracted from any species' fitness total here -- this allocation
+    // applies only to remainingSlots.
     const std::size_t remainingSlots = populationSize - m_populationConfig.eliteCount;
-    std::vector<SpeciesId> speciesIds(speciesCount);
+    std::vector<SpeciesId> eligibleSpeciesIds;
+    std::vector<float> eligibleEffectiveFitnessSums;
+    std::vector<std::size_t> eligibleToFullIndex;
     for (std::size_t s = 0; s < speciesCount; ++s)
     {
-        speciesIds[s] = m_currentSpecies[s].getId();
+        if (reproductionEligible[s])
+        {
+            eligibleSpeciesIds.push_back(currentSpecies[s].getId());
+            eligibleEffectiveFitnessSums.push_back(speciesEffectiveFitnessSum[s]);
+            eligibleToFullIndex.push_back(s);
+        }
     }
-    const std::vector<std::size_t> offspringAllocation =
-        allocateSpeciesOffspring(speciesIds, speciesEffectiveFitnessSum, remainingSlots);
+    const std::vector<std::size_t> eligibleAllocation =
+        allocateSpeciesOffspring(eligibleSpeciesIds, eligibleEffectiveFitnessSums, remainingSlots);
+
+    std::vector<std::size_t> offspringAllocation(speciesCount, 0);
+    for (std::size_t e = 0; e < eligibleToFullIndex.size(); ++e)
+    {
+        offspringAllocation[eligibleToFullIndex[e]] = eligibleAllocation[e];
+    }
 
     std::size_t totalAllocated = 0;
     for (std::size_t count : offspringAllocation)
@@ -428,10 +503,15 @@ void Population::reproduce()
     for (std::size_t s = 0; s < speciesCount; ++s)
     {
         SpeciesReproductionStats stats;
-        stats.speciesId = m_currentSpecies[s].getId();
-        stats.memberCount = m_currentSpecies[s].size();
+        stats.speciesId = currentSpecies[s].getId();
+        stats.memberCount = currentSpecies[s].size();
         stats.adjustedFitnessSum = speciesAdjustedFitnessSum[s];
         stats.allocatedOffspring = offspringAllocation[s];
+        stats.age = currentSpecies[s].getAge();
+        stats.historicalBestFitness = currentSpecies[s].getHistoricalBestFitness();
+        stats.generationsSinceImprovement = currentSpecies[s].getGenerationsSinceImprovement();
+        stats.stagnant = currentSpecies[s].isStagnant();
+        stats.reproductionEligible = reproductionEligible[s];
         m_reproductionStats.push_back(stats);
     }
 
@@ -441,7 +521,10 @@ void Population::reproduce()
     // complete, unmodified old generation. Global elites are copied first
     // (no crossover, no mutation), then each species' allocated offspring
     // is built using parents drawn only from that same species -- species
-    // are processed in ascending SpeciesId order, matching m_currentSpecies.
+    // are processed in ascending SpeciesId order, matching currentSpecies.
+    // A species with zero allocated offspring (stagnant and not this
+    // generation's fallback) simply contributes no non-elite children --
+    // the inner loop below never executes for it.
     std::vector<Genome> newGenomes;
     newGenomes.reserve(populationSize);
 
@@ -452,7 +535,7 @@ void Population::reproduce()
 
     for (std::size_t s = 0; s < speciesCount; ++s)
     {
-        const Species& species = m_currentSpecies[s];
+        const Species& species = currentSpecies[s];
         for (std::size_t offspring = 0; offspring < offspringAllocation[s]; ++offspring)
         {
             // Both parents come from this species' member indices only --

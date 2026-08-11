@@ -19,6 +19,13 @@ struct PopulationConfig
     std::size_t eliteCount = 2;
     std::size_t tournamentSize = 3;
 
+    // A species is marked stagnant once its generationsSinceImprovement
+    // reaches this many consecutive completed generations without a new
+    // historical-best raw fitness -- see Species::recordGeneration() and
+    // Population::reproduce() (Stage 17) for exactly how a stagnant
+    // species is then excluded from normal offspring allocation.
+    std::size_t speciesStagnationLimit = 15;
+
     std::uint32_t randomSeed = 12345;
 };
 

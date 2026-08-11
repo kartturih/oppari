@@ -104,12 +104,18 @@ float effectiveFitnessContribution(float adjustedFitness);
 // fitness sharing (adjusted fitness), per-species offspring allocation, and
 // species-local parent selection all read the same single Species vector
 // computed at the start of that generation's reproduce() call -- see the
-// .cpp for the full algorithm. Species identity itself is still not
-// persistent across generations (Speciator builds a fresh Species vector,
-// with fresh representatives, every time); only the SpeciesId counter keeps
-// counting up. Persistent cross-generation species lineage, stagnation,
-// extinction, adaptive compatibility thresholds, and interspecies mating
-// remain out of scope.
+// .cpp for the full algorithm. As of Stage 17, species identity is
+// persistent across generations: m_speciator itself now owns the species
+// collection for this Population's entire run (never rebuilt from scratch),
+// so a species whose representative later genomes remain compatible with
+// keeps its SpeciesId, and keeps accumulating age/historical-best-fitness/
+// stagnation state, for as long as it keeps matching -- see
+// Speciator::speciate()'s own doc comment for the exact per-call lifecycle.
+// A species that stops improving for speciesStagnationLimit consecutive
+// completed generations is excluded from normal offspring allocation (with
+// a global-elite exception and an all-species-stagnant safety fallback --
+// see reproduce() in the .cpp). Adaptive compatibility thresholds and
+// interspecies mating remain out of scope.
 class Population
 {
 public:
@@ -121,13 +127,27 @@ public:
     // adjustedFitness (rawFitness / memberCount) -- it may be negative;
     // allocatedOffspring is the number of non-elite offspring slots this
     // species received, computed from the effective (clamped-at-zero)
-    // adjusted fitness. See Population.cpp for the exact algorithm.
+    // adjusted fitness only among reproduction-eligible species (Stage 17).
+    // age/historicalBestFitness/generationsSinceImprovement/stagnant mirror
+    // the underlying persistent Species's own fields (see Species.h) at the
+    // moment reproduce() ran. reproductionEligible is true unless this
+    // species was excluded from this generation's offspring allocation for
+    // being stagnant -- always true for a non-stagnant species, and true for
+    // at most one stagnant species per generation (the all-stagnant safety
+    // fallback -- see reproduce() in the .cpp). See Population.cpp for the
+    // exact algorithm.
     struct SpeciesReproductionStats
     {
         SpeciesId speciesId = 0;
         std::size_t memberCount = 0;
         float adjustedFitnessSum = 0.0f;
         std::size_t allocatedOffspring = 0;
+
+        std::size_t age = 0;
+        float historicalBestFitness = 0.0f;
+        std::size_t generationsSinceImprovement = 0;
+        bool stagnant = false;
+        bool reproductionEligible = true;
     };
 
     // Builds generation 0: individual 0 is an unmutated copy of baseGenome;
@@ -185,21 +205,23 @@ public:
     std::size_t getRunningCount() const;
     std::size_t getFinishedCount() const;
 
-    // Number of species the existing Speciator currently groups this
-    // population's Genomes into, computed once per generation (at
-    // construction for generation 0, and again each time a generation
-    // finishes, from the Genomes of the generation that just finished) --
-    // see the class comment for how this same Species vector now drives
-    // reproduction as of Stage 16.
-    std::size_t getSpeciesCount() const { return m_currentSpecies.size(); }
+    // Number of species m_speciator currently groups this population's
+    // Genomes into, computed once per generation (at construction for
+    // generation 0, and again each time a generation finishes, from the
+    // Genomes of the generation that just finished) -- see the class
+    // comment for how this same persistent Species vector now drives
+    // reproduction as of Stage 16/17.
+    std::size_t getSpeciesCount() const { return m_speciator.getSpecies().size(); }
 
-    // The full Species vector backing getSpeciesCount(), in ascending
-    // SpeciesId order -- read-only, for HUD/debug lookups such as "which
-    // species is individual i in" or "how big is that species". The same
-    // vector reproduce() itself used to drive fitness sharing/offspring
-    // allocation/parent selection for the generation that just finished (or,
-    // before the first transition, the freshly constructed generation 0).
-    const std::vector<Species>& getCurrentSpecies() const { return m_currentSpecies; }
+    // The full, persistent Species vector backing getSpeciesCount() --
+    // m_speciator's own owned collection (see Speciator::getSpecies()), in
+    // ascending SpeciesId order -- read-only, for HUD/debug lookups such as
+    // "which species is individual i in" or "how big/old/stagnant is that
+    // species". The same vector reproduce() itself used to drive fitness
+    // sharing/offspring allocation/parent selection for the generation that
+    // just finished (or, before the first transition, the freshly
+    // constructed generation 0).
+    const std::vector<Species>& getCurrentSpecies() const { return m_speciator.getSpecies(); }
 
     // Per-species reproduction statistics from the most recently completed
     // reproduce() call -- see SpeciesReproductionStats above. Empty before
@@ -228,17 +250,23 @@ private:
     bool isGenerationFinished() const;
 
     // Speciates the current m_individuals' Genomes with m_speciator, using
-    // m_compatibilityConfig/m_speciationConfig -- the single source of
-    // species membership for both HUD display and (from within reproduce())
-    // fitness sharing/offspring allocation/parent selection.
-    std::vector<Species> computeCurrentSpecies();
+    // m_compatibilityConfig/m_speciationConfig, and returns a reference to
+    // m_speciator's own (now updated) persistent Species collection -- the
+    // single source of species membership for both HUD display and (from
+    // within reproduce()) fitness sharing/offspring allocation/parent
+    // selection. Never returns a Population-owned copy: the returned
+    // reference stays valid exactly as long as m_speciator's own
+    // getSpecies() does (see Speciator.h).
+    const std::vector<Species>& computeCurrentSpecies();
 
     // Builds the entire next generation's Genomes from the current
     // (about-to-be-replaced) generation's Genomes/fitness values, then
     // replaces m_individuals as one coherent operation and increments
     // m_generation. See the .cpp for the full species-aware elitism/
     // fitness-sharing/offspring-allocation/parent-selection/crossover/
-    // mutation algorithm (Stage 16).
+    // mutation algorithm (Stage 16), extended in Stage 17 to update each
+    // species' persistent fitness history and exclude stagnant species from
+    // normal offspring allocation.
     void reproduce();
 
     // Tournament-selects one parent from species' member indices only:
@@ -270,7 +298,6 @@ private:
 
     std::size_t m_generation;
     float m_lastGenerationBestFitness;
-    std::vector<Species> m_currentSpecies;
     std::vector<SpeciesReproductionStats> m_reproductionStats;
 
     std::vector<Individual> m_individuals;
