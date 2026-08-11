@@ -1,6 +1,7 @@
 #include "ai/neat/Population.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -76,14 +77,92 @@ bool isBetterTournamentCandidate(float candidateFitness, std::size_t candidateIn
     return false;
 }
 
+std::vector<std::size_t> allocateSpeciesOffspring(const std::vector<SpeciesId>& speciesIds,
+                                                    const std::vector<float>& effectiveFitnessSums,
+                                                    std::size_t remainingSlots)
+{
+    const std::size_t speciesCount = speciesIds.size();
+    std::vector<std::size_t> allocation(speciesCount, 0);
+    if (speciesCount == 0)
+    {
+        return allocation;
+    }
+
+    float totalEffectiveFitness = 0.0f;
+    for (float sum : effectiveFitnessSums)
+    {
+        totalEffectiveFitness += sum;
+    }
+
+    if (totalEffectiveFitness > 0.0f)
+    {
+        std::vector<double> exactShares(speciesCount, 0.0);
+        std::size_t allocatedSoFar = 0;
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            exactShares[s] = static_cast<double>(remainingSlots) * static_cast<double>(effectiveFitnessSums[s]) /
+                              static_cast<double>(totalEffectiveFitness);
+            const std::size_t floorShare = static_cast<std::size_t>(std::floor(exactShares[s]));
+            allocation[s] = floorShare;
+            allocatedSoFar += floorShare;
+        }
+
+        const std::size_t leftover = (allocatedSoFar < remainingSlots) ? (remainingSlots - allocatedSoFar) : 0;
+
+        std::vector<std::size_t> remainderOrder(speciesCount);
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            remainderOrder[s] = s;
+        }
+        std::sort(remainderOrder.begin(), remainderOrder.end(),
+                  [&exactShares, &allocation, &speciesIds](std::size_t a, std::size_t b)
+                  {
+                      const double fracA = exactShares[a] - static_cast<double>(allocation[a]);
+                      const double fracB = exactShares[b] - static_cast<double>(allocation[b]);
+                      if (fracA != fracB)
+                      {
+                          return fracA > fracB;
+                      }
+                      return speciesIds[a] < speciesIds[b];
+                  });
+
+        for (std::size_t j = 0; j < leftover && j < speciesCount; ++j)
+        {
+            allocation[remainderOrder[j]] += 1;
+        }
+    }
+    else
+    {
+        std::vector<std::size_t> order(speciesCount);
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            order[s] = s;
+        }
+        std::sort(order.begin(), order.end(),
+                  [&speciesIds](std::size_t a, std::size_t b) { return speciesIds[a] < speciesIds[b]; });
+
+        const std::size_t quotient = remainingSlots / speciesCount;
+        const std::size_t remainder = remainingSlots % speciesCount;
+        for (std::size_t rank = 0; rank < speciesCount; ++rank)
+        {
+            allocation[order[rank]] = quotient + (rank < remainder ? 1u : 0u);
+        }
+    }
+
+    return allocation;
+}
+
+float effectiveFitnessContribution(float adjustedFitness)
+{
+    return std::max(adjustedFitness, 0.0f);
+}
+
 Population::Population(const Genome& baseGenome, const simulation::Track& track, const simulation::CarParams& carParams,
-                        const simulation::TrackDefinition& trackDefinition, Vector2 spawnPosition, float spawnHeading,
-                        const PopulationConfig& populationConfig, const MutationConfig& mutationConfig,
-                        const CrossoverConfig& crossoverConfig, const CompatibilityConfig& compatibilityConfig,
-                        const SpeciationConfig& speciationConfig)
+                        Vector2 spawnPosition, float spawnHeading, const PopulationConfig& populationConfig,
+                        const MutationConfig& mutationConfig, const CrossoverConfig& crossoverConfig,
+                        const CompatibilityConfig& compatibilityConfig, const SpeciationConfig& speciationConfig)
     : m_track(track)
     , m_carParams(carParams)
-    , m_trackDefinition(trackDefinition)
     , m_spawnPosition(spawnPosition)
     , m_spawnHeading(spawnHeading)
     , m_populationConfig(populationConfig)
@@ -104,7 +183,6 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
     , m_speciator()
     , m_generation(0)
     , m_lastGenerationBestFitness(0.0f)
-    , m_currentSpeciesCount(0)
 {
     validatePopulationConfig(m_populationConfig);
 
@@ -116,11 +194,10 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
         {
             m_mutator.mutateWeights(genome, m_mutationConfig);
         }
-        m_individuals.emplace_back(std::move(genome), m_track, m_carParams, m_trackDefinition, m_spawnPosition,
-                                    m_spawnHeading);
+        m_individuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
     }
 
-    m_currentSpeciesCount = computeSpeciesCount();
+    m_currentSpecies = computeCurrentSpecies();
 }
 
 void Population::update(float deltaTime)
@@ -190,7 +267,7 @@ std::size_t Population::getFinishedCount() const
     return m_individuals.size() - getRunningCount();
 }
 
-std::size_t Population::computeSpeciesCount()
+std::vector<Species> Population::computeCurrentSpecies()
 {
     std::vector<Genome> genomes;
     genomes.reserve(m_individuals.size());
@@ -198,7 +275,29 @@ std::size_t Population::computeSpeciesCount()
     {
         genomes.push_back(individual.getGenome());
     }
-    return m_speciator.speciate(genomes, m_compatibilityConfig, m_speciationConfig).size();
+    return m_speciator.speciate(genomes, m_compatibilityConfig, m_speciationConfig);
+}
+
+std::size_t Population::selectParentFromSpecies(const Species& species, const std::vector<float>& fitnessValues)
+{
+    const std::vector<std::size_t>& members = species.getMemberIndices();
+    std::uniform_int_distribution<std::size_t> pickMember(0, members.size() - 1);
+
+    std::size_t bestIndex = members[pickMember(m_orchestrationRng)];
+    float bestFitness = fitnessValues[bestIndex];
+
+    for (std::size_t sample = 1; sample < m_populationConfig.tournamentSize; ++sample)
+    {
+        const std::size_t candidateIndex = members[pickMember(m_orchestrationRng)];
+        const float candidateFitness = fitnessValues[candidateIndex];
+        if (isBetterTournamentCandidate(candidateFitness, candidateIndex, bestFitness, bestIndex))
+        {
+            bestIndex = candidateIndex;
+            bestFitness = candidateFitness;
+        }
+    }
+
+    return bestIndex;
 }
 
 std::size_t Population::tournamentSelect(const std::vector<float>& fitnessValues)
@@ -226,7 +325,9 @@ void Population::reproduce()
 {
     const std::size_t populationSize = m_individuals.size();
 
-    // 1. Preserve final fitness values before anything else changes.
+    // 1. Preserve final RAW fitness values before anything else changes --
+    // never overwritten; adjusted fitness (below) is always a separate
+    // vector.
     std::vector<float> fitnessValues;
     fitnessValues.reserve(populationSize);
     for (const Individual& individual : m_individuals)
@@ -241,14 +342,44 @@ void Population::reproduce()
     }
     m_lastGenerationBestFitness = bestFitness;
 
-    // Species membership of the generation that just finished, purely for
-    // statistics -- computed before anything about it is replaced. Never
-    // consulted below: elitism/tournament/crossover/mutation operate
-    // entirely on fitnessValues and Genomes, regardless of species.
-    m_currentSpeciesCount = computeSpeciesCount();
+    // 2. Speciate the generation that just finished ONCE -- this single
+    // Species vector (ascending SpeciesId order, per Speciator's contract)
+    // is the sole source of species membership for every remaining step:
+    // fitness sharing, species fitness totals, offspring allocation, and
+    // species-local parent pools.
+    m_currentSpecies = computeCurrentSpecies();
+    const std::size_t speciesCount = m_currentSpecies.size();
 
-    // 2. Elitism ranking: indices sorted by (higher fitness first, lower
-    // original index as a deterministic tie-break).
+    // 3. Fitness sharing: adjustedFitness[i] = rawFitness[i] / (size of
+    // i's species). Exists only for reproduction below -- fitnessValues
+    // (raw) is never modified.
+    std::vector<float> adjustedFitness(populationSize, 0.0f);
+    for (const Species& species : m_currentSpecies)
+    {
+        const float speciesSize = static_cast<float>(species.size());
+        for (std::size_t memberIndex : species.getMemberIndices())
+        {
+            adjustedFitness[memberIndex] = fitnessValues[memberIndex] / speciesSize;
+        }
+    }
+
+    // 4. Per-species adjusted-fitness sum (unclamped -- exposed via
+    // SpeciesReproductionStats for HUD/debug) and effective adjusted-fitness
+    // sum (each member's contribution clamped to >= 0, per the negative-
+    // fitness safety rule -- used only for offspring allocation below).
+    std::vector<float> speciesAdjustedFitnessSum(speciesCount, 0.0f);
+    std::vector<float> speciesEffectiveFitnessSum(speciesCount, 0.0f);
+    for (std::size_t s = 0; s < speciesCount; ++s)
+    {
+        for (std::size_t memberIndex : m_currentSpecies[s].getMemberIndices())
+        {
+            speciesAdjustedFitnessSum[s] += adjustedFitness[memberIndex];
+            speciesEffectiveFitnessSum[s] += effectiveFitnessContribution(adjustedFitness[memberIndex]);
+        }
+    }
+
+    // 5. Global elitism ranking: indices sorted by (higher RAW fitness
+    // first, lower original index as a deterministic tie-break).
     std::vector<std::size_t> rankedIndices(populationSize);
     for (std::size_t i = 0; i < populationSize; ++i)
     {
@@ -263,10 +394,54 @@ void Population::reproduce()
                   return a < b;
               });
 
-    // 3. Construct every new Genome first -- entirely from the current
-    // (soon to be replaced) generation's data. m_individuals is not
-    // touched at any point during this construction, so parent selection
-    // always reads the complete, unmodified old generation.
+    // 6. Offspring allocation across species for the remaining (non-elite)
+    // slots. Deterministic proportional allocation (floor + largest
+    // fractional remainder, ties broken by lower SpeciesId) whenever any
+    // species has positive effective fitness; otherwise an even-as-possible
+    // split fallback (also tie-broken by lower SpeciesId). Global elites are
+    // copied separately below and never subtracted from any species'
+    // fitness total here -- this allocation applies only to remainingSlots.
+    const std::size_t remainingSlots = populationSize - m_populationConfig.eliteCount;
+    std::vector<SpeciesId> speciesIds(speciesCount);
+    for (std::size_t s = 0; s < speciesCount; ++s)
+    {
+        speciesIds[s] = m_currentSpecies[s].getId();
+    }
+    const std::vector<std::size_t> offspringAllocation =
+        allocateSpeciesOffspring(speciesIds, speciesEffectiveFitnessSum, remainingSlots);
+
+    std::size_t totalAllocated = 0;
+    for (std::size_t count : offspringAllocation)
+    {
+        totalAllocated += count;
+    }
+    if (totalAllocated != remainingSlots)
+    {
+        throw std::logic_error("Population::reproduce: species offspring allocation did not sum to the remaining slot count");
+    }
+
+    // 7. Record this generation's reproduction stats for read-only
+    // HUD/debug/testing consumption -- derived entirely from the data
+    // computed above, never mutated afterward.
+    m_reproductionStats.clear();
+    m_reproductionStats.reserve(speciesCount);
+    for (std::size_t s = 0; s < speciesCount; ++s)
+    {
+        SpeciesReproductionStats stats;
+        stats.speciesId = m_currentSpecies[s].getId();
+        stats.memberCount = m_currentSpecies[s].size();
+        stats.adjustedFitnessSum = speciesAdjustedFitnessSum[s];
+        stats.allocatedOffspring = offspringAllocation[s];
+        m_reproductionStats.push_back(stats);
+    }
+
+    // 8. Construct every new Genome -- entirely from the current (soon to
+    // be replaced) generation's data. m_individuals is not touched at any
+    // point during this construction, so parent selection always reads the
+    // complete, unmodified old generation. Global elites are copied first
+    // (no crossover, no mutation), then each species' allocated offspring
+    // is built using parents drawn only from that same species -- species
+    // are processed in ascending SpeciesId order, matching m_currentSpecies.
     std::vector<Genome> newGenomes;
     newGenomes.reserve(populationSize);
 
@@ -275,31 +450,48 @@ void Population::reproduce()
         newGenomes.push_back(m_individuals[rankedIndices[i]].getGenome()); // copy, unmutated
     }
 
-    while (newGenomes.size() < populationSize)
+    for (std::size_t s = 0; s < speciesCount; ++s)
     {
-        const std::size_t parentAIndex = tournamentSelect(fitnessValues);
-        const std::size_t parentBIndex = tournamentSelect(fitnessValues);
-        const Genome& parentA = m_individuals[parentAIndex].getGenome();
-        const Genome& parentB = m_individuals[parentBIndex].getGenome();
+        const Species& species = m_currentSpecies[s];
+        for (std::size_t offspring = 0; offspring < offspringAllocation[s]; ++offspring)
+        {
+            // Both parents come from this species' member indices only --
+            // no cross-species mating. A singleton species (size 1) simply
+            // resolves both selections to its one member; crossover(parent,
+            // parent) with equal fitness is well-defined (GenomeCrossover
+            // never throws on identical parents) and deterministically
+            // reproduces that member's own genes, so no special-casing is
+            // needed for singleton species.
+            const std::size_t parentAIndex = selectParentFromSpecies(species, fitnessValues);
+            const std::size_t parentBIndex = selectParentFromSpecies(species, fitnessValues);
+            const Genome& parentA = m_individuals[parentAIndex].getGenome();
+            const Genome& parentB = m_individuals[parentBIndex].getGenome();
 
-        Genome child = m_crossover.crossover(parentA, fitnessValues[parentAIndex], parentB, fitnessValues[parentBIndex],
-                                              m_crossoverConfig);
+            // RAW fitness is passed into crossover (never adjusted fitness)
+            // -- preserves the existing fitter-parent gene inheritance rule.
+            Genome child = m_crossover.crossover(parentA, fitnessValues[parentAIndex], parentB, fitnessValues[parentBIndex],
+                                                  m_crossoverConfig);
 
-        m_mutator.mutateWeights(child, m_mutationConfig);
-        m_mutator.mutateAddConnection(child, m_innovationTracker, m_mutationConfig);
-        m_mutator.mutateAddNode(child, m_innovationTracker, m_mutationConfig);
+            m_mutator.mutateWeights(child, m_mutationConfig);
+            m_mutator.mutateAddConnection(child, m_innovationTracker, m_mutationConfig);
+            m_mutator.mutateAddNode(child, m_innovationTracker, m_mutationConfig);
 
-        newGenomes.push_back(std::move(child));
+            newGenomes.push_back(std::move(child));
+        }
     }
 
-    // 4. Rebuild every Individual from the new Genomes, then replace the
+    if (newGenomes.size() != populationSize)
+    {
+        throw std::logic_error("Population::reproduce: constructed next generation does not match populationSize");
+    }
+
+    // 9. Rebuild every Individual from the new Genomes, then replace the
     // population as one coherent operation.
     std::vector<Individual> newIndividuals;
     newIndividuals.reserve(populationSize);
     for (Genome& genome : newGenomes)
     {
-        newIndividuals.emplace_back(std::move(genome), m_track, m_carParams, m_trackDefinition, m_spawnPosition,
-                                     m_spawnHeading);
+        newIndividuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
     }
 
     m_individuals = std::move(newIndividuals);

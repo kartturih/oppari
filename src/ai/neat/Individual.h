@@ -32,11 +32,12 @@ class Individual
 public:
     // Builds the AIController's phenotype from genome (propagates whatever
     // ai::neat::buildPhenotype() throws for an invalid/incompatible
-    // genome), constructs an independent Car against track, and resets
-    // car/progress/fitness to spawnPosition/spawnHeading -- so a freshly
-    // constructed Individual is immediately ready to update().
+    // genome), constructs an independent Car and TrackProgress against
+    // track, and resets car/progress/fitness to spawnPosition/spawnHeading
+    // -- so a freshly constructed Individual is immediately ready to
+    // update().
     Individual(Genome genome, const simulation::Track& track, const simulation::CarParams& carParams,
-               const simulation::TrackDefinition& trackDefinition, Vector2 spawnPosition, float spawnHeading);
+               Vector2 spawnPosition, float spawnHeading);
 
     // Advances this individual by deltaTime seconds: the AIController reads
     // the Car's current state and produces a CarInput, the Car updates,

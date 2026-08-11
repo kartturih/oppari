@@ -1,7 +1,6 @@
 #include "simulation/TrackProgress.h"
 
 #include <cmath>
-#include <stdexcept>
 
 namespace simulation
 {
@@ -11,61 +10,34 @@ namespace
 
 // Magnitude a lapPosition delta must exceed, relative to the previous
 // update, before it is treated as a 0/1 lap-boundary (seam) crossing rather
-// than ordinary local movement.
+// than ordinary local movement. Dimensionless (a fraction of one lap), so
+// this does not need to change with track shape or scale.
 constexpr float kSeamWrapThreshold = 0.5f;
 
 // Maximum lapPosition delta (after seam correction) accepted as legitimate
-// forward/backward movement in a single update(). At the car's maxSpeed
-// (260 px/s) and the fixed simulation step (1/60 s), the car can travel at
-// most ~4.3px per frame; even at this track's tightest mid-band reference
-// radius (~215px, the Y axis), that bounds real per-frame angular movement
-// to roughly 4.3 / 215 / (2*pi) =~ 0.003 laps. This threshold is set well
-// above that -- generous enough that a single update() spanning several
-// checkpoints (kCheckpointCount = 16, so one checkpoint gap is 1/16 =
-// 0.0625 laps) is still accepted deterministically -- while staying far
-// below both real driving and the kSeamWrapThreshold ambiguity boundary, so
-// it reliably rejects an implausible jump such as teleporting straight
-// across the track interior.
+// forward/backward movement in a single update(). Also dimensionless: since
+// lapPosition is already normalized by the track's own total length, this
+// threshold's meaning does not depend on track scale or shape. It is set
+// well above real per-frame movement (at maxSpeed 260px/s and the fixed
+// 1/60s simulation step, the car travels at most ~4.3px per frame, a small
+// fraction of any reasonably sized closed loop) while staying generous
+// enough that a single update() spanning several checkpoints
+// (kCheckpointCount = 16, so one checkpoint gap is 1/16 = 0.0625 laps) is
+// still accepted deterministically -- and far below both real driving and
+// the kSeamWrapThreshold ambiguity boundary, so it reliably rejects an
+// implausible jump such as teleporting straight across the track interior.
 constexpr float kMaxPlausibleLapDeltaPerFrame = 0.2f;
-
-bool isValidOvalDefinition(const TrackDefinition& def)
-{
-    return def.simWidth > 0 && def.simHeight > 0 && def.outerRadiusX > 0.0f && def.outerRadiusY > 0.0f &&
-           def.innerRadiusX > 0.0f && def.innerRadiusY > 0.0f && def.innerRadiusX < def.outerRadiusX &&
-           def.innerRadiusY < def.outerRadiusY;
-}
 
 } // namespace
 
-TrackProgress::TrackProgress(const TrackDefinition& definition) : m_definition(definition)
+TrackProgress::TrackProgress(const Track& track) : m_track(track)
 {
-    if (!isValidOvalDefinition(m_definition))
-    {
-        throw std::invalid_argument("TrackProgress: invalid oval track definition");
-    }
-
-    // Mid-band radii: the average of the inner and outer radii per axis.
-    // Only used to correct for the ellipse's aspect ratio before taking an
-    // angle -- see the class comment in TrackProgress.h for the full
-    // angle-to-progress mapping.
-    m_referenceRadiusX = (m_definition.outerRadiusX + m_definition.innerRadiusX) * 0.5f;
-    m_referenceRadiusY = (m_definition.outerRadiusY + m_definition.innerRadiusY) * 0.5f;
 }
 
 float TrackProgress::computeLapPosition(Vector2 position) const
 {
-    const float dx = position.x - m_definition.center.x;
-    const float dy = position.y - m_definition.center.y;
-    const float nx = dx / m_referenceRadiusX;
-    const float ny = dy / m_referenceRadiusY;
-
-    const float rawAngle = std::atan2(ny, nx); // (-pi, pi]
-    float lapPosition = -rawAngle / (2.0f * static_cast<float>(PI));
-    if (lapPosition < 0.0f)
-    {
-        lapPosition += 1.0f;
-    }
-    return lapPosition;
+    const TrackProjection projection = m_track.projectOntoCenterline(position);
+    return projection.distanceAlongTrack / m_track.getTotalLength();
 }
 
 void TrackProgress::reset(const Car& car)
@@ -161,10 +133,11 @@ void TrackProgress::update(const Car& car)
         }
     }
     // else: an implausible single-update jump (e.g. teleporting straight
-    // across the track interior) -- ignored for both progress and
-    // checkpoints. The new position is still accepted as the baseline for
-    // future deltas below, so the rejection does not cascade into
-    // subsequent updates.
+    // across the track interior, or -- on a future self-intersecting track
+    // -- a local projection ambiguity jump; see the class comment) --
+    // ignored for both progress and checkpoints. The new position is still
+    // accepted as the baseline for future deltas below, so the rejection
+    // does not cascade into subsequent updates.
 
     m_previousLapPosition = newLapPosition;
     m_lapPosition = newLapPosition;

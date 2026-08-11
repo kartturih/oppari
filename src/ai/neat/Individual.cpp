@@ -8,13 +8,13 @@ namespace ai::neat
 {
 
 Individual::Individual(Genome genome, const simulation::Track& track, const simulation::CarParams& carParams,
-                        const simulation::TrackDefinition& trackDefinition, Vector2 spawnPosition, float spawnHeading)
+                        Vector2 spawnPosition, float spawnHeading)
     : m_genome(std::move(genome))
     , m_spawnPosition(spawnPosition)
     , m_spawnHeading(spawnHeading)
     , m_car(carParams, track)
     , m_controller(buildPhenotype(m_genome))
-    , m_progress(trackDefinition)
+    , m_progress(track)
     , m_fitness()
 {
     reset();
