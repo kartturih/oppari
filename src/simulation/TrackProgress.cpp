@@ -34,15 +34,71 @@ TrackProgress::TrackProgress(const Track& track) : m_track(track)
 {
 }
 
-float TrackProgress::computeLapPosition(Vector2 position) const
+TrackProjection TrackProgress::projectWithLocalTracking(Vector2 position)
 {
-    const TrackProjection projection = m_track.projectOntoCenterline(position);
-    return projection.distanceAlongTrack / m_track.getTotalLength();
+    const TrackProjection local = m_track.projectOntoCenterlineLocal(
+        position, m_previousSegmentIndex, kLocalSearchRadius, kLocalContinuityWeight, kLocalContinuityFreeZone);
+
+    if (local.distanceFromCenterline <= kLocalProjectionRecoveryDistance)
+    {
+        // Normal case: local tracking succeeded (see the class comment for
+        // why kLocalSearchRadius is generous enough that this is the common
+        // path on every ordinary frame of driving).
+        m_previousSegmentIndex = local.segmentIndex;
+        m_lastProjectionUsedRecovery = false;
+        return local;
+    }
+
+    // Recovery: the local window is clearly wrong -- the car cannot really
+    // be more than kLocalProjectionRecoveryDistance from every segment near
+    // where it was last tracked. Re-anchor via one full-centerline scan.
+    // This only changes *which* segment/lapPosition are reported; the
+    // caller (update()) still runs its own plausibility delta gate on
+    // whatever lapPosition this produces, so recovery cannot award
+    // implausible progress on its own.
+    const TrackProjection global = m_track.projectOntoCenterline(position);
+    m_previousSegmentIndex = global.segmentIndex;
+    m_lastProjectionUsedRecovery = true;
+    return global;
+}
+
+Vector2 TrackProgress::tangentAtSegment(std::size_t segmentIndex) const
+{
+    const std::vector<Vector2>& centerline = m_track.getCenterlineSamples();
+    const std::size_t n = centerline.size();
+    const Vector2& a = centerline[segmentIndex % n];
+    const Vector2& b = centerline[(segmentIndex + 1) % n];
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len <= 0.0f)
+    {
+        return Vector2{0.0f, 0.0f};
+    }
+    return Vector2{dx / len, dy / len};
 }
 
 void TrackProgress::reset(const Car& car)
 {
-    m_lapPosition = computeLapPosition(car.getPosition());
+    // reset() always uses a full global projection: there is no meaningful
+    // "previous segment" to search locally around yet.
+    const TrackProjection projection = m_track.projectOntoCenterline(car.getPosition());
+    m_previousSegmentIndex = projection.segmentIndex;
+    m_lastProjectionUsedRecovery = false;
+
+    // Debug info: previous == current and delta == 0 -- reset() re-anchors
+    // from scratch, so there is no meaningful "jump" to report here.
+    const Vector2 tangent = tangentAtSegment(projection.segmentIndex);
+    m_lastProjectionDebugInfo.point = projection.point;
+    m_lastProjectionDebugInfo.tangent = tangent;
+    m_lastProjectionDebugInfo.previousTangent = tangent;
+    m_lastProjectionDebugInfo.previousIndex = projection.segmentIndex;
+    m_lastProjectionDebugInfo.currentIndex = projection.segmentIndex;
+    m_lastProjectionDebugInfo.indexDelta = 0;
+    m_lastProjectionDebugInfo.distance = projection.distanceFromCenterline;
+    m_lastProjectionDebugInfo.usedRecovery = false;
+
+    m_lapPosition = projection.distanceAlongTrack / m_track.getTotalLength();
     m_previousLapPosition = m_lapPosition;
 
     m_continuousProgress = 0.0f;
@@ -100,9 +156,45 @@ void TrackProgress::advanceCheckpoints(float forwardDelta)
     }
 }
 
+namespace
+{
+
+// Signed, shortest-direction, wrap-aware index delta: how far (and in
+// which direction) `currentIndex` sits from `previousIndex` around the
+// closed loop, taking whichever of the two possible directions is shorter.
+// Debug-only (feeds ProjectionDebugInfo); progress/checkpoint math never
+// uses this, only the unsigned/seam-aware lapPosition delta in update().
+int wrappedIndexDelta(std::size_t previousIndex, std::size_t currentIndex, std::size_t sampleCount)
+{
+    const long long n = static_cast<long long>(sampleCount);
+    long long raw = static_cast<long long>(currentIndex) - static_cast<long long>(previousIndex);
+    raw = ((raw % n) + n) % n; // normalize into [0, n)
+    if (raw > n / 2)
+    {
+        raw -= n;
+    }
+    return static_cast<int>(raw);
+}
+
+} // namespace
+
 void TrackProgress::update(const Car& car)
 {
-    const float newLapPosition = computeLapPosition(car.getPosition());
+    const std::size_t previousIndex = m_previousSegmentIndex;
+    const Vector2 previousTangent = tangentAtSegment(previousIndex);
+
+    const TrackProjection projection = projectWithLocalTracking(car.getPosition());
+    const float newLapPosition = projection.distanceAlongTrack / m_track.getTotalLength();
+
+    m_lastProjectionDebugInfo.point = projection.point;
+    m_lastProjectionDebugInfo.tangent = tangentAtSegment(projection.segmentIndex);
+    m_lastProjectionDebugInfo.previousTangent = previousTangent;
+    m_lastProjectionDebugInfo.previousIndex = previousIndex;
+    m_lastProjectionDebugInfo.currentIndex = m_previousSegmentIndex;
+    m_lastProjectionDebugInfo.indexDelta =
+        wrappedIndexDelta(previousIndex, m_previousSegmentIndex, m_track.getCenterlineSamples().size());
+    m_lastProjectionDebugInfo.distance = projection.distanceFromCenterline;
+    m_lastProjectionDebugInfo.usedRecovery = m_lastProjectionUsedRecovery;
 
     float delta = newLapPosition - m_previousLapPosition;
     if (delta > kSeamWrapThreshold)
@@ -133,8 +225,8 @@ void TrackProgress::update(const Car& car)
         }
     }
     // else: an implausible single-update jump (e.g. teleporting straight
-    // across the track interior, or -- on a future self-intersecting track
-    // -- a local projection ambiguity jump; see the class comment) --
+    // across the track interior, or a global recovery re-anchor landing far
+    // from where local tracking last had the car; see the class comment) --
     // ignored for both progress and checkpoints. The new position is still
     // accepted as the baseline for future deltas below, so the rejection
     // does not cascade into subsequent updates.

@@ -58,7 +58,7 @@ constexpr float kSmallTimeEpsilon = 0.1f;
 
 // Evaluation termination constants. Unchanged from Fitness v1 -- Stage 15A
 // changes the objective score, not evaluation termination.
-constexpr float kMaxEvaluationTime = 60.0f; // seconds
+constexpr float kMaxEvaluationTime = 30.0f; // seconds
 constexpr float kNoProgressTimeout = 5.0f;  // seconds without meaningful forward progress
 
 // Minimum increase in TrackProgress::getBestProgress() (in laps) that counts

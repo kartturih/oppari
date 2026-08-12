@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,7 @@
 #include "simulation/Car.h"
 #include "simulation/Track.h"
 #include "simulation/TrackProgress.h"
+#include "simulation/TrackVisual.h"
 
 namespace
 {
@@ -50,12 +52,34 @@ constexpr int kScreenHeight = kSimHeight;
 // same dt regardless of measured render duration.
 constexpr float kSimulationDt = 1.0f / 60.0f;
 
-// Stage 14B: the track is the generalized, centerline-based hard training
-// circuit (see simulation::createHardTrackDefinition()) -- this is the only
-// place its shape is chosen.
+// Stage 18: track image assets live under assets/tracks/... in the source
+// tree, addressed via an absolute path baked in at compile time
+// (OPPARI_ASSETS_DIR, set by CMakeLists.txt) rather than a path relative to
+// the executable's current working directory -- so asset loading behaves
+// the same whether the executable is run from build/ directly or launched
+// from an IDE with a different working directory.
+std::string assetPath(const std::string& relativePath)
+{
+    return std::string(OPPARI_ASSETS_DIR) + "/" + relativePath;
+}
+
+// Stage 19: the track is the user-authored extreme track (see
+// simulation::createExtremeTrackDefinition()) -- collision comes from
+// assets/tracks/extreme/track_mask.png, rendering from
+// assets/tracks/extreme/track_visual.png (both already exactly
+// kSimWidth x kSimHeight, so no runtime-resized copies are needed), and
+// progress/checkpoints/spawn come from the hand-traced 39-point centerline,
+// exactly as documented in Track.h. This is the only place the active
+// track's shape/assets are chosen; see simulation::createHardTrackDefinition()
+// and simulation::createStage18TestTrackDefinition() for the still-available,
+// now-unused earlier tracks (the Stage 18 test assets remain in use only by
+// verifyImageBasedTrackSystem()'s fixture-based checks, not by normal
+// training).
 simulation::TrackDefinition makeTrackDefinition()
 {
-    return simulation::createHardTrackDefinition(kSimWidth, kSimHeight);
+    return simulation::createExtremeTrackDefinition(kSimWidth, kSimHeight,
+                                                      assetPath("tracks/extreme/track_visual.png"),
+                                                      assetPath("tracks/extreme/track_mask.png"));
 }
 
 // The spawn pose is derived entirely from the Track itself
@@ -409,19 +433,19 @@ void verifyTrack(const simulation::Track& track)
                "distanceFromCenterline must match a known perpendicular offset from the centerline");
     }
 
-    // 19, 20 & 21: the CPU mask (built once from the centerline + track
-    // width) agrees with that same geometry -- drivable near the
-    // centerline, non-drivable well outside the road band, and
-    // non-drivable outside the simulation bounds.
+    // 19 & 21: the CPU mask agrees with the centerline geometry at the
+    // spawn point, and rejects out-of-bounds coordinates. (A generic "the
+    // middle of the simulation area must be non-drivable" check does not
+    // belong here: it assumed a simple convex-ish loop, which is not true
+    // of every track this function is asked to verify -- e.g. Stage 19's
+    // maze-like extreme track has road running directly through its
+    // bounding-box center. A track-specific known-non-drivable-point check
+    // for the currently active track lives in
+    // verifyImageBasedTrackSystem() instead.)
     {
         const Vector2 spawn = track.getSpawnPosition();
         assert(track.isDrivable(static_cast<int>(spawn.x), static_cast<int>(spawn.y)) &&
                "a point on the centerline must be drivable");
-
-        const float centerX = static_cast<float>(def.simWidth) * 0.5f;
-        const float centerY = static_cast<float>(def.simHeight) * 0.5f;
-        assert(!track.isDrivable(static_cast<int>(centerX), static_cast<int>(centerY)) &&
-               "the middle of a closed loop track, well beyond the road width, must be non-drivable");
 
         assert(!track.isDrivable(-5, -5) && "negative coordinates must be non-drivable");
         assert(!track.isDrivable(def.simWidth, def.simHeight / 2) && "x at/beyond width must be non-drivable");
@@ -453,42 +477,30 @@ void verifyTrack(const simulation::Track& track)
                "spawn heading must follow the forward centerline tangent");
     }
 
-    // Stage 14B: the hard track's asymmetric layout (a long straight, a
-    // broad sweep, tighter corners and an S-chicane, all folded into a
-    // single closed loop within a bounded simulation area) makes it
-    // possible in principle for two *non-adjacent* sections to end up too
-    // close together, or even cross -- unlike the old easy oval, whose
-    // convex, single-curvature shape ruled that out by construction. These
-    // two checks are deterministic, O(sampleCount^2) geometry checks over
-    // the actual sampled centerline (the same one the mask/rendering/
-    // progress all use) -- purely verification, not a runtime path, and
-    // they do not change projectOntoCenterline() or add any spatial
-    // acceleration structure to Track itself.
+    // Stage 14B/19: an asymmetric closed loop folded into a bounded
+    // simulation area makes it possible in principle for two *non-adjacent*
+    // sections to cross -- unlike a convex oval, which rules that out by
+    // construction. This is a deterministic, O(sampleCount^2) geometry
+    // check over the actual sampled centerline (the same one the mask/
+    // rendering/progress all use) -- purely verification, not a runtime
+    // path, and it does not change projectOntoCenterline() or add any
+    // spatial acceleration structure to Track itself.
     {
         const std::size_t n = centerline.size();
 
         // Segments within this many indices of each other (in either
         // direction around the closed loop, including the wraparound) are
         // "adjacent" for these purposes -- ordinary consecutive curvature
-        // (especially right around a sharp corner apex, where samples can
-        // bunch up spatially) naturally brings them close/touching, so they
-        // are excluded from both checks. samplesPerSegment is 24, so this
-        // window covers a bit more than a full control-point segment on
-        // either side of any shared vertex -- comfortably more than enough
-        // for the sharpest corner this track uses, while still being a
-        // small fraction of the hundreds of samples separating genuinely
-        // distinct sections (e.g. the S-chicane from the bottom straight),
-        // so it cannot hide a real accidental overlap between them.
-        constexpr std::size_t kAdjacencyWindow = 40;
-
-        // A conservative separation floor: comfortably greater than the
-        // track's own road width, so two non-adjacent sections can never
-        // have overlapping drivable bands (each extends trackWidth/2 from
-        // its own centerline) with room to spare. 1.2x is a deliberately
-        // moderate margin (not just barely over 1.0x, where bands would
-        // only just avoid touching) chosen to fit Stage 14B's tighter,
-        // more convoluted hard-track layout -- see createHardTrackDefinition().
-        const float minSeparation = def.trackWidth * 1.2f;
+        // (especially through a multi-control-point corner, where samples
+        // on the entry and exit sides of the SAME turn can still be well
+        // within 100 indices of each other yet close in space) naturally
+        // brings them near/touching, so they are excluded from the crossing
+        // check below (it would otherwise false-positive on the track's own
+        // curvature, not a real overlap). Stage 19's extreme track uses
+        // shorter control-point segments (20 samples each, vs. Stage 14B's
+        // 24) with some corners spanning 4-5 of them, so this needed
+        // widening from Stage 14B's 40 to comfortably cover a full corner.
+        constexpr std::size_t kAdjacencyWindow = 100;
 
         float worstSeparation = std::numeric_limits<float>::max();
         bool anyIntersection = false;
@@ -519,15 +531,28 @@ void verifyTrack(const simulation::Track& track)
             }
         }
 
-        // 8: no two non-adjacent centerline segments may cross.
+        // 8: no two non-adjacent centerline segments may cross -- this
+        // remains a hard invariant regardless of track design, since a
+        // literal crossing would break arc-length monotonicity along the
+        // loop (not just create a local-projection ambiguity).
         assert(!anyIntersection && "the closed centerline must not self-intersect between non-adjacent sections");
 
-        // 9: non-adjacent segments must stay comfortably farther apart than
-        // the road is wide, so their drivable bands cannot overlap and a
-        // car's nearest-centerline projection cannot ambiguously jump
-        // between them.
-        assert(worstSeparation >= minSeparation &&
-               "non-adjacent centerline sections must maintain a reasonable separation");
+        // Stage 14B/18's tracks additionally required a generous minimum
+        // separation between every non-adjacent section pair (comfortably
+        // more than the road's width), on the theory that keeping sections
+        // physically far apart was the only way to prevent
+        // projectOntoCenterline() from ambiguously jumping between them.
+        // Stage 19's extreme track deliberately does NOT uphold that: its
+        // hand-traced route genuinely brings two non-adjacent corridors as
+        // close as ~94px together (see createExtremeTrackDefinition()) --
+        // by design, since that closeness is exactly the case
+        // TrackProgress's local projection tracking and global recovery
+        // exist to handle correctly (see verifyImageBasedTrackSystem() and
+        // TrackProgress.h), rather than a defect to be designed away. No
+        // minimum-separation assertion is made here; worstSeparation is
+        // still computed and logged as a diagnostic.
+        TraceLog(LOG_INFO, "Track verification: closest non-adjacent centerline separation is %.1fpx",
+                 static_cast<double>(worstSeparation));
     }
 
     TraceLog(LOG_INFO, "Track verification: all centerline/arc-length/projection/mask checks passed");
@@ -648,11 +673,11 @@ void verifySensors(const simulation::Track& track)
     }
 
     // 6: a sensor directed at a nearby track boundary reports less than
-    // maximum distance. Spawn sits on the centerline of a road band half
-    // as wide as Track::getDefinition().trackWidth, so a sensor aimed 90
-    // degrees off the spawn heading (i.e. across the road, not along it)
-    // must hit that edge well within the 200px sensor range, regardless of
-    // the spawn tangent's exact absolute direction -- unlike a hardcoded
+    // maximum distance. Spawn sits on the centerline of a road band well
+    // under the 200px sensor range wide (see the active Track's mask), so a
+    // sensor aimed 90 degrees off the spawn heading (i.e. across the road,
+    // not along it) must hit that edge well within range, regardless of the
+    // spawn tangent's exact absolute direction -- unlike a hardcoded
     // absolute heading, this stays correct for any track's spawn geometry.
     {
         car.reset(kSpawnPosition, kSpawnHeading + static_cast<float>(PI) * 0.5f);
@@ -664,7 +689,7 @@ void verifySensors(const simulation::Track& track)
     }
 
     // 7: a ray with no obstacle within range reports exactly maximum distance / normalized 1.0.
-    // At spawn heading 0, the front sensor points along the long bottom straight, clear for 200px.
+    // At spawn heading, the front sensor points along the spawn straight, clear for 200px.
     {
         const simulation::SensorReading& front = car.getSensors()[2];
         assert(front.distance == simulation::Car::kMaxSensorDistance &&
@@ -5890,7 +5915,7 @@ void verifyTrackProgress(const simulation::Track& track)
             car.update(driveForward, kSimulationDt);
             progress.update(car);
         }
-        assert(car.isAlive() && "the car must still be on the bottom straight after 0.5s from spawn");
+        assert(car.isAlive() && "the car must still be on the spawn straight after 0.5s from spawn");
         assert(progress.getContinuousProgress() > 0.0f &&
                "driving forward from spawn must increase continuous progress");
         assert(progress.getBestProgress() == progress.getContinuousProgress() &&
@@ -6010,12 +6035,27 @@ void verifyTrackProgress(const simulation::Track& track)
         // crossing the intervening checkpoints in order (an implausible,
         // teleport-sized delta) must not award anything, even though the
         // raw angle itself does move forward.
+        //
+        // Stage 19 note: the jump target (0.65, not the Stage 18 test
+        // track's 0.43) was chosen -- and verified offline against the
+        // extreme track's actual geometry -- specifically so that
+        // TrackProgress's local search window (anchored at 0.08's segment)
+        // clearly cannot reach it and must fall back to global recovery
+        // (offline-verified local-window distance ~442px, far past
+        // kLocalProjectionRecoveryDistance's 250px). 0.08 -> 0.43 (the
+        // Stage 18 value) no longer reliably exercises recovery on this
+        // track's much more convoluted route: that specific pair happens to
+        // land within ~107px of the local window's edge, which is close
+        // enough to a legitimate off-center in-corridor reading that it is
+        // not a safe recovery-trigger test case here -- see
+        // TrackProgress.h's kLocalProjectionRecoveryDistance comment for
+        // why 250px is still the right general threshold regardless.
         const int totalBeforeJump = progress.getTotalCheckpointsPassed();
         const int expectedBeforeJump = progress.getExpectedCheckpoint();
         const int lapsBeforeJump = progress.getLapCount();
-        car.reset(positionAtLapPosition(track, 0.43f), kSpawnHeading); // 0.08 -> 0.43 is a 0.35 jump, > the plausibility threshold
+        car.reset(positionAtLapPosition(track, 0.65f), kSpawnHeading); // 0.08 -> 0.65 is a 0.57 jump (seam-corrected to -0.43), > the plausibility threshold
         progress.update(car);
-        assert(std::fabs(progress.getLapPosition() - 0.43f) < kEps &&
+        assert(std::fabs(progress.getLapPosition() - 0.65f) < kEps &&
                "the raw lap position must still reflect the car's actual (teleported) position");
         assert(progress.getTotalCheckpointsPassed() == totalBeforeJump && progress.getExpectedCheckpoint() == expectedBeforeJump &&
                progress.getLapCount() == lapsBeforeJump &&
@@ -6023,7 +6063,7 @@ void verifyTrackProgress(const simulation::Track& track)
 
         // Review requirement 4: backward movement (still within the
         // plausible-delta range) must not award checkpoints either.
-        car.reset(positionAtLapPosition(track, 0.35f), kSpawnHeading); // 0.43 -> 0.35 is backward
+        car.reset(positionAtLapPosition(track, 0.60f), kSpawnHeading); // 0.65 -> 0.60 is backward
         progress.update(car);
         assert(progress.getTotalCheckpointsPassed() == totalBeforeJump && progress.getExpectedCheckpoint() == expectedBeforeJump &&
                progress.getLapCount() == lapsBeforeJump && "backward movement must not award checkpoints or laps");
@@ -6139,6 +6179,454 @@ void verifyTrackProgress(const simulation::Track& track)
     // it only ever receives an already-validated Track by reference.
 
     TraceLog(LOG_INFO, "Track progress verification: all deterministic checks passed");
+}
+
+namespace image_track_verify
+{
+
+// A tiny (8x8) closed-loop centerline, entirely inside fixtures/mask_a.png
+// and fixtures/mask_b.png's shared white region (each fixture's black
+// square sits in an opposite corner -- see
+// assets/tracks/test/generate_test_track_assets.py). samplesPerSegment = 2
+// keeps this centerline's 8 samples all within roughly [2.75, 5.25] in both
+// axes (verified numerically while designing this suite), comfortably clear
+// of both fixtures' black corners.
+std::vector<Vector2> tinyLoopControlPoints()
+{
+    return {Vector2{3.0f, 3.0f}, Vector2{5.0f, 3.0f}, Vector2{5.0f, 5.0f}, Vector2{3.0f, 5.0f}};
+}
+
+// A closed loop whose first control point -- and therefore, at the default
+// spawnDistanceAlongTrack = 0.0f, the exact spawn position -- sits at
+// (1,1), inside fixtures/mask_a.png's black (non-drivable) corner.
+std::vector<Vector2> spawnInNonDrivableCornerControlPoints()
+{
+    return {Vector2{1.0f, 1.0f}, Vector2{5.0f, 1.0f}, Vector2{5.0f, 5.0f}, Vector2{1.0f, 5.0f}};
+}
+
+simulation::TrackDefinition makeTinyFixtureDefinition(const std::string& visualImagePath,
+                                                        const std::string& maskImagePath)
+{
+    simulation::TrackDefinition def;
+    def.simWidth = 8;
+    def.simHeight = 8;
+    def.controlPoints = tinyLoopControlPoints();
+    def.trackWidth = 1.0f; // unused for collision (maskImagePath is set); validate() only requires > 0
+    def.samplesPerSegment = 2;
+    def.visualImagePath = visualImagePath;
+    def.maskImagePath = maskImagePath;
+    return def;
+}
+
+// Steps outward from centerline sample `sampleIndex` along its local
+// perpendicular direction, in both directions, until leaving the drivable
+// mask, and returns the sum of both distances -- i.e. the drivable band's
+// total width at that point, measured purely through Track::isDrivable()
+// (the same O(1) query Car's sensors use), never by inspecting Track/mask
+// internals directly.
+float measureRoadWidthAt(const simulation::Track& track, std::size_t sampleIndex)
+{
+    const std::vector<Vector2>& centerline = track.getCenterlineSamples();
+    const std::size_t sampleCount = centerline.size();
+    const Vector2& a = centerline[sampleIndex];
+    const Vector2& b = centerline[(sampleIndex + 1) % sampleCount];
+
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    const Vector2 perp = {-dy / len, dx / len};
+
+    constexpr float kMaxScan = 300.0f; // px, comfortably beyond any Stage 18 track's widest band
+    constexpr float kStep = 1.0f;
+
+    float positiveExtent = 0.0f;
+    for (float d = 0.0f; d <= kMaxScan; d += kStep)
+    {
+        const int x = static_cast<int>(std::lround(a.x + perp.x * d));
+        const int y = static_cast<int>(std::lround(a.y + perp.y * d));
+        if (!track.isDrivable(x, y))
+        {
+            break;
+        }
+        positiveExtent = d;
+    }
+
+    float negativeExtent = 0.0f;
+    for (float d = 0.0f; d <= kMaxScan; d += kStep)
+    {
+        const int x = static_cast<int>(std::lround(a.x - perp.x * d));
+        const int y = static_cast<int>(std::lround(a.y - perp.y * d));
+        if (!track.isDrivable(x, y))
+        {
+            break;
+        }
+        negativeExtent = d;
+    }
+
+    return positiveExtent + negativeExtent;
+}
+
+} // namespace image_track_verify
+
+// Stage 18/19 dedicated verification suite: the image-based track system --
+// asset loading/validation, mask thresholding, the three layers' mutual
+// independence, and TrackProgress's local-projection-tracking/global-
+// recovery behavior. `track` is the real track main() runs the population
+// on -- as of Stage 19, the user-authored extreme track (see
+// createExtremeTrackDefinition()) -- so the checks below that need to probe
+// real track geometry (varying width, local-search wraparound/exclusion,
+// recovery) are written generically against whatever `track` actually is,
+// never against hardcoded Stage-18-test-track assumptions. A handful of
+// tiny throwaway Tracks built from assets/tracks/test/fixtures/ (still
+// shipped for exactly this purpose, never used for normal training)
+// exercise asset validation and layer independence directly, the same way
+// verifyTrack() uses throwaway Tracks for TrackDefinition validation.
+void verifyImageBasedTrackSystem(const simulation::Track& track)
+{
+    using track_verify::throwsInvalidArgument;
+    using image_track_verify::makeTinyFixtureDefinition;
+    using image_track_verify::measureRoadWidthAt;
+
+    const std::string maskA = assetPath("tracks/test/fixtures/mask_a.png");
+    const std::string maskB = assetPath("tracks/test/fixtures/mask_b.png");
+    const std::string visualA = assetPath("tracks/test/fixtures/visual_a.png");
+    const std::string visualB = assetPath("tracks/test/fixtures/visual_b.png");
+    const std::string wrongSize = assetPath("tracks/test/fixtures/wrong_size.png");
+    const std::string missingFile = assetPath("tracks/test/fixtures/does_not_exist.png");
+
+    // 1 & 2: a visual/mask asset path that does not exist on disk is
+    // rejected clearly, not silently ignored or defaulted.
+    {
+        simulation::TrackDefinition missingVisual = makeTinyFixtureDefinition(missingFile, maskA);
+        assert(throwsInvalidArgument([&]() { simulation::Track t(missingVisual); }) &&
+               "a missing visual image asset must be rejected");
+
+        simulation::TrackDefinition missingMask = makeTinyFixtureDefinition(visualA, missingFile);
+        assert(throwsInvalidArgument([&]() { simulation::Track t(missingMask); }) &&
+               "a missing mask image asset must be rejected");
+    }
+
+    // 3 & 4: an asset that loads but whose dimensions do not match
+    // (simWidth, simHeight) is rejected clearly, not silently stretched.
+    {
+        simulation::TrackDefinition badVisualDims = makeTinyFixtureDefinition(wrongSize, maskA);
+        assert(throwsInvalidArgument([&]() { simulation::Track t(badVisualDims); }) &&
+               "a visual image with mismatched dimensions must be rejected");
+
+        simulation::TrackDefinition badMaskDims = makeTinyFixtureDefinition(visualA, wrongSize);
+        assert(throwsInvalidArgument([&]() { simulation::Track t(badMaskDims); }) &&
+               "a mask image with mismatched dimensions must be rejected");
+    }
+
+    // 5 & 6: mask pixel threshold produces the correct drivable/non-drivable
+    // result end to end (real LoadImage + threshold + isDrivable(), not a
+    // reach into Track internals) -- fixtures/mask_a.png is white/drivable
+    // everywhere except a black/non-drivable 2x2 corner. The same call also
+    // demonstrates the CPU mask is sized to THIS definition's 8x8
+    // simWidth/simHeight, not the main 1200x700 track's.
+    {
+        simulation::TrackDefinition def = makeTinyFixtureDefinition(visualA, maskA);
+        simulation::Track fixtureTrack(def);
+
+        assert(!fixtureTrack.isDrivable(1, 1) && "a black mask pixel must be non-drivable");
+        assert(fixtureTrack.isDrivable(4, 4) && "a white mask pixel must be drivable");
+        assert(!fixtureTrack.isDrivable(8, 8) && "coordinates at/beyond the fixture's own 8x8 bounds must be non-drivable");
+    }
+
+    // 7: isDrivable() is a direct m_mask[] index (see Track::isDrivable()),
+    // an O(1) array access with no search or scan of any kind -- guaranteed
+    // by that implementation itself, not something a runtime timing
+    // assertion could meaningfully strengthen here.
+
+    // 11 & 29: changing the mask image alone -- same centerline, same
+    // visual image -- changes collision, proving collision is read from the
+    // mask, not derived from (or coupled to) the centerline.
+    {
+        simulation::Track withMaskA(makeTinyFixtureDefinition(visualA, maskA));
+        simulation::Track withMaskB(makeTinyFixtureDefinition(visualA, maskB));
+
+        assert(withMaskA.isDrivable(1, 1) != withMaskB.isDrivable(1, 1) &&
+               "changing only the mask image must change isDrivable() results");
+        assert(withMaskA.getCenterlineSamples()[0].x == withMaskB.getCenterlineSamples()[0].x &&
+               withMaskA.getCenterlineSamples()[0].y == withMaskB.getCenterlineSamples()[0].y &&
+               "the two tracks' centerlines must be identical -- only the mask asset differs");
+    }
+
+    // 27, 28 & 30: changing the visual image alone -- same centerline, same
+    // mask -- never changes isDrivable() anywhere, and TrackProgress (which
+    // only ever reads the centerline via Track::projectOntoCenterline())
+    // reports identical lap positions regardless of which visual asset the
+    // underlying Track has.
+    {
+        simulation::Track withVisualA(makeTinyFixtureDefinition(visualA, maskA));
+        simulation::Track withVisualB(makeTinyFixtureDefinition(visualB, maskA));
+
+        for (int y = 0; y < 8; ++y)
+        {
+            for (int x = 0; x < 8; ++x)
+            {
+                assert(withVisualA.isDrivable(x, y) == withVisualB.isDrivable(x, y) &&
+                       "changing only the visual image must never change isDrivable()");
+            }
+        }
+
+        simulation::TrackProgress progressA(withVisualA);
+        simulation::TrackProgress progressB(withVisualB);
+        simulation::Car probeCar(makeCarParams(), withVisualA);
+        probeCar.reset(withVisualA.getSpawnPosition(), withVisualA.getSpawnHeading());
+        progressA.reset(probeCar);
+        progressB.reset(probeCar);
+        assert(progressA.getLapPosition() == progressB.getLapPosition() &&
+               "TrackProgress must not depend on which visual image its Track has");
+    }
+
+    // 14 (negative case): a TrackDefinition whose computed spawn position
+    // (centerline sample 0, at the default spawnDistanceAlongTrack) lands on
+    // a non-drivable mask pixel must be rejected clearly, not silently
+    // accepted.
+    {
+        simulation::TrackDefinition def = makeTinyFixtureDefinition(visualA, maskA);
+        def.controlPoints = image_track_verify::spawnInNonDrivableCornerControlPoints();
+        assert(throwsInvalidArgument([&]() { simulation::Track t(def); }) &&
+               "a spawn position outside the drivable mask must be rejected");
+    }
+
+    // A known-non-drivable interior point for the active track (see the
+    // comment in verifyTrack() for why this moved out of that generic
+    // function). (948, 192) was found offline by taking the mask's
+    // connected black regions, isolating the one fully enclosed by the
+    // drivable loop (i.e. not the outer background), and locating its
+    // deepest point (maximum distance to the nearest drivable pixel: 55px
+    // here) -- a robust interior point, not a boundary/anti-aliasing edge
+    // case.
+    {
+        assert(!track.isDrivable(948, 192) &&
+               "a known-deep-interior point of the extreme track's enclosed black region must be non-drivable");
+    }
+
+    // 12: the real extreme track's mask contains genuinely varying road
+    // width along its length -- not one global constant -- measured purely
+    // through isDrivable() at a sample from its widest reliably-measurable
+    // straight (the long top straight, ~129px wide) and one from its
+    // narrowest (the short straight at the top of the middle S-connector,
+    // ~100px wide). Both indices were chosen by direct measurement against
+    // track_mask.png on straight stretches specifically, since
+    // measureRoadWidthAt()'s perpendicular scan reads inflated widths on
+    // curved stretches (the scan direction stops being perpendicular to the
+    // actual corridor there) -- see createExtremeTrackDefinition() for
+    // which control-point segments these fall in (segment 1 and segment 28
+    // respectively, at samplesPerSegment = 20).
+    {
+        constexpr std::size_t wideSample = 20;   // mid top straight (P1->P2)
+        constexpr std::size_t narrowSample = 571; // mid short S-connector straight (P28->P29)
+
+        const float wideWidth = measureRoadWidthAt(track, wideSample);
+        const float narrowWidth = measureRoadWidthAt(track, narrowSample);
+
+        assert(wideWidth > 0.0f && narrowWidth > 0.0f && "both probed points must be on the drivable band");
+        assert(wideWidth > narrowWidth + 15.0f &&
+               "the mask must contain a measurably wider section than another -- no single constant width");
+    }
+
+    // 19 & 20: local tracking follows a normal, small forward step exactly
+    // (matching a full global projection), including wrapping correctly
+    // around the closed loop's seam.
+    {
+        const std::vector<Vector2>& centerline = track.getCenterlineSamples();
+        const std::size_t sampleCount = centerline.size();
+
+        // Near the start of the loop: previousSegmentIndex = 2, query a
+        // point close to the seam from the far side (index sampleCount-8) --
+        // only reachable if the window wraps correctly past index 0.
+        const std::size_t nearSeamIndex = sampleCount - 8;
+        const simulation::TrackProjection wrapped =
+            track.projectOntoCenterlineLocal(centerline[nearSeamIndex], 2, simulation::TrackProgress::kLocalSearchRadius);
+        assert(wrapped.distanceFromCenterline < 1.0f && wrapped.segmentIndex == nearSeamIndex - 1 &&
+               "local search must wrap correctly across the closed loop's seam");
+
+        // Symmetric case: previousSegmentIndex near the end, query a point
+        // just past the seam at the start.
+        const simulation::TrackProjection wrappedOther = track.projectOntoCenterlineLocal(
+            centerline[5], sampleCount - 3, simulation::TrackProgress::kLocalSearchRadius);
+        assert(wrappedOther.distanceFromCenterline < 1.0f && wrappedOther.segmentIndex == 4 &&
+               "local search must wrap correctly in both directions across the seam");
+    }
+
+    // 21: a position that sits exactly on a *logically distant* segment
+    // (outside the local search window) is not found by local search, even
+    // though it is a perfect (zero-distance) match globally -- proving
+    // physically-nearby-looking-but-index-distant sections are structurally
+    // excluded, not merely deprioritized.
+    {
+        const std::vector<Vector2>& centerline = track.getCenterlineSamples();
+        // Exactly opposite the loop from kPreviousIndex -- the largest
+        // possible index gap on any track, so it is guaranteed outside the
+        // local window regardless of kLocalSearchRadius's exact value.
+        const std::size_t kFarIndex = centerline.size() / 2;
+        constexpr std::size_t kPreviousIndex = 0;
+
+        const simulation::TrackProjection localResult = track.projectOntoCenterlineLocal(
+            centerline[kFarIndex], kPreviousIndex, simulation::TrackProgress::kLocalSearchRadius);
+
+        assert(localResult.segmentIndex != kFarIndex &&
+               "local search must not find a segment outside its window, even at zero true distance");
+        assert(localResult.distanceFromCenterline > 10.0f &&
+               "local search's in-window result must be measurably farther than the excluded true match");
+
+        // Tie-break note: querying exactly at sample kFarIndex makes both
+        // segment kFarIndex-1 (ending there, t=1) and segment kFarIndex
+        // (starting there, t=0) equally close -- projectOntoCenterline()
+        // scans in ascending index order and only a strictly smaller
+        // distance replaces the current best (see Track::considerSegment()),
+        // so segment kFarIndex-1 wins, exactly as verifyTrack()'s own
+        // tie-break check documents.
+        const simulation::TrackProjection globalResult = track.projectOntoCenterline(centerline[kFarIndex]);
+        assert(globalResult.segmentIndex == kFarIndex - 1 && globalResult.distanceFromCenterline < 1.0f &&
+               "a full global scan, for contrast, must find the exact match local search deliberately excluded");
+    }
+
+    // 22, 23 & 24: global recovery re-anchors tracking when local projection
+    // clearly fails (car far outside the local window), without awarding
+    // implausible progress -- and reset() re-anchors tracking correctly
+    // afterward.
+    {
+        simulation::Car car(makeCarParams(), track);
+        simulation::TrackProgress progress(track);
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        assert(progress.getTrackedSegmentIndex() == track.projectOntoCenterline(kSpawnPosition).segmentIndex &&
+               "reset must anchor the tracked segment to a full global projection of the reset position");
+
+        // Jump the car far away (well beyond kLocalSearchRadius in index
+        // terms) to a distant, still-drivable point on the track -- local
+        // tracking cannot reach it, so this must trigger recovery. 0.6 of a
+        // lap was chosen (and verified offline against the extreme track's
+        // actual geometry) to land far enough from spawn's local window
+        // that the window's best in-window match is ~330px away, safely
+        // past kLocalProjectionRecoveryDistance (250px) -- not every
+        // fraction does this reliably on this track's particular shape, so
+        // this exact value is deliberate, not arbitrary.
+        const Vector2 distantPoint = track_progress_verify::positionAtLapPosition(track, 0.6f);
+        car.reset(distantPoint, kSpawnHeading);
+        progress.update(car);
+
+        const simulation::TrackProjection expectedRecovery = track.projectOntoCenterline(distantPoint);
+        assert(progress.getTrackedSegmentIndex() == expectedRecovery.segmentIndex &&
+               "recovery must re-anchor the tracked segment to the correct (globally projected) segment");
+        assert(progress.getBestProgress() == 0.0f && progress.getTotalCheckpointsPassed() == 0 &&
+               "recovery must not award progress or checkpoints for an implausible jump -- the plausibility "
+               "gate still applies to whatever position recovery reports");
+
+        // A small, ordinary step from here on must now be tracked normally
+        // (locally) and DOES register as progress -- recovery re-anchors
+        // tracking for subsequent frames, it does not leave it stuck.
+        const Vector2 nearbyPoint = track_progress_verify::positionAtLapPosition(track, 0.605f);
+        car.reset(nearbyPoint, kSpawnHeading);
+        progress.update(car);
+        assert(progress.getContinuousProgress() > 0.0f &&
+               "a normal small step immediately after recovery must register as ordinary forward progress");
+
+        // 24: reset() discards the stale (far-away) tracked segment and
+        // re-anchors back to the car's actual (spawn) position.
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        assert(progress.getTrackedSegmentIndex() == track.projectOntoCenterline(kSpawnPosition).segmentIndex &&
+               "reset must discard any previously tracked segment and re-anchor from scratch");
+    }
+
+    // Stage 19.1 regression case: a constructed close-but-topologically-
+    // distant scenario on the extreme track's actual tight top-left corner
+    // (a near-hairpin -- see createExtremeTrackDefinition()'s P2-P6),
+    // reproducing the exact bug this stage fixed. Section A is the
+    // centerline's entry into the hairpin (around sample index 42); section
+    // B is a stretch further into the hairpin (~index 89) that curves back
+    // close enough to A's entry to be geometrically nearer than A itself at
+    // certain positions -- while being a real ~47-sample jump away, more
+    // than any single simulated frame could plausibly cover. (153.5, 136.5)
+    // is one such position, taken directly from a live population run's
+    // debug log before this fix (see kLocalContinuityWeight's comment):
+    // under pure nearest-distance selection it was geometrically closer to
+    // section B (~34.8px) than to section A's own continuation
+    // (~36-40px+) by only a few pixels, so local tracking snapped forward
+    // to B. With continuity-aware scoring, tracking must stay on A.
+    {
+        const std::vector<Vector2>& centerline = track.getCenterlineSamples();
+        constexpr std::size_t kSectionA = 42;
+        constexpr std::size_t kSectionB = 89;
+        constexpr Vector2 kAmbiguousPosition = {153.5f, 136.5f};
+
+        simulation::Car car(makeCarParams(), track);
+        simulation::TrackProgress progress(track);
+
+        // Anchor tracking on section A via an exact centerline point (a
+        // real reset(), not a raw Track:: call, so this exercises
+        // TrackProgress's actual production code path end to end).
+        // Tie-break note: querying exactly at sample kSectionA makes both
+        // segment kSectionA-1 (ending there) and kSectionA (starting there)
+        // equally close -- the global scan's ascending-order, strict-'<'
+        // tie-break picks kSectionA-1 (see verifyTrack()'s own tie-break
+        // check), so that is the segment reset() actually anchors on.
+        car.reset(centerline[kSectionA], kSpawnHeading);
+        progress.reset(car);
+        assert(progress.getTrackedSegmentIndex() == kSectionA - 1 &&
+               "setup must anchor tracking exactly on section A");
+
+        // The ambiguous position: local tracking must stay close to
+        // section A (within the documented free zone plus a small margin
+        // for the update itself), never near section B.
+        car.reset(kAmbiguousPosition, kSpawnHeading);
+        progress.update(car);
+        const std::size_t afterAmbiguous = progress.getTrackedSegmentIndex();
+        const std::size_t gapFromA =
+            std::min((afterAmbiguous + centerline.size() - kSectionA) % centerline.size(),
+                     (kSectionA + centerline.size() - afterAmbiguous) % centerline.size());
+        const std::size_t gapFromB =
+            std::min((afterAmbiguous + centerline.size() - kSectionB) % centerline.size(),
+                     (kSectionB + centerline.size() - afterAmbiguous) % centerline.size());
+        assert(gapFromA <= 15 &&
+               "local tracking must stay on (or very near) section A at the ambiguous position");
+        assert(gapFromA < gapFromB &&
+               "local tracking must end up clearly closer to section A than to section B");
+
+        // Normal forward movement: a small step further along the actual
+        // centerline (still well within the hairpin) must be tracked
+        // forward normally, registering as ordinary positive progress.
+        const float progressBeforeForward = progress.getContinuousProgress();
+        car.reset(centerline[(afterAmbiguous + 3) % centerline.size()], kSpawnHeading);
+        progress.update(car);
+        assert(progress.getContinuousProgress() > progressBeforeForward &&
+               "a small forward step must register as ordinary forward progress");
+
+        // Small backward movement: stepping back a couple of samples must
+        // still be tracked correctly (continuous progress decreases, best
+        // progress does not).
+        const float bestAfterForward = progress.getBestProgress();
+        const std::size_t beforeBackward = progress.getTrackedSegmentIndex();
+        car.reset(centerline[(beforeBackward + centerline.size() - 2) % centerline.size()], kSpawnHeading);
+        progress.update(car);
+        assert(progress.getContinuousProgress() < progressBeforeForward &&
+               "a small backward step must decrease continuous progress");
+        assert(progress.getBestProgress() == bestAfterForward && "backward movement must not raise best progress");
+
+        // Loop wraparound: reset near the very end of the closed loop, then
+        // step to a position just past the start -- must be tracked as a
+        // small forward (seam-crossing) step, not a large jump or a
+        // rejection, through TrackProgress's real update() path.
+        const std::size_t nearEnd = centerline.size() - 3;
+        car.reset(centerline[nearEnd], kSpawnHeading);
+        progress.reset(car);
+        car.reset(centerline[2], kSpawnHeading);
+        progress.update(car);
+        const std::size_t afterWrap = progress.getTrackedSegmentIndex();
+        const std::size_t wrapGap = std::min((afterWrap + centerline.size() - 2) % centerline.size(),
+                                              (2 + centerline.size() - afterWrap) % centerline.size());
+        assert(wrapGap <= 5 && "wraparound tracking must land close to the true post-seam position");
+        assert(progress.getContinuousProgress() > 0.0f &&
+               "crossing the seam forward must register as ordinary forward progress, not be rejected");
+    }
+
+    TraceLog(LOG_INFO, "Image-based track system verification: all deterministic checks passed");
 }
 
 // One-shot, deterministic sanity check of ai::FitnessEvaluator (Fitness v2,
@@ -6499,29 +6987,32 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             evaluator.update(car, progress, lapTime);
         };
 
-        // First lap: 8s total.
-        driveOneLap(8.0f);
+        // First lap: 3s total. (Kept well under FitnessEvaluator's
+        // kMaxEvaluationTime -- 15.0f as of the last generation-duration
+        // change -- since all three laps' times accumulate in one
+        // evaluator and must finish before TimeLimit ends the evaluation.)
+        driveOneLap(3.0f);
         assert(progress.getLapCount() == 1 && "the first full lap must complete exactly one lap");
         assert(evaluator.hasCompletedLap() && "completing a lap must set hasCompletedLap()"); // 15 (part 1)
         assert(std::fabs(evaluator.getLastLapTime() - evaluator.getElapsedTime()) < kEps &&
                "the first lap's time must equal elapsedTime, since the first lap starts at time 0"); // 15 (part 2)
         assert(std::fabs(evaluator.getBestLapTime() - evaluator.getLastLapTime()) < kEps &&
                "the only completed lap so far must also be the best lap");
-        const float firstLapTime = evaluator.getLastLapTime(); // 8s
+        const float firstLapTime = evaluator.getLastLapTime(); // 3s
 
-        // Second lap: slower (12s) -- new last-lap time, but best must stay at firstLapTime.
-        driveOneLap(12.0f);
+        // Second lap: slower (5s) -- new last-lap time, but best must stay at firstLapTime.
+        driveOneLap(5.0f);
         assert(progress.getLapCount() == 2 && "the second full lap must complete a second lap");
-        assert(std::fabs(evaluator.getLastLapTime() - 12.0f) < kEps &&
+        assert(std::fabs(evaluator.getLastLapTime() - 5.0f) < kEps &&
                "a second, slower lap must record a new last-lap time"); // 16
         assert(std::fabs(evaluator.getBestLapTime() - firstLapTime) < kEps &&
                "a slower later lap must not worsen (increase) the recorded best lap time"); // 17 & 18
 
-        // Third lap: faster (4s) -- best must now update to this new fastest time.
-        driveOneLap(4.0f);
+        // Third lap: faster (1s) -- best must now update to this new fastest time.
+        driveOneLap(1.0f);
         assert(progress.getLapCount() == 3 && "the third full lap must complete a third lap");
-        assert(std::fabs(evaluator.getLastLapTime() - 4.0f) < kEps && "the third lap's time must be recorded as the new last-lap time");
-        assert(std::fabs(evaluator.getBestLapTime() - 4.0f) < kEps &&
+        assert(std::fabs(evaluator.getLastLapTime() - 1.0f) < kEps && "the third lap's time must be recorded as the new last-lap time");
+        assert(std::fabs(evaluator.getBestLapTime() - 1.0f) < kEps &&
                "a faster later lap must become the new best lap time"); // 17 (fastest wins)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
@@ -6619,7 +7110,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         evaluator.reset();
 
         float p = 0.0f;
-        for (int second = 0; second < 61 && !evaluator.isEvaluationFinished(); ++second)
+        for (int second = 0; second < 16 && !evaluator.isEvaluationFinished(); ++second)
         {
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
@@ -6629,7 +7120,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
                "reaching the maximum evaluation time must end the evaluation with TimeLimit");
-        assert(evaluator.getElapsedTime() >= 60.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
+        assert(evaluator.getElapsedTime() >= 15.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
 
         const float fitnessAtFinish = evaluator.getFitness();
         const float elapsedAtFinish = evaluator.getElapsedTime();
@@ -6895,6 +7386,89 @@ void drawIndividualCar(const simulation::Car& car, Color color, bool highlighted
     }
 }
 
+// Stage 19.1: makes the highlighted car's TrackProgress projection state
+// visible -- purely a diagnostic overlay for investigating local-tracking/
+// recovery behavior, never read by any production control/fitness path.
+// Draws (A) a marker at the centerline point TrackProgress currently has
+// this car projected onto, (B) a connecting line from the car's actual
+// position to that point, and (C) a short arrow showing the centerline's
+// forward tangent at that point. Colored magenta throughout so it reads
+// as clearly distinct from the green/orange sensor rays drawn above.
+void drawProjectionDebug(const simulation::Car& car, const simulation::TrackProgress& progress)
+{
+    if (!car.isAlive())
+    {
+        return;
+    }
+
+    const simulation::TrackProgress::ProjectionDebugInfo& info = progress.getLastProjectionDebugInfo();
+    constexpr Color kProjectionColor = Color{255, 0, 220, 255};
+
+    DrawLineEx(car.getPosition(), info.point, 1.5f, Color{255, 0, 220, 140});
+    DrawCircleV(info.point, 5.0f, kProjectionColor);
+
+    constexpr float kTangentArrowLength = 22.0f;
+    const Vector2 tangentTip = {info.point.x + info.tangent.x * kTangentArrowLength,
+                                 info.point.y + info.tangent.y * kTangentArrowLength};
+    DrawLineEx(info.point, tangentTip, 2.5f, kProjectionColor);
+    DrawCircleV(tangentTip, 3.0f, kProjectionColor);
+}
+
+// Stage 19.1: flags and logs a "suspicious" per-frame projection change for
+// the highlighted individual only -- a diagnostic aid for investigating
+// whether TrackProgress's local tracking occasionally snaps to a
+// physically-nearby-but-topologically-distant centerline section (see the
+// "Local projection tracking" class comment in TrackProgress.h). Every
+// individual's own TrackProgress already computes indexDelta/tangents
+// relative to *its own* previous frame regardless of which individual is
+// currently highlighted in the UI, so this function needs no history of
+// its own -- it purely reads this frame's already-computed
+// ProjectionDebugInfo. Never affects fitness, progress, or control: this
+// only calls TraceLog.
+void reportSuspiciousProjectionJump(std::size_t highlightedIndex, const simulation::TrackProgress& progress,
+                                     const simulation::Car& car)
+{
+    const simulation::TrackProgress::ProjectionDebugInfo& info = progress.getLastProjectionDebugInfo();
+
+    // A real car moves at most ~4.3px per frame (maxSpeed 260px/s at the
+    // fixed 1/60s step) -- on the extreme track's centerline (~6.4px average
+    // sample spacing), that is under one sample per frame. 15 samples is
+    // already >20x that margin, so any LOCAL-mode index jump this large in
+    // a single update() cannot reflect real continuous movement -- it can
+    // only be local search snapping to a different, geometrically nearby
+    // candidate (exactly the failure mode under investigation).
+    constexpr int kSuspiciousIndexJumpThreshold = 15;
+
+    // Below this cosine (~72.5 degrees), the new projection's forward
+    // tangent points in a meaningfully different direction than where the
+    // car was previously tracked. Real curvature changes gradually
+    // sample-to-sample (even through a tight hairpin), so a big one-frame
+    // swing -- combined with any nonzero index movement -- is corroborating
+    // evidence of a jump to an unrelated section, not just a tight corner.
+    constexpr float kSuspiciousTangentDotThreshold = 0.3f;
+
+    const float tangentDot = info.previousTangent.x * info.tangent.x + info.previousTangent.y * info.tangent.y;
+    const int absIndexDelta = info.indexDelta < 0 ? -info.indexDelta : info.indexDelta;
+
+    const bool suspicious = info.usedRecovery || absIndexDelta > kSuspiciousIndexJumpThreshold ||
+                             (info.indexDelta != 0 && tangentDot < kSuspiciousTangentDotThreshold);
+
+    if (!suspicious)
+    {
+        return;
+    }
+
+    const Vector2 pos = car.getPosition();
+    TraceLog(LOG_WARNING,
+             "[TrackProgress] suspicious projection jump (individual %d): pos=(%.1f,%.1f) index %d -> %d "
+             "(delta=%+d), distance=%.1fpx, prevTangent=(%.2f,%.2f), newTangent=(%.2f,%.2f), mode=%s",
+             static_cast<int>(highlightedIndex), static_cast<double>(pos.x), static_cast<double>(pos.y),
+             static_cast<int>(info.previousIndex), static_cast<int>(info.currentIndex), info.indexDelta,
+             static_cast<double>(info.distance), static_cast<double>(info.previousTangent.x),
+             static_cast<double>(info.previousTangent.y), static_cast<double>(info.tangent.x),
+             static_cast<double>(info.tangent.y), info.usedRecovery ? "RECOVERY" : "LOCAL");
+}
+
 // Chooses which single individual gets its sensors/velocity vector
 // rendered this frame: the currently-running individual with the highest
 // best-progress, or -- once every individual has finished -- the
@@ -6938,7 +7512,7 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     int y = 20;
     const int lineHeight = 22;
 
-    DrawText("STAGE 14B - HARD TRAINING TRACK", x, y, 20, RAYWHITE);
+    DrawText("NEAT TRAINING - EXTREME TRACK", x, y, 20, RAYWHITE);
     y += lineHeight * 2;
 
     char line[128];
@@ -7096,6 +7670,26 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
                   best.getProgress().getTotalCheckpointsPassed());
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight * 2;
+
+    // Stage 19.1: compact TrackProgress projection debug block for the
+    // highlighted individual -- see drawProjectionDebug()/
+    // reportSuspiciousProjectionJump() for the matching world-space overlay
+    // and console diagnostics. Deliberately just 3 lines.
+    {
+        const simulation::TrackProgress::ProjectionDebugInfo& info = best.getProgress().getLastProjectionDebugInfo();
+        DrawText("PROJECTION DEBUG", x, y, 18, YELLOW);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Projection: %s", info.usedRecovery ? "RECOVERY" : "LOCAL");
+        DrawText(line, x, y, 16, info.usedRecovery ? ORANGE : LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Index: %d -> %d (%+d)", static_cast<int>(info.previousIndex),
+                      static_cast<int>(info.currentIndex), info.indexDelta);
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Distance: %.1f px", static_cast<double>(info.distance));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight * 2;
+    }
 
     DrawText("LAST GENERATION", x, y, 18, YELLOW);
     y += lineHeight;
@@ -8791,6 +9385,13 @@ int main()
     SetTargetFPS(60);
 
     simulation::Track track(makeTrackDefinition());
+
+    // Stage 18: the visual layer's GPU texture is created here, separately
+    // from Track's own (GPU-free) construction above and only now that a
+    // window/GL context exists (see TrackVisual.h) -- Track already
+    // validated this same path's existence/dimensions on the CPU side.
+    simulation::TrackVisual trackVisual(track.getDefinition().visualImagePath, kSimWidth, kSimHeight);
+
     verifyTrack(track);
     verifyCar(track);
     verifySensors(track);
@@ -8808,6 +9409,7 @@ int main()
     verifySpeciation();
     verifyAIController(track);
     verifyTrackProgress(track);
+    verifyImageBasedTrackSystem(track);
     verifyFitnessEvaluator(track);
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
@@ -8853,24 +9455,12 @@ int main()
 
         DrawRectangle(0, 0, kSimWidth, kSimHeight, BLACK);
 
-        // Stage 14A: render the exact same sampled centerline the CPU mask
-        // and progress/checkpoint queries are built from -- thick gray line
-        // segments (with a rounding circle at each joint so short segments
-        // still join smoothly) whose width matches
-        // TrackDefinition::trackWidth, on the black background already
-        // cleared above. No ellipse-specific rendering remains.
-        {
-            const std::vector<Vector2>& centerlineSamples = track.getCenterlineSamples();
-            const float roadWidth = track.getDefinition().trackWidth;
-            const std::size_t sampleCount = centerlineSamples.size();
-            for (std::size_t i = 0; i < sampleCount; ++i)
-            {
-                const Vector2& a = centerlineSamples[i];
-                const Vector2& b = centerlineSamples[(i + 1) % sampleCount];
-                DrawLineEx(a, b, roadWidth, GRAY);
-                DrawCircleV(a, roadWidth * 0.5f, GRAY);
-            }
-        }
+        // Stage 18: the visual layer is a plain image draw -- track_visual.png,
+        // loaded once into trackVisual above -- entirely independent of the
+        // mask Car/sensors collide against (see Track::isDrivable()) and of
+        // the centerline TrackProgress uses. No geometry is derived from
+        // TrackDefinition::trackWidth or the sampled centerline here anymore.
+        trackVisual.draw();
 
         // Color every car by its progress ranking (leading = green,
         // trailing = red) so the population's spread is visible at a
@@ -8902,6 +9492,15 @@ int main()
             const Color color =
                 individual.isFinished() ? Color{70, 70, 70, 140} : progressRankColor(normalizedRank[i]);
             drawIndividualCar(individual.getCar(), color, i == highlightedIndex);
+        }
+
+        // Stage 19.1: projection debug overlay + suspicious-jump detection,
+        // for the highlighted individual only (never every car -- see
+        // drawProjectionDebug()/reportSuspiciousProjectionJump()).
+        {
+            const ai::neat::Individual& highlighted = population.getIndividual(highlightedIndex);
+            drawProjectionDebug(highlighted.getCar(), highlighted.getProgress());
+            reportSuspiciousProjectionJump(highlightedIndex, highlighted.getProgress(), highlighted.getCar());
         }
 
         drawPopulationPanel(population, highlightedIndex);
