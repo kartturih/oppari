@@ -577,7 +577,16 @@ void verifyCar(const simulation::Track& track)
     {
         car.update(steerOnly, kSimulationDt);
     }
-    assert(car.getHeading() == kSpawnHeading && "steering must have no effect while stationary");
+    // Stage 20: exact bit-for-bit equality no longer applies here -- Box2D
+    // stores body rotation as a (cos, sin) pair and getHeading() reconstructs
+    // the angle via atan2 every update() (see Car::update()), so even a
+    // heading that truly never changes accumulates a tiny (sub-1e-4 rad)
+    // floating-point round-trip drift over repeated update() calls, unlike
+    // the old analytic model that stored the angle itself and left it
+    // untouched when its increment was exactly 0. A small epsilon is the
+    // physically correct check here, not a weakening of it.
+    assert(std::fabs(car.getHeading() - kSpawnHeading) < 1e-3f &&
+           "steering must have no effect while stationary");
 
     // Sustained throttle must build up speed from rest.
     simulation::CarInput throttleOnly;
@@ -816,6 +825,714 @@ void verifyObservation(const simulation::Track& track)
     }
 
     TraceLog(LOG_INFO, "Observation verification: all deterministic checks passed");
+}
+
+// One-shot, deterministic sanity check of the Box2D-backed single-track
+// (bicycle model) tire model -- Stage 20.2. Unlike Stage 20/20.1's checks
+// (which mostly verified the old shared-grip-budget/yaw-controller model's
+// own internal bookkeeping), these are written directly against the
+// BEHAVIOR the new front/rear tire model must produce: a standing-start
+// full-throttle/full-steering input must curve the car without it sliding
+// almost sideways, ordinary cornering must keep tire slip angles small,
+// the turn radius must genuinely widen with speed, grip loss under a hard
+// high-speed turn must be progressive (slip angles growing smoothly with
+// speed, not jumping straight to an extreme), releasing steering must let
+// slip settle back down, straight-line acceleration must stay stable, and
+// nothing here should ever produce a NaN, an oscillating heading, or an
+// unbounded spin. Runs once at startup, independent of keyboard/render
+// timing.
+void verifyVehiclePhysics(const simulation::Track& track)
+{
+    simulation::Car car(makeCarParams(), track);
+
+    // getHeading() comes from atan2() (see Car::update()), so it is always
+    // wrapped into (-pi, pi] -- a real, continuous rotation can still make
+    // the raw scalar jump by ~2*pi if it crosses that branch cut
+    // (kSpawnHeading on this track sits almost exactly at +-pi, so this is
+    // not a hypothetical edge case here). Every heading-based measurement
+    // below uses this shortest-path signed delta, never a naive subtraction.
+    constexpr float kTwoPi = 2.0f * static_cast<float>(PI);
+    auto headingDelta = [](float from, float to) -> float
+    {
+        float delta = to - from;
+        while (delta > PI)
+        {
+            delta -= kTwoPi;
+        }
+        while (delta < -PI)
+        {
+            delta += kTwoPi;
+        }
+        return delta;
+    };
+
+    auto allFinite = [](const simulation::Car& c) -> bool
+    {
+        return std::isfinite(c.getPosition().x) && std::isfinite(c.getPosition().y) && std::isfinite(c.getHeading()) &&
+               std::isfinite(c.getVelocity().x) && std::isfinite(c.getVelocity().y);
+    };
+
+    // 1: sustained throttle must increase forward speed over time.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput throttleOnly;
+        throttleOnly.throttle = 1.0f;
+        throttleOnly.steering = 0.0f;
+
+        const float speedAtStart = car.getSpeed();
+        for (int i = 0; i < 60; ++i)
+        {
+            car.update(throttleOnly, kSimulationDt);
+        }
+        const float speedAfter1s = car.getSpeed();
+        assert(speedAtStart < 1.0f && "car must start from rest");
+        assert(speedAfter1s > speedAtStart + 20.0f &&
+               "sustained throttle must visibly increase forward speed within 1s");
+        assert(car.getForwardVelocity() > 0.0f && "sustained throttle must produce positive forward velocity");
+    }
+
+    // 2: releasing throttle must let resistance reduce speed over time
+    // (lift-off) -- no separate brake input exists (see CarInput), this is
+    // the only deceleration channel besides tire grip/steering.
+    {
+        const float speedBeforeLiftOff = car.getSpeed();
+        assert(speedBeforeLiftOff > 50.0f && "must still be moving meaningfully before lift-off");
+
+        simulation::CarInput coasting; // throttle = 0, steering = 0
+        for (int i = 0; i < 90; ++i)
+        {
+            car.update(coasting, kSimulationDt);
+        }
+        const float speedAfterLiftOff = car.getSpeed();
+        assert(speedAfterLiftOff < speedBeforeLiftOff - 10.0f &&
+               "releasing throttle must visibly reduce speed via rolling resistance/drag");
+        TraceLog(LOG_INFO, "Vehicle physics: lift-off over 1.5s: %.1f -> %.1f px/s (-%.1f px/s)",
+                 static_cast<double>(speedBeforeLiftOff), static_cast<double>(speedAfterLiftOff),
+                 static_cast<double>(speedBeforeLiftOff - speedAfterLiftOff));
+    }
+
+    // 3: straight-line acceleration remains stable -- no NaNs, and heading
+    // stays essentially frozen frame to frame (no per-frame snapping) and
+    // overall (no drift) under sustained full throttle with zero steering.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput throttleOnly;
+        throttleOnly.throttle = 1.0f;
+        float previousHeading = car.getHeading();
+        for (int i = 0; i < 150; ++i) // ~2.5s
+        {
+            car.update(throttleOnly, kSimulationDt);
+            assert(allFinite(car) && "straight-line acceleration must never produce a NaN/Inf state");
+            assert(std::fabs(headingDelta(previousHeading, car.getHeading())) < 0.01f &&
+                   "heading must not snap frame to frame under zero steering");
+            previousHeading = car.getHeading();
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+        assert(std::fabs(headingDelta(kSpawnHeading, car.getHeading())) < 0.02f &&
+               "zero steering must track straight overall, not just frame to frame");
+        assert(std::fabs(car.getLateralVelocity()) < car.getSpeed() * 0.05f &&
+               "zero steering must leave lateral velocity negligible relative to forward speed");
+    }
+
+    // 4: standing-start full throttle + full steering must curve the car
+    // through a stable trajectory -- it must NOT instantly rotate the body
+    // out from under the velocity vector, nor drift almost sideways/onto
+    // an ice-skating slide. The whole-body slip angle (heading vs. actual
+    // velocity direction -- see Car::getSlipAngle()) is tracked over the
+    // full run and must stay well short of a perpendicular (~90 degree)
+    // slide at every single frame, not just on average.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput fullLock;
+        fullLock.throttle = 1.0f;
+        fullLock.steering = 1.0f;
+
+        // 0.5s, not longer: continuous full-throttle + full-lock steering is
+        // an accelerating spiral by construction -- given enough time it
+        // will inevitably leave any bounded-width corridor no matter how
+        // realistic the underlying physics is (this is geometry, not a
+        // physics defect: by inspection, this exact maneuver reaches the
+        // spawn straight's 130px-wide corridor edge around 0.7-0.8s in).
+        // 0.5s is long enough to see the car build up real speed while
+        // turning, comfortably inside that margin.
+        float maxAbsBodySlipAngle = 0.0f;
+        for (int i = 0; i < 30 && car.isAlive(); ++i)
+        {
+            car.update(fullLock, kSimulationDt);
+            assert(allFinite(car) && "standing-start full throttle+steering must never produce a NaN/Inf state");
+            maxAbsBodySlipAngle = std::max(maxAbsBodySlipAngle, std::fabs(car.getSlipAngle()));
+        }
+        assert(car.isAlive() && "a standing-start full-lock turn on the spawn straight must not leave the road");
+        assert(car.getSpeed() > 30.0f && "the car must still have accelerated meaningfully while turning");
+        assert(std::fabs(headingDelta(kSpawnHeading, car.getHeading())) > 0.3f &&
+               "the car must have genuinely turned, not just spun in place");
+        // 60 degrees =~ 1.047 rad: comfortably short of a perpendicular
+        // (90 degree) slide, and well above what a merely-noisy reading
+        // near rest could produce.
+        assert(maxAbsBodySlipAngle < 1.047f &&
+               "standing-start full-lock steering must not make the car slide almost sideways");
+        TraceLog(LOG_INFO,
+                 "Vehicle physics: standing-start full throttle+steering over 0.5s -- final speed %.1fpx/s, heading "
+                 "turned %.1fdeg, max body slip angle %.1fdeg",
+                 static_cast<double>(car.getSpeed()),
+                 static_cast<double>(headingDelta(kSpawnHeading, car.getHeading()) * RAD2DEG),
+                 static_cast<double>(maxAbsBodySlipAngle * RAD2DEG));
+    }
+
+    // 5: ordinary moderate-speed cornering keeps tire slip angles small
+    // (planted, not "on ice"), and the front/rear tire forces are what is
+    // actually producing the car's rotation -- both axle forces and the
+    // resulting yaw rate must be genuinely nonzero, confirming yaw comes
+    // from the tire model's moment arms rather than from nowhere.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput moderateTurn;
+        moderateTurn.throttle = 1.0f;
+        moderateTurn.steering = 0.5f;
+        // 0.75s: by inspection this exact maneuver (continuous moderate
+        // turn while accelerating) reaches the spawn straight's corridor
+        // edge around 0.9s in -- same geometric inevitability as test 4
+        // above, not a physics defect (and by 0.75s slip angle has, if
+        // anything, been shrinking as speed builds -- see the assertions
+        // below).
+        for (int i = 0; i < 45 && car.isAlive(); ++i)
+        {
+            car.update(moderateTurn, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+
+        const simulation::TireDebugInfo& debug = car.getTireDebugInfo();
+        // 20 degrees =~ 0.349 rad: real road cars rarely exceed this even
+        // under enthusiastic (not extreme) cornering.
+        assert(std::fabs(debug.frontSlipAngle) < 0.349f && "moderate-speed cornering must keep the front slip angle small");
+        assert(std::fabs(debug.rearSlipAngle) < 0.349f && "moderate-speed cornering must keep the rear slip angle small");
+        assert(std::fabs(car.getSlipAngle()) < 0.349f && "moderate-speed cornering must keep the whole-body slip angle small");
+
+        assert(std::fabs(debug.frontForceY) > 10.0f && "cornering must produce a genuinely nonzero front tire force");
+        assert(std::fabs(debug.yawRate) > 0.05f &&
+               "a genuinely nonzero front tire force must be producing genuine rotation");
+        TraceLog(LOG_INFO,
+                 "Vehicle physics: moderate cornering -- speed %.1fpx/s, body slip %.1fdeg, front slip %.1fdeg "
+                 "(Fy=%.0f), rear slip %.1fdeg (Fx=%.0f Fy=%.0f, grip=%.0f%%), yaw rate %.2frad/s",
+                 static_cast<double>(car.getSpeed()), static_cast<double>(car.getSlipAngle() * RAD2DEG),
+                 static_cast<double>(debug.frontSlipAngle * RAD2DEG), static_cast<double>(debug.frontForceY),
+                 static_cast<double>(debug.rearSlipAngle * RAD2DEG), static_cast<double>(debug.rearForceX),
+                 static_cast<double>(debug.rearForceY), static_cast<double>(debug.rearGripUtilization * 100.0f),
+                 static_cast<double>(debug.yawRate));
+    }
+
+    // 6: releasing steering after a hard turn lets the car settle back
+    // down -- slip angle must shrink over subsequent updates, not persist
+    // or oscillate/grow.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput throttleOnly;
+        throttleOnly.throttle = 1.0f;
+        for (int i = 0; i < 30; ++i) // build up a moderate speed first (~0.5s)
+        {
+            car.update(throttleOnly, kSimulationDt);
+        }
+        simulation::CarInput hardTurn;
+        hardTurn.throttle = 1.0f;
+        hardTurn.steering = 1.0f;
+        for (int i = 0; i < 15 && car.isAlive(); ++i) // induce real slip
+        {
+            car.update(hardTurn, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+        const float slipAfterTurn = std::fabs(car.getSlipAngle());
+        assert(slipAfterTurn > 0.03f && "test setup must actually induce measurable slip before testing recovery");
+
+        // Coast (throttle off too) while straightening: this is also
+        // simply less distance covered per frame as speed drops, giving
+        // more room to observe settling before any track boundary matters
+        // -- releasing steering is still the thing actually being tested
+        // (see the slip-angle assertions below, which are about slip
+        // angle, not about speed).
+        simulation::CarInput straighten;
+        straighten.throttle = 0.0f;
+        straighten.steering = 0.0f;
+        float previousSlip = slipAfterTurn;
+        float worstGrowth = 0.0f; // largest single-step increase seen, to catch oscillation/growth
+        for (int i = 0; i < 20 && car.isAlive(); ++i)
+        {
+            car.update(straighten, kSimulationDt);
+            const float slip = std::fabs(car.getSlipAngle());
+            worstGrowth = std::max(worstGrowth, slip - previousSlip);
+            previousSlip = slip;
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road while it settles");
+        assert(worstGrowth < 0.02f && "slip angle must not oscillate or grow once steering is released");
+        assert(previousSlip < slipAfterTurn * 0.5f &&
+               "releasing steering must let slip angle settle back down substantially");
+    }
+
+    // 7: turn radius genuinely widens with speed, and grip loss under a
+    // hard turn is progressive (front/rear slip angles growing smoothly
+    // from low to high speed) rather than an instant jump to an extreme.
+    // Turn radius is measured as speed / yaw-rate (R = v / omega) over a
+    // short window once the tire forces have settled into the turn.
+    {
+        simulation::CarInput fullLeftLock;
+        fullLeftLock.throttle = 1.0f;
+        fullLeftLock.steering = -1.0f;
+
+        // Reaches a speed tier via a throttleBurstFrames-long full-throttle
+        // burst from spawn (steering neutral), then holds full lock for
+        // kSettleFrames so the tire forces/yaw rate settle into the turn
+        // (this is a real physical settling time now -- there is no
+        // separate "controller" converging toward a commanded target),
+        // then measures yaw rate over a further short window. Returns
+        // {speed, radius, frontSlipAngle}.
+        auto measureTurn = [&](int throttleBurstFrames) -> std::tuple<float, float, float>
+        {
+            // Deliberately short: at the highest speed tier, a full-lock
+            // turn only has roughly 20-25 frames of room before leaving the
+            // spawn straight's 130px corridor (by inspection -- same
+            // geometric constraint as tests 4-6 above), so
+            // kSettleFrames+kMeasureFrames must stay comfortably under
+            // that. The tire model's own response is fast (a handful of
+            // frames -- see kForceSubsteps in Car.cpp), so this is still
+            // enough for yaw rate to settle into a representative value
+            // for the turn, not just the initial transient.
+            constexpr int kSettleFrames = 10;
+            constexpr int kMeasureFrames = 6;
+            constexpr float kMeasureWindowSeconds = static_cast<float>(kMeasureFrames) * kSimulationDt;
+
+            car.reset(kSpawnPosition, kSpawnHeading);
+            simulation::CarInput throttleOnly;
+            throttleOnly.throttle = 1.0f;
+            for (int i = 0; i < throttleBurstFrames; ++i)
+            {
+                car.update(throttleOnly, kSimulationDt);
+            }
+
+            for (int i = 0; i < kSettleFrames && car.isAlive(); ++i)
+            {
+                car.update(fullLeftLock, kSimulationDt);
+            }
+            assert(car.isAlive() && "turn-radius measurement must not leave the road while settling into the turn");
+            const float speed = car.getSpeed();
+            const float headingBefore = car.getHeading();
+
+            for (int i = 0; i < kMeasureFrames && car.isAlive(); ++i)
+            {
+                car.update(fullLeftLock, kSimulationDt);
+            }
+            assert(car.isAlive() && "turn-radius measurement must not leave the road during the measurement window");
+            const float yawRate = std::fabs(headingDelta(headingBefore, car.getHeading())) / kMeasureWindowSeconds;
+            const float radius = speed / std::max(yawRate, 1e-4f);
+            return {speed, radius, std::fabs(car.getTireDebugInfo().frontSlipAngle)};
+        };
+
+        const auto [lowSpeed, lowRadius, lowSlip] = measureTurn(15); // short burst -> a low but non-trivial speed
+        const auto [mediumSpeed, mediumRadius, mediumSlip] = measureTurn(60); // ~1s
+        const auto [highSpeed, highRadius, highSlip] = measureTurn(180); // ~3s, well up toward maxSpeed
+
+        assert(lowSpeed > 5.0f && "test setup must reach a low, non-trivial speed");
+        assert(mediumSpeed > lowSpeed * 1.3f && "test setup must reach a meaningfully higher medium speed");
+        // medium (~1s of throttle) is already well up the resistance
+        // curve's asymptote toward the analytic top speed (see
+        // CarParams::rollingResistance's comment), so high (~3s) is closer
+        // to medium than low is to medium -- 1.2x is still a clearly
+        // higher speed, just not as dramatic a jump as low -> medium.
+        assert(highSpeed > mediumSpeed * 1.2f && "test setup must reach a meaningfully higher high speed");
+
+        assert(mediumRadius >= lowRadius * 0.9f && "turn radius must not shrink as speed increases");
+        assert(highRadius > mediumRadius && "turn radius must keep widening from medium to high speed");
+        assert(highRadius > lowRadius * 1.3f &&
+               "the same full steering lock must produce a meaningfully wider turn radius at high speed than at low "
+               "speed (understeer)");
+
+        // Progressive grip loss: front slip angle should grow monotonically
+        // (not jump) from low to medium to high speed, and even at high
+        // speed must stay well short of the wheel being sideways to its
+        // own velocity (90 degrees).
+        assert(mediumSlip >= lowSlip - 0.01f && "front slip angle must not shrink as speed increases");
+        assert(highSlip > mediumSlip && "front slip angle must keep growing from medium to high speed (progressive grip loss)");
+        assert(highSlip < 1.396f && "even a hard high-speed turn must stay well short of a 90-degree wheel slip");
+
+        TraceLog(LOG_INFO,
+                 "Vehicle physics: full-lock turn -- low %.1fpx/s -> R=%.1fpx (frontSlip=%.1fdeg), medium %.1fpx/s -> "
+                 "R=%.1fpx (frontSlip=%.1fdeg), high %.1fpx/s -> R=%.1fpx (frontSlip=%.1fdeg)",
+                 static_cast<double>(lowSpeed), static_cast<double>(lowRadius), static_cast<double>(lowSlip * RAD2DEG),
+                 static_cast<double>(mediumSpeed), static_cast<double>(mediumRadius),
+                 static_cast<double>(mediumSlip * RAD2DEG), static_cast<double>(highSpeed), static_cast<double>(highRadius),
+                 static_cast<double>(highSlip * RAD2DEG));
+    }
+
+    // 8: robustness -- a sustained, aggressive full-throttle/full-steering
+    // stress run must never produce a NaN/Inf, and yaw rate must stay
+    // within a generously sane bound throughout (catching any runaway
+    // spin), even though the car is expected to eventually leave the road
+    // (this is a deliberately extreme, sustained input).
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput stress;
+        stress.throttle = 1.0f;
+        stress.steering = 1.0f;
+        float maxAbsYawRate = 0.0f;
+        for (int i = 0; i < 300 && car.isAlive(); ++i) // up to ~5s
+        {
+            car.update(stress, kSimulationDt);
+            assert(allFinite(car) && "sustained aggressive input must never produce a NaN/Inf state");
+            maxAbsYawRate = std::max(maxAbsYawRate, std::fabs(car.getTireDebugInfo().yawRate));
+        }
+        // 15 rad/s is far beyond anything this model's forces can
+        // physically justify (its own kinematic-turn numbers above never
+        // exceed a couple of rad/s) -- this bound exists purely to catch a
+        // genuine runaway/instability, not to constrain normal behavior.
+        assert(maxAbsYawRate < 15.0f && "yaw rate must never run away/spin uncontrollably under any input");
+    }
+
+    // 9: sensor transforms follow the Box2D-derived position/heading during
+    // real motion, not just immediately after reset() (verifySensors()
+    // already covers the reset() case). Drive forward while turning for a
+    // while so both position and heading move away from spawn, then check
+    // the sensor origin and every ray's direction against the car's own
+    // reported pose.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput driveAndTurn;
+        driveAndTurn.throttle = 1.0f;
+        driveAndTurn.steering = 0.15f; // gentle: this only needs to move+rotate the car a little, not stress-test cornering
+        for (int i = 0; i < 15 && car.isAlive(); ++i)
+        {
+            car.update(driveAndTurn, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road for the sensor-transform check");
+        assert(std::fabs(headingDelta(kSpawnHeading, car.getHeading())) > 0.01f &&
+               "test setup must actually have turned the car away from its spawn heading");
+
+        const Vector2 forward = {std::cos(car.getHeading()), std::sin(car.getHeading())};
+        const Vector2 expectedOrigin = {car.getPosition().x + forward.x * car.getParams().length * 0.5f,
+                                         car.getPosition().y + forward.y * car.getParams().length * 0.5f};
+        const Vector2 origin = car.getSensorOrigin();
+        assert(std::fabs(origin.x - expectedOrigin.x) < 0.01f && std::fabs(origin.y - expectedOrigin.y) < 0.01f &&
+               "sensor origin must track the car's current Box2D-derived position/heading, not spawn");
+
+        const auto& sensors = car.getSensors();
+        for (int i = 0; i < simulation::Car::kSensorCount; ++i)
+        {
+            const float angle = car.getHeading() + simulation::Car::kSensorAngleDegrees[i] * DEG2RAD;
+            const Vector2 direction = {std::cos(angle), std::sin(angle)};
+            const Vector2 expectedEnd = {origin.x + direction.x * sensors[i].distance,
+                                          origin.y + direction.y * sensors[i].distance};
+            assert(std::fabs(expectedEnd.x - sensors[i].endPoint.x) < 0.01f &&
+                   std::fabs(expectedEnd.y - sensors[i].endPoint.y) < 0.01f &&
+                   "sensor ray directions must track the car's current heading during real motion");
+        }
+    }
+
+    // 10: reset() restores a clean, fully deterministic state regardless of
+    // how chaotic the preceding motion was -- exact equality is correct
+    // here (not just within an epsilon): reset() assigns the mirrored
+    // position/heading/velocity directly from its spawnPosition/
+    // spawnHeading parameters rather than reading them back from Box2D
+    // (see Car::reset()), so no floating-point round-trip is involved.
+    {
+        simulation::CarInput chaos;
+        chaos.throttle = 1.0f;
+        chaos.steering = 1.0f;
+        for (int i = 0; i < 40 && car.isAlive(); ++i)
+        {
+            car.update(chaos, kSimulationDt);
+        }
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        assert(car.isAlive() && "reset must revive the car regardless of prior state");
+        assert(car.getPosition().x == kSpawnPosition.x && car.getPosition().y == kSpawnPosition.y &&
+               "reset must restore the exact spawn position after chaotic prior motion");
+        assert(car.getHeading() == kSpawnHeading && "reset must restore the exact spawn heading after chaotic prior motion");
+        assert(car.getVelocity().x == 0.0f && car.getVelocity().y == 0.0f &&
+               "reset must zero velocity after chaotic prior motion");
+        assert(car.getForwardVelocity() == 0.0f && car.getLateralVelocity() == 0.0f && car.getSlipAngle() == 0.0f &&
+               "reset must leave all derived vehicle-state values at their zero/rest values");
+
+        // Determinism: resetting from two DIFFERENT chaotic prior states
+        // must land on identical sensor readings -- nothing about the
+        // pre-reset state leaks through.
+        const auto sensorsAfterFirstReset = car.getSensors();
+
+        simulation::CarInput differentChaos;
+        differentChaos.throttle = 1.0f;
+        differentChaos.steering = -1.0f;
+        for (int i = 0; i < 55 && car.isAlive(); ++i)
+        {
+            car.update(differentChaos, kSimulationDt);
+        }
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const auto sensorsAfterSecondReset = car.getSensors();
+
+        for (int i = 0; i < simulation::Car::kSensorCount; ++i)
+        {
+            assert(sensorsAfterFirstReset[i].distance == sensorsAfterSecondReset[i].distance &&
+                   "reset must produce deterministic sensor readings regardless of prior motion");
+        }
+    }
+
+    // ---- Stage 20.3: rear-wheel drive + per-axle friction circle ----
+    // The checks below specifically exercise the RWD friction-circle model
+    // (Car.cpp): throttle and rear cornering force now share one grip
+    // budget at the rear axle, front is lateral-only. Nothing here
+    // weakens or replaces the checks above -- those already establish the
+    // base tire model is sound; these establish the new throttle/grip
+    // coupling specifically.
+
+    // 11 & 12 & 20: neither axle's combined tire force ever exceeds its
+    // configured grip budget, and nothing here produces a NaN/Inf state or
+    // an unbounded spin, under a sustained, varying, aggressive input
+    // sequence (alternating hard throttle and hard steering in both
+    // directions -- deliberately harder to keep these invariants holding
+    // than any single fixed input would be).
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        float maxAbsYawRate = 0.0f;
+        for (int i = 0; i < 200 && car.isAlive(); ++i)
+        {
+            simulation::CarInput stress;
+            stress.throttle = 1.0f;
+            stress.steering = ((i / 15) % 2 == 0) ? 1.0f : -1.0f; // flips every 15 frames (0.25s)
+            car.update(stress, kSimulationDt);
+            assert(allFinite(car) && "aggressive alternating input must never produce a NaN/Inf state");
+
+            const simulation::TireDebugInfo& debug = car.getTireDebugInfo();
+            constexpr float kCircleTolerance = 1.02f; // 2% slack for floating-point/tanh-saturation rounding
+            const float frontMag = std::fabs(debug.frontForceY); // frontForceX is always 0 (RWD)
+            assert(frontMag <= car.getParams().frontMaxTireForce * kCircleTolerance &&
+                   "front axle combined tire force must never exceed its grip limit");
+            const float rearMag = std::sqrt(debug.rearForceX * debug.rearForceX + debug.rearForceY * debug.rearForceY);
+            assert(rearMag <= car.getParams().rearMaxTireForce * kCircleTolerance &&
+                   "rear axle combined tire force must never exceed its grip limit (friction circle)");
+
+            maxAbsYawRate = std::max(maxAbsYawRate, std::fabs(debug.yawRate));
+        }
+        // Same generous bound as the earlier robustness check -- exists
+        // purely to catch a genuine runaway, not to constrain normal
+        // behavior.
+        assert(maxAbsYawRate < 15.0f && "yaw rate must never run away/spin uncontrollably under any input");
+    }
+
+    // 13: straight full-throttle acceleration remains stable, AND does not
+    // consume nearly all rear grip -- rearMaxTireForce is sized so a
+    // straight line leaves real cornering budget available (see
+    // CarParams::rearMaxTireForce's comment).
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput straight;
+        straight.throttle = 1.0f;
+        float maxRearGripStraight = 0.0f;
+        for (int i = 0; i < 60; ++i) // ~1s
+        {
+            car.update(straight, kSimulationDt);
+            assert(allFinite(car) && "straight full-throttle acceleration must never produce a NaN/Inf state");
+            maxRearGripStraight = std::max(maxRearGripStraight, car.getTireDebugInfo().rearGripUtilization);
+        }
+        assert(car.isAlive() && "straight full-throttle acceleration must keep the car on the road");
+        assert(maxRearGripStraight < 0.85f && "full throttle in a straight line must not consume nearly all rear grip");
+        TraceLog(LOG_INFO, "Vehicle physics: straight full-throttle rear grip utilization peaked at %.0f%%",
+                 static_cast<double>(maxRearGripStraight * 100.0f));
+    }
+
+    // 14: moderate cornering at PARTIAL throttle stays planted (small slip
+    // angles) -- the partial-throttle counterpart to check 5 above (which
+    // used full throttle).
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput partialThrottleTurn;
+        partialThrottleTurn.throttle = 0.5f;
+        partialThrottleTurn.steering = 0.5f;
+        for (int i = 0; i < 45 && car.isAlive(); ++i)
+        {
+            car.update(partialThrottleTurn, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+        assert(std::fabs(car.getSlipAngle()) < 0.349f &&
+               "moderate cornering at partial throttle must keep the whole-body slip angle small");
+    }
+
+    // 15 & 16 & 17: the central Stage 20.3 behavior -- full throttle
+    // mid-corner measurably reduces available rear lateral force and
+    // increases rear slip compared to the SAME corner at zero throttle,
+    // and a sufficiently aggressive combination saturates the rear
+    // friction circle and produces genuine throttle-induced oversteer
+    // (rear slip angle exceeding front slip angle -- the rear of the car
+    // sliding out more than the front).
+    //
+    // Comparing two INDEPENDENT multi-frame runs (one at each throttle)
+    // would confound the comparison: full throttle keeps accelerating
+    // through the corner, so its trajectory (and therefore its slip angle)
+    // diverges from the zero-throttle run for reasons that have nothing to
+    // do with the friction circle. Instead, both throttle values are
+    // applied from an IDENTICAL checkpoint state (reached by two
+    // deterministic replays of the exact same input sequence -- this
+    // simulation has no RNG, so the replay lands on bit-identical state
+    // both times), each for exactly one final update(). That final
+    // update()'s rear slip angle -- and therefore its DESIRED
+    // (pre-friction-circle) lateral force -- is computed from the
+    // checkpoint's velocity/yaw state, which is identical between the two
+    // forks; only the requested drive force differs. Any difference in the
+    // ACHIEVED force or slip angle after that one update() is therefore
+    // attributable to the friction circle alone.
+    {
+        auto driveToCheckpoint = [&]()
+        {
+            car.reset(kSpawnPosition, kSpawnHeading);
+            simulation::CarInput burst;
+            burst.throttle = 1.0f;
+            for (int i = 0; i < 150; ++i) // ~2.5s, well up in speed
+            {
+                car.update(burst, kSimulationDt);
+            }
+
+            // Moderate throttle while approaching the corner, so both
+            // forks share an identical, realistic mid-corner slip history
+            // right up to the checkpoint.
+            simulation::CarInput approach;
+            approach.throttle = 0.3f;
+            approach.steering = 0.6f;
+            for (int i = 0; i < 20 && car.isAlive(); ++i)
+            {
+                car.update(approach, kSimulationDt);
+            }
+        };
+
+        driveToCheckpoint();
+        assert(car.isAlive() && "checkpoint approach must keep the car on the road");
+        simulation::CarInput zeroFinal;
+        zeroFinal.throttle = 0.0f;
+        zeroFinal.steering = 0.6f;
+        car.update(zeroFinal, kSimulationDt);
+        const simulation::TireDebugInfo zeroThrottle = car.getTireDebugInfo();
+        assert(car.isAlive() && "the zero-throttle comparison frame must keep the car on the road");
+
+        driveToCheckpoint(); // deterministic replay -> bit-identical checkpoint state
+        simulation::CarInput fullFinal;
+        fullFinal.throttle = 1.0f;
+        fullFinal.steering = 0.6f;
+        car.update(fullFinal, kSimulationDt);
+        const simulation::TireDebugInfo fullThrottle = car.getTireDebugInfo();
+        assert(car.isAlive() && "the full-throttle comparison frame must keep the car on the road");
+
+        // 15: full throttle must leave less rear LATERAL force available
+        // than zero throttle does, for the identical corner state.
+        assert(std::fabs(fullThrottle.rearForceY) < std::fabs(zeroThrottle.rearForceY) &&
+               "full throttle mid-corner must reduce the rear axle's available lateral force versus zero throttle");
+
+        // 16 & 17: continue each fork at ITS OWN throttle for several more
+        // frames (from the already-diverged-by-one-frame state each is now
+        // in) -- oversteer is a developing/compounding effect, not
+        // necessarily visible in the single checkpoint+1 frame captured
+        // above as fullThrottle/zeroThrottle, so both checks read the
+        // followed-forward state instead.
+        constexpr int kFollowFrames = 14; // long enough for the circle's effect to dominate over 1-frame noise
+        for (int i = 0; i < kFollowFrames && car.isAlive(); ++i)
+        {
+            car.update(zeroFinal, kSimulationDt); // continues from the zero-throttle fork, still at zero throttle
+        }
+        const float zeroSlipAfter = std::fabs(car.getTireDebugInfo().rearSlipAngle);
+
+        driveToCheckpoint();
+        car.update(fullFinal, kSimulationDt);
+        for (int i = 0; i < kFollowFrames && car.isAlive(); ++i)
+        {
+            car.update(fullFinal, kSimulationDt); // continues from the full-throttle fork, still at full throttle
+        }
+        const simulation::TireDebugInfo fullFollowed = car.getTireDebugInfo();
+        const float fullSlipAfter = std::fabs(fullFollowed.rearSlipAngle);
+
+        // 16: full throttle must grow rear slip angle faster than zero
+        // throttle, from the identical checkpoint state.
+        assert(fullSlipAfter > zeroSlipAfter &&
+               "full throttle mid-corner must grow rear slip angle faster than zero throttle from the same state");
+
+        // 17: throttle-induced oversteer: under sustained full throttle,
+        // the rear circle is genuinely saturated (grip utilization at/near
+        // 100%), and the rear ends up sliding more than the front -- the
+        // defining signature of the rear being the limiting (sliding) axle
+        // here, specifically because of throttle (checks 5/7 above already
+        // establish this SAME car understeers -- front slides first --
+        // once throttle is out of the picture).
+        assert(fullFollowed.rearGripUtilization > 0.9f &&
+               "sustained full throttle through a hard corner must saturate the rear friction circle");
+        assert(fullSlipAfter > std::fabs(fullFollowed.frontSlipAngle) &&
+               "throttle-induced oversteer must show the rear sliding more than the front");
+
+        TraceLog(LOG_INFO,
+                 "Vehicle physics: throttle-vs-corner (same checkpoint) -- zero throttle rearFy=%.0f, full throttle "
+                 "rearFx=%.0f rearFy=%.0f, after %d more frames: rearSlip=%.1fdeg frontSlip=%.1fdeg rearGrip=%.0f%%",
+                 static_cast<double>(zeroThrottle.rearForceY), static_cast<double>(fullThrottle.rearForceX),
+                 static_cast<double>(fullThrottle.rearForceY), kFollowFrames, static_cast<double>(fullSlipAfter * RAD2DEG),
+                 static_cast<double>(fullFollowed.frontSlipAngle * RAD2DEG),
+                 static_cast<double>(fullFollowed.rearGripUtilization * 100.0f));
+    }
+
+    // 18: releasing throttle during a throttle-induced slide lets the rear
+    // regain lateral grip progressively -- rear slip angle must move back
+    // toward normal, not stay pinned or grow further.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput burst;
+        burst.throttle = 1.0f;
+        for (int i = 0; i < 90; ++i) // build speed
+        {
+            car.update(burst, kSimulationDt);
+        }
+        simulation::CarInput hardCornerFullThrottle;
+        hardCornerFullThrottle.throttle = 1.0f;
+        hardCornerFullThrottle.steering = 1.0f;
+        for (int i = 0; i < 15 && car.isAlive(); ++i) // induce a throttle-saturated slide
+        {
+            car.update(hardCornerFullThrottle, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+        const float rearSlipDuringSlide = std::fabs(car.getTireDebugInfo().rearSlipAngle);
+        assert(rearSlipDuringSlide > 0.03f && "test setup must actually induce measurable rear slip before testing recovery");
+
+        simulation::CarInput coastStraighten; // throttle = 0, steering = 0
+        float previousSlip = rearSlipDuringSlide;
+        float worstGrowth = 0.0f;
+        for (int i = 0; i < 12 && car.isAlive(); ++i)
+        {
+            car.update(coastStraighten, kSimulationDt);
+            const float slip = std::fabs(car.getTireDebugInfo().rearSlipAngle);
+            worstGrowth = std::max(worstGrowth, slip - previousSlip);
+            previousSlip = slip;
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road while it recovers");
+        assert(worstGrowth < 0.02f && "rear slip angle must not oscillate or grow once throttle is released");
+        assert(previousSlip < rearSlipDuringSlide * 0.5f &&
+               "releasing throttle during a slide must let rear slip angle recover substantially");
+    }
+
+    // 19: excessive high-speed corner entry still produces understeer (the
+    // front axle's grip utilization climbs toward saturation) -- already
+    // demonstrated quantitatively by check 7 above (front slip angle
+    // growing continuously from low to high speed, radius widening); this
+    // adds an explicit grip-utilization assertion tying it to the Stage
+    // 20.3 telemetry specifically.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput burst;
+        burst.throttle = 1.0f;
+        for (int i = 0; i < 180; ++i) // ~3s, well up toward maxSpeed
+        {
+            car.update(burst, kSimulationDt);
+        }
+        simulation::CarInput fullLeftLock;
+        fullLeftLock.steering = -1.0f; // throttle = 0: isolate front-axle behavior from the rear circle
+        for (int i = 0; i < 20 && car.isAlive(); ++i)
+        {
+            car.update(fullLeftLock, kSimulationDt);
+        }
+        assert(car.isAlive() && "test setup must keep the car on the road");
+        assert(car.getTireDebugInfo().frontGripUtilization > 0.5f &&
+               "excessive high-speed corner entry must load the front axle's grip meaningfully toward its limit");
+    }
+
+    car.reset(kSpawnPosition, kSpawnHeading);
+
+    TraceLog(LOG_INFO, "Vehicle physics verification: all deterministic checks passed");
 }
 
 namespace nn_verify
@@ -6988,7 +7705,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         };
 
         // First lap: 3s total. (Kept well under FitnessEvaluator's
-        // kMaxEvaluationTime -- 15.0f as of the last generation-duration
+        // kMaxEvaluationTime -- 30.0f as of the last generation-duration
         // change -- since all three laps' times accumulate in one
         // evaluator and must finish before TimeLimit ends the evaluation.)
         driveOneLap(3.0f);
@@ -7109,8 +7826,13 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
+        // Pre-existing bug fix (unrelated to Stage 20 physics): this loop
+        // bound and the elapsed-time threshold below were left at 16/15.0f
+        // from before FitnessEvaluator's kMaxEvaluationTime was raised to
+        // its current 30.0f (see FitnessEvaluator.cpp) -- both now match
+        // that constant, with the loop bound comfortably above it.
         float p = 0.0f;
-        for (int second = 0; second < 16 && !evaluator.isEvaluationFinished(); ++second)
+        for (int second = 0; second < 32 && !evaluator.isEvaluationFinished(); ++second)
         {
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
@@ -7120,7 +7842,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
                "reaching the maximum evaluation time must end the evaluation with TimeLimit");
-        assert(evaluator.getElapsedTime() >= 15.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
+        assert(evaluator.getElapsedTime() >= 30.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
 
         const float fitnessAtFinish = evaluator.getFitness();
         const float elapsedAtFinish = evaluator.getElapsedTime();
@@ -7711,6 +8433,124 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText("Controls:", x, y, 18, RAYWHITE);
     y += lineHeight;
     DrawText("R restart current generation", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("TAB manual control mode", x, y, 16, LIGHTGRAY);
+}
+
+// Stage 20: reads a CarInput straight from the keyboard for the manual
+// physics-verification mode (see main()'s manualMode branch below) --
+// mirrors Stage 2's original keyboard control, just no longer wired to the
+// only Car in the program. Arrow keys and WASD both work so the layout
+// matches whichever the user reaches for. No braking/reverse channel:
+// exactly the same two-channel CarInput (throttle in [0,1], steering in
+// [-1,1]) the AI path uses (see AIController::update()) -- releasing
+// throttle is the only way to slow down, by design (see
+// CarParams::engineForce's comment).
+simulation::CarInput readManualCarInput()
+{
+    simulation::CarInput input;
+    input.throttle = (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) ? 1.0f : 0.0f;
+    float steering = 0.0f;
+    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
+    {
+        steering -= 1.0f;
+    }
+    if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
+    {
+        steering += 1.0f;
+    }
+    input.steering = steering;
+    return input;
+}
+
+// Stage 20: HUD for manual single-car control mode -- shows the live
+// vehicle-state values (speed/forward/lateral velocity/slip angle) that
+// Observation also reads (see ai::buildObservation), so the effect of the
+// new Box2D tire/steering model (tighter low-speed turns, wider high-speed
+// turns, lateral slip under hard high-speed cornering) is directly visible
+// while driving, without needing to wait for NEAT training. Purely a
+// rendering helper -- reads Car state only, never mutates it.
+void drawManualPanel(const simulation::Car& car)
+{
+    DrawRectangle(kSimWidth, 0, kPanelWidth, kScreenHeight, Color{30, 30, 30, 255});
+
+    const int x = kSimWidth + 20;
+    int y = 20;
+    const int lineHeight = 22;
+
+    DrawText("MANUAL CONTROL - VEHICLE PHYSICS", x, y, 20, RAYWHITE);
+    y += lineHeight * 2;
+
+    char line[128];
+
+    DrawText("STATE", x, y, 18, YELLOW);
+    y += lineHeight;
+    DrawText(car.isAlive() ? "Alive" : "Crashed", x, y, 16, car.isAlive() ? GREEN : RED);
+    y += lineHeight * 2;
+
+    DrawText("TELEMETRY", x, y, 18, YELLOW);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Speed: %.1f / %.1f px/s", static_cast<double>(car.getSpeed()),
+                  static_cast<double>(car.getMaxSpeed()));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Forward vel: %.1f px/s", static_cast<double>(car.getForwardVelocity()));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Lateral vel: %.1f px/s", static_cast<double>(car.getLateralVelocity()));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Body slip angle: %.1f deg", static_cast<double>(car.getSlipAngle() * RAD2DEG));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    std::snprintf(line, sizeof(line), "Heading: %.1f deg", static_cast<double>(car.getHeading() * RAD2DEG));
+    DrawText(line, x, y, 16, LIGHTGRAY);
+    y += lineHeight * 2;
+
+    // Stage 20.2/20.3: front/rear single-track tire model telemetry -- lets
+    // the model's behavior (tire slip angles, the Fx/Fy forces each axle
+    // actually applied, the resulting yaw rate, and -- Stage 20.3 -- how
+    // saturated each axle's friction circle is) be watched directly while
+    // driving, not just inferred from how the car moves. Rear grip
+    // utilization is the number to watch for power oversteer: it reaches
+    // 100% exactly when the rear axle's combined drive+lateral force has
+    // hit rearMaxTireForce and any further throttle can only come at the
+    // expense of rear lateral force.
+    {
+        const simulation::TireDebugInfo& tire = car.getTireDebugInfo();
+        DrawText("TIRE MODEL", x, y, 18, YELLOW);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Steering angle: %.1f deg", static_cast<double>(tire.steeringAngle * RAD2DEG));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Yaw rate: %.2f rad/s", static_cast<double>(tire.yawRate));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Front slip: %.1f deg  Fy=%.0f", static_cast<double>(tire.frontSlipAngle * RAD2DEG),
+                      static_cast<double>(tire.frontForceY));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Rear slip: %.1f deg  Fx=%.0f Fy=%.0f", static_cast<double>(tire.rearSlipAngle * RAD2DEG),
+                      static_cast<double>(tire.rearForceX), static_cast<double>(tire.rearForceY));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Front grip: %.0f%%", static_cast<double>(tire.frontGripUtilization * 100.0f));
+        DrawText(line, x, y, 16, tire.frontGripUtilization > 0.95f ? RED : LIGHTGRAY);
+        y += lineHeight;
+        std::snprintf(line, sizeof(line), "Rear grip: %.0f%%", static_cast<double>(tire.rearGripUtilization * 100.0f));
+        DrawText(line, x, y, 16, tire.rearGripUtilization > 0.95f ? RED : LIGHTGRAY);
+        y += lineHeight * 2;
+    }
+
+    DrawText("Controls:", x, y, 18, RAYWHITE);
+    y += lineHeight;
+    DrawText("UP/W throttle", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("LEFT/A, RIGHT/D steer", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("R reset car to spawn", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("TAB back to NEAT training", x, y, 16, LIGHTGRAY);
 }
 
 namespace population_verify
@@ -9396,6 +10236,7 @@ int main()
     verifyCar(track);
     verifySensors(track);
     verifyObservation(track);
+    verifyVehiclePhysics(track);
     verifyNeuralNetwork();
     verifyNeatGenes();
     verifyGenome();
@@ -9431,24 +10272,71 @@ int main()
                                      kSpawnHeading, populationConfig, mutationConfig, crossoverConfig,
                                      compatibilityConfig, speciationConfig);
 
+    // Stage 20: a standalone manual-control car, entirely independent of
+    // `population` -- lets the new Box2D vehicle handling be driven and
+    // felt directly (TAB to toggle) without waiting on NEAT. Constructed
+    // once up front and reset to spawn every time manual mode is
+    // (re-)entered, so its behavior is predictable across toggles. Never
+    // touched by Population/FitnessEvaluator/AIController -- purely a
+    // second, parallel Car for direct keyboard testing.
+    simulation::Car manualCar(makeCarParams(), track);
+    manualCar.reset(kSpawnPosition, kSpawnHeading);
+    bool manualMode = false;
+
+    // Diagnostic only (Stage 20): logs every generation transition so
+    // training progress is visible from console output too, not only the
+    // on-screen panel -- e.g. for headless/redirected runs while verifying
+    // that generations keep advancing normally after the physics rewrite.
+    // Reads Population's state only; never influences it.
+    std::size_t lastLoggedGeneration = population.getGeneration();
+
     while (!WindowShouldClose())
     {
-        if (IsKeyPressed(KEY_R))
+        if (IsKeyPressed(KEY_TAB))
         {
-            // Restarts the CURRENT generation's evaluation from its
-            // existing Genomes -- same generation number, same genomes,
-            // only Car/Progress/Fitness state resets. Population::update()
-            // below never needs a separate "is finished" guard: a
-            // population update is always safe to call, whether
-            // individuals are still running, all finished (in which case
-            // update() itself triggers the generation transition), or
-            // freshly restarted.
-            population.restartGeneration();
+            manualMode = !manualMode;
+            if (manualMode)
+            {
+                manualCar.reset(kSpawnPosition, kSpawnHeading);
+            }
         }
 
-        population.update(kSimulationDt);
+        if (IsKeyPressed(KEY_R))
+        {
+            if (manualMode)
+            {
+                manualCar.reset(kSpawnPosition, kSpawnHeading);
+            }
+            else
+            {
+                // Restarts the CURRENT generation's evaluation from its
+                // existing Genomes -- same generation number, same genomes,
+                // only Car/Progress/Fitness state resets. Population::update()
+                // below never needs a separate "is finished" guard: a
+                // population update is always safe to call, whether
+                // individuals are still running, all finished (in which case
+                // update() itself triggers the generation transition), or
+                // freshly restarted.
+                population.restartGeneration();
+            }
+        }
 
-        const std::size_t highlightedIndex = selectHighlightedIndividual(population);
+        if (manualMode)
+        {
+            manualCar.update(readManualCarInput(), kSimulationDt);
+        }
+        else
+        {
+            population.update(kSimulationDt);
+
+            if (population.getGeneration() != lastLoggedGeneration)
+            {
+                lastLoggedGeneration = population.getGeneration();
+                TraceLog(LOG_INFO, "Generation %d started (previous generation's best fitness: %.1f)",
+                         static_cast<int>(lastLoggedGeneration),
+                         static_cast<double>(population.getLastGenerationBestFitness()));
+            }
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -9462,48 +10350,58 @@ int main()
         // TrackDefinition::trackWidth or the sampled centerline here anymore.
         trackVisual.draw();
 
-        // Color every car by its progress ranking (leading = green,
-        // trailing = red) so the population's spread is visible at a
-        // glance; finished cars are drawn dimmed regardless of rank. This
-        // only reads Population's state -- rendering never feeds back into
-        // fitness or evolution.
-        std::vector<std::size_t> rankOrder(population.size());
-        for (std::size_t i = 0; i < population.size(); ++i)
+        if (manualMode)
         {
-            rankOrder[i] = i;
+            drawIndividualCar(manualCar, SKYBLUE, true);
+            drawManualPanel(manualCar);
         }
-        std::sort(rankOrder.begin(), rankOrder.end(),
-                  [&population](std::size_t a, std::size_t b)
-                  {
-                      return population.getIndividual(a).getProgress().getBestProgress() >
-                             population.getIndividual(b).getProgress().getBestProgress();
-                  });
-        std::vector<float> normalizedRank(population.size());
-        for (std::size_t rank = 0; rank < rankOrder.size(); ++rank)
+        else
         {
-            normalizedRank[rankOrder[rank]] = (population.size() > 1)
-                                                   ? static_cast<float>(rank) / static_cast<float>(population.size() - 1)
-                                                   : 0.0f;
-        }
+            const std::size_t highlightedIndex = selectHighlightedIndividual(population);
 
-        for (std::size_t i = 0; i < population.size(); ++i)
-        {
-            const ai::neat::Individual& individual = population.getIndividual(i);
-            const Color color =
-                individual.isFinished() ? Color{70, 70, 70, 140} : progressRankColor(normalizedRank[i]);
-            drawIndividualCar(individual.getCar(), color, i == highlightedIndex);
-        }
+            // Color every car by its progress ranking (leading = green,
+            // trailing = red) so the population's spread is visible at a
+            // glance; finished cars are drawn dimmed regardless of rank. This
+            // only reads Population's state -- rendering never feeds back into
+            // fitness or evolution.
+            std::vector<std::size_t> rankOrder(population.size());
+            for (std::size_t i = 0; i < population.size(); ++i)
+            {
+                rankOrder[i] = i;
+            }
+            std::sort(rankOrder.begin(), rankOrder.end(),
+                      [&population](std::size_t a, std::size_t b)
+                      {
+                          return population.getIndividual(a).getProgress().getBestProgress() >
+                                 population.getIndividual(b).getProgress().getBestProgress();
+                      });
+            std::vector<float> normalizedRank(population.size());
+            for (std::size_t rank = 0; rank < rankOrder.size(); ++rank)
+            {
+                normalizedRank[rankOrder[rank]] = (population.size() > 1)
+                                                       ? static_cast<float>(rank) / static_cast<float>(population.size() - 1)
+                                                       : 0.0f;
+            }
 
-        // Stage 19.1: projection debug overlay + suspicious-jump detection,
-        // for the highlighted individual only (never every car -- see
-        // drawProjectionDebug()/reportSuspiciousProjectionJump()).
-        {
-            const ai::neat::Individual& highlighted = population.getIndividual(highlightedIndex);
-            drawProjectionDebug(highlighted.getCar(), highlighted.getProgress());
-            reportSuspiciousProjectionJump(highlightedIndex, highlighted.getProgress(), highlighted.getCar());
-        }
+            for (std::size_t i = 0; i < population.size(); ++i)
+            {
+                const ai::neat::Individual& individual = population.getIndividual(i);
+                const Color color =
+                    individual.isFinished() ? Color{70, 70, 70, 140} : progressRankColor(normalizedRank[i]);
+                drawIndividualCar(individual.getCar(), color, i == highlightedIndex);
+            }
 
-        drawPopulationPanel(population, highlightedIndex);
+            // Stage 19.1: projection debug overlay + suspicious-jump detection,
+            // for the highlighted individual only (never every car -- see
+            // drawProjectionDebug()/reportSuspiciousProjectionJump()).
+            {
+                const ai::neat::Individual& highlighted = population.getIndividual(highlightedIndex);
+                drawProjectionDebug(highlighted.getCar(), highlighted.getProgress());
+                reportSuspiciousProjectionJump(highlightedIndex, highlighted.getProgress(), highlighted.getCar());
+            }
+
+            drawPopulationPanel(population, highlightedIndex);
+        }
 
         EndDrawing();
     }

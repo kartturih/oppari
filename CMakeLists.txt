@@ -22,6 +22,35 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(raylib)
 
+# Stage 20: Box2D provides the rigid-body integration and force/impulse API
+# that simulation::Car's vehicle model is built on (see Car.h/.cpp) -- track
+# collision itself stays entirely on Track's CPU pixel mask (see Track.h),
+# never on Box2D geometry. Box2D v3 is a from-scratch C rewrite (different
+# API from the older, still-widely-referenced v2.x C++ line) with no
+# samples/tests/benchmarks pulled in here: those default to ON only when
+# Box2D is configured as the top-level CMake project (see its own
+# CMakeLists.txt's `if(PROJECT_IS_TOP_LEVEL)` guard), which is never the
+# case when it is added via FetchContent as a dependency the way raylib is
+# above -- so this stays a minimal, single-library dependency with no extra
+# transitive fetches (e.g. enkiTS, which only the samples/tests need).
+FetchContent_Declare(
+    box2d
+    GIT_REPOSITORY https://github.com/erincatto/box2d.git
+    GIT_TAG v3.1.1
+    GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(box2d)
+
+# Box2D's own CMakeLists.txt unconditionally points
+# CMAKE_LIBRARY_OUTPUT_DIRECTORY/CMAKE_RUNTIME_OUTPUT_DIRECTORY at its own
+# build tree (so its samples executable can find its DLL) -- reset both
+# back to this project's build directory root so neat_car_simulation.exe
+# keeps landing exactly where it always has (build/neat_car_simulation.exe),
+# unaffected by which dependency happens to be fetched first.
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
 add_executable(neat_car_simulation
     src/main.cpp
     src/simulation/Track.cpp
@@ -56,4 +85,4 @@ target_compile_definitions(neat_car_simulation PRIVATE
     OPPARI_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
 )
 
-target_link_libraries(neat_car_simulation PRIVATE raylib)
+target_link_libraries(neat_car_simulation PRIVATE raylib box2d::box2d)
