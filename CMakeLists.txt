@@ -74,6 +74,22 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 add_executable(neat_car_simulation
     src/main.cpp
+    src/AppConfig.cpp
+    src/ui/SimulationRenderer.cpp
+    src/ui/DebugRenderer.cpp
+    src/ui/HudRenderer.cpp
+    src/input/ManualInput.cpp
+    src/verification/VerificationRunner.cpp
+    src/verification/TrackVerification.cpp
+    src/verification/VehicleVerification.cpp
+    src/verification/NeuralNetworkVerification.cpp
+    src/verification/NeatGenomeVerification.cpp
+    src/verification/NeatMutationVerification.cpp
+    src/verification/NeatCrossoverVerification.cpp
+    src/verification/NeatSpeciationVerification.cpp
+    src/verification/PopulationVerification.cpp
+    src/verification/FitnessVerification.cpp
+    src/verification/TrainingVerification.cpp
     src/simulation/Track.cpp
     src/simulation/TrackVisual.cpp
     src/simulation/Car.cpp
