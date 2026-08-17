@@ -20,6 +20,7 @@
 #include "ai/neat/Speciator.h"
 #include "simulation/Car.h"
 #include "simulation/Track.h"
+#include "training/GenerationMetrics.h"
 
 namespace ai::neat
 {
@@ -232,6 +233,17 @@ public:
     // the moment it finished (0 before generation 0 has finished).
     float getLastGenerationBestFitness() const { return m_lastGenerationBestFitness; }
 
+    // Stage 21: the full training::GenerationMetrics row for the most
+    // recently completed generation, computed inside reproduce() (see the
+    // .cpp) from that generation's individuals/species BEFORE m_individuals
+    // is replaced -- the only point in this class where that raw
+    // per-individual data (fitness, progress, hasCompletedLap, genome
+    // complexity) is still available; once reproduce() returns, only this
+    // captured snapshot survives. A default-constructed (all-zero)
+    // GenerationMetrics before the first generation transition, exactly
+    // like getReproductionStats() being empty until then.
+    const training::GenerationMetrics& getLastGenerationMetrics() const { return m_lastGenerationMetrics; }
+
     const PopulationConfig& getPopulationConfig() const { return m_populationConfig; }
     const InnovationTracker& getInnovationTracker() const { return m_innovationTracker; }
 
@@ -299,6 +311,7 @@ private:
     std::size_t m_generation;
     float m_lastGenerationBestFitness;
     std::vector<SpeciesReproductionStats> m_reproductionStats;
+    training::GenerationMetrics m_lastGenerationMetrics;
 
     std::vector<Individual> m_individuals;
 };

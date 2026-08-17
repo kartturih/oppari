@@ -515,6 +515,67 @@ void Population::reproduce()
         m_reproductionStats.push_back(stats);
     }
 
+    // 7b. Stage 21: snapshot this generation's full training::
+    // GenerationMetrics row -- the LAST point in reproduce() where
+    // m_individuals still holds the just-finished generation (step 9 below
+    // replaces it). Every per-individual value read here (raw/adjusted
+    // fitness, best progress, hasCompletedLap, genome complexity, elapsed
+    // evaluation time) comes straight from that about-to-be-replaced
+    // generation -- nothing computed here feeds back into reproduction
+    // (fitnessValues/adjustedFitness/currentSpecies/rankedIndices/
+    // reproductionEligible are all read-only here, exactly as already
+    // computed above). See training::GenerationMetrics's own doc comment
+    // for the precise definition of every field.
+    {
+        training::GenerationMetricsInput metricsInput;
+        metricsInput.generation = m_generation;
+        metricsInput.rawFitness = fitnessValues;
+        metricsInput.adjustedFitness = adjustedFitness;
+        metricsInput.bestIndividualIndex = rankedIndices[0];
+
+        metricsInput.bestProgressValues.reserve(populationSize);
+        metricsInput.completedLap.reserve(populationSize);
+        metricsInput.genomeComplexities.reserve(populationSize);
+        float generationDurationSeconds = 0.0f;
+        for (const Individual& individual : m_individuals)
+        {
+            metricsInput.bestProgressValues.push_back(individual.getProgress().getBestProgress());
+            metricsInput.completedLap.push_back(individual.getFitnessEvaluator().hasCompletedLap());
+            metricsInput.genomeComplexities.push_back(training::computeGenomeComplexity(individual.getGenome()));
+            generationDurationSeconds =
+                std::max(generationDurationSeconds, individual.getFitnessEvaluator().getElapsedTime());
+        }
+        metricsInput.generationDurationSeconds = generationDurationSeconds;
+
+        metricsInput.speciesCount = speciesCount;
+        if (speciesCount > 0)
+        {
+            std::size_t largest = currentSpecies[0].size();
+            std::size_t smallest = currentSpecies[0].size();
+            float bestHistorical = currentSpecies[0].getHistoricalBestFitness();
+            for (std::size_t s = 1; s < speciesCount; ++s)
+            {
+                largest = std::max(largest, currentSpecies[s].size());
+                smallest = std::min(smallest, currentSpecies[s].size());
+                bestHistorical = std::max(bestHistorical, currentSpecies[s].getHistoricalBestFitness());
+            }
+            metricsInput.largestSpeciesSize = largest;
+            metricsInput.smallestSpeciesSize = smallest;
+            metricsInput.bestSpeciesHistoricalFitness = bestHistorical;
+        }
+        std::size_t stagnantExcluded = 0;
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            if (currentSpecies[s].isStagnant() && !reproductionEligible[s])
+            {
+                ++stagnantExcluded;
+            }
+        }
+        metricsInput.stagnantSpeciesExcluded = stagnantExcluded;
+
+        m_lastGenerationMetrics = training::buildGenerationMetrics(metricsInput);
+    }
+
     // 8. Construct every new Genome -- entirely from the current (soon to
     // be replaced) generation's data. m_individuals is not touched at any
     // point during this construction, so parent selection always reads the

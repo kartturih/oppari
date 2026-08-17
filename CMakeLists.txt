@@ -42,6 +42,27 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(box2d)
 
+# Stage 21: a short git commit hash, baked in at configure time, so a
+# training run's metadata file can record exactly which build produced it
+# (see training::RunMetadata::buildVersion / TrainingLogger.cpp). Falls back
+# to "unknown" if git is not available or CMAKE_SOURCE_DIR is not inside a
+# git repository -- never fails the configure step.
+find_package(Git QUIET)
+set(OPPARI_BUILD_VERSION "unknown")
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE OPPARI_BUILD_VERSION_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE OPPARI_GIT_RESULT
+    )
+    if(OPPARI_GIT_RESULT EQUAL 0 AND NOT OPPARI_BUILD_VERSION_OUTPUT STREQUAL "")
+        set(OPPARI_BUILD_VERSION ${OPPARI_BUILD_VERSION_OUTPUT})
+    endif()
+endif()
+
 # Box2D's own CMakeLists.txt unconditionally points
 # CMAKE_LIBRARY_OUTPUT_DIRECTORY/CMAKE_RUNTIME_OUTPUT_DIRECTORY at its own
 # build tree (so its samples executable can find its DLL) -- reset both
@@ -73,6 +94,8 @@ add_executable(neat_car_simulation
     src/ai/neat/Speciator.cpp
     src/ai/neat/Individual.cpp
     src/ai/neat/Population.cpp
+    src/training/GenerationMetrics.cpp
+    src/training/TrainingLogger.cpp
 )
 
 target_include_directories(neat_car_simulation PRIVATE src)
@@ -83,6 +106,7 @@ target_include_directories(neat_car_simulation PRIVATE src)
 # (which differs between running from build/ directly vs. from an IDE).
 target_compile_definitions(neat_car_simulation PRIVATE
     OPPARI_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+    OPPARI_BUILD_VERSION="${OPPARI_BUILD_VERSION}"
 )
 
 target_link_libraries(neat_car_simulation PRIVATE raylib box2d::box2d)

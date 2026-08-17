@@ -4,3 +4,8 @@ build/
 *.dll
 *.o
 *.obj
+
+# Stage 21: per-run training experiment logs (CSV + metadata) -- generated
+# data, never source; each run gets its own timestamped, never-overwritten
+# file (see training::TrainingLogger).
+results/

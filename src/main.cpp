@@ -4,7 +4,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -37,6 +40,8 @@
 #include "simulation/Track.h"
 #include "simulation/TrackProgress.h"
 #include "simulation/TrackVisual.h"
+#include "training/GenerationMetrics.h"
+#include "training/TrainingLogger.h"
 
 namespace
 {
@@ -10216,6 +10221,490 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
     TraceLog(LOG_INFO, "Persistent species and stagnation verification: all deterministic checks passed");
 }
 
+namespace training_metrics_verify
+{
+
+using ai::neat::ConnectionGene;
+using ai::neat::Genome;
+using ai::neat::NodeGene;
+using ai::neat::NodeId;
+using ai::neat::NodeType;
+
+template <typename Callable>
+bool throwsInvalidArgument(Callable&& callable)
+{
+    try
+    {
+        callable();
+    }
+    catch (const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+// A tiny genome with a known, hand-countable shape: 2 nodes, 3 connection
+// genes, exactly 1 of them disabled -- so computeGenomeComplexity()'s three
+// counts (nodes/all connections/enabled-only connections) are each a
+// distinct, easily verified number.
+Genome makeComplexityTestGenome()
+{
+    Genome genome;
+    genome.addNode(NodeGene{0, NodeType::Input});
+    genome.addNode(NodeGene{1, NodeType::Output});
+    genome.addConnection(ConnectionGene{0, 1, 0.1f, true, 0});
+    // A second, structurally distinct connection between the same two nodes
+    // is not allowed by Genome (see addConnection()'s doc comment), so the
+    // other two connection genes route through a third node instead.
+    genome.addNode(NodeGene{2, NodeType::Hidden});
+    genome.addConnection(ConnectionGene{0, 2, 0.2f, true, 1});
+    genome.addConnection(ConnectionGene{2, 1, 0.3f, false, 2}); // disabled
+    return genome;
+}
+
+} // namespace training_metrics_verify
+
+// One-shot, deterministic verification of training::GenerationMetrics'
+// pure, file-I/O-free statistics (Stage 21): computeMean/computeMedian/
+// computeMin/computeMax, computeGenomeComplexity, and buildGenerationMetrics
+// itself. Every check here uses hand-picked synthetic data -- no Population,
+// Individual, or Track involved -- so the arithmetic is verified completely
+// independently of whether a live training run happens to produce
+// comparable numbers (see verifyGenerationMetricsPopulationIntegration()
+// below for that separate, end-to-end check).
+void verifyTrainingMetrics()
+{
+    using namespace training_metrics_verify;
+    using training::GenerationMetrics;
+    using training::GenerationMetricsInput;
+    using training::GenomeComplexity;
+
+    // 1: computeMean.
+    assert(training::computeMean({1.0f, 2.0f, 3.0f, 4.0f}) == 2.5f && "mean of [1,2,3,4] must be 2.5");
+    assert(throwsInvalidArgument([]() { training::computeMean({}); }) && "computeMean must reject an empty vector");
+
+    // 2: computeMedian, odd count -- single middle element.
+    assert(training::computeMedian({5.0f, 1.0f, 3.0f}) == 3.0f && "median of [5,1,3] (sorted [1,3,5]) must be 3");
+    // 3: computeMedian, even count -- mean of the two middle elements.
+    assert(training::computeMedian({1.0f, 2.0f, 3.0f, 4.0f}) == 2.5f && "median of [1,2,3,4] must be (2+3)/2 = 2.5");
+    assert(throwsInvalidArgument([]() { training::computeMedian({}); }) && "computeMedian must reject an empty vector");
+
+    // 4 & 5: computeMin/computeMax.
+    assert(training::computeMin({5.0f, 1.0f, 3.0f}) == 1.0f && "min of [5,1,3] must be 1");
+    assert(training::computeMax({5.0f, 1.0f, 3.0f}) == 5.0f && "max of [5,1,3] must be 5");
+    assert(throwsInvalidArgument([]() { training::computeMin({}); }) && "computeMin must reject an empty vector");
+    assert(throwsInvalidArgument([]() { training::computeMax({}); }) && "computeMax must reject an empty vector");
+
+    // 6: computeGenomeComplexity counts nodes, all connection genes
+    // (enabled and disabled), and enabled-only connections separately.
+    {
+        const GenomeComplexity complexity = training::computeGenomeComplexity(makeComplexityTestGenome());
+        assert(complexity.nodeCount == 3 && "complexity test genome must report 3 nodes");
+        assert(complexity.connectionGeneCount == 3 && "complexity test genome must report 3 connection genes total");
+        assert(complexity.enabledConnectionCount == 2 &&
+               "complexity test genome must report exactly 2 ENABLED connection genes");
+    }
+
+    // 7-16: buildGenerationMetrics reduces a synthetic 4-individual input
+    // into every documented field correctly.
+    {
+        GenerationMetricsInput input;
+        input.generation = 7;
+        input.rawFitness = {10.0f, 20.0f, 30.0f, 40.0f};
+        input.adjustedFitness = {5.0f, 10.0f, 15.0f, 20.0f};
+        input.bestProgressValues = {0.1f, 0.2f, 0.9f, 0.3f};
+        input.completedLap = {false, false, true, false};
+        const GenomeComplexity complexityA{5, 8, 6};
+        const GenomeComplexity complexityB{7, 12, 9};
+        const GenomeComplexity complexityC{3, 4, 4};
+        const GenomeComplexity complexityD{9, 14, 10}; // belongs to the best (highest-fitness) individual
+        input.genomeComplexities = {complexityA, complexityB, complexityC, complexityD};
+        input.bestIndividualIndex = 3; // rawFitness[3] == 40, the maximum
+        input.speciesCount = 2;
+        input.largestSpeciesSize = 3;
+        input.smallestSpeciesSize = 1;
+        input.bestSpeciesHistoricalFitness = 999.0f;
+        input.stagnantSpeciesExcluded = 1;
+        input.generationDurationSeconds = 12.5f;
+
+        const GenerationMetrics metrics = training::buildGenerationMetrics(input);
+
+        assert(metrics.generation == 7 && "generation must pass through unchanged"); // 7
+        assert(metrics.bestFitness == 40.0f && metrics.avgFitness == 25.0f && metrics.medianFitness == 25.0f &&
+               metrics.worstFitness == 10.0f && "raw fitness reduction (best/avg/median/worst) must match hand computation"); // 8
+        assert(metrics.avgAdjustedFitness == 12.5f && "avgAdjustedFitness must be the mean of the adjusted vector"); // 9
+        assert(metrics.speciesCount == 2 && metrics.largestSpeciesSize == 3 && metrics.smallestSpeciesSize == 1 &&
+               metrics.bestSpeciesHistoricalFitness == 999.0f && metrics.stagnantSpeciesExcluded == 1 &&
+               "species-level fields must pass through unchanged"); // 10
+        assert(metrics.bestProgress == 0.3f && "bestProgress must be bestProgressValues[bestIndividualIndex]"); // 11
+        assert(std::fabs(metrics.avgProgress - 0.375f) < 1e-5f &&
+               "avgProgress must be the mean of bestProgressValues (0.1+0.2+0.9+0.3)/4 = 0.375"); // 12
+        assert(metrics.lapsCompletedCount == 1 && metrics.completionRate == 0.25f &&
+               "exactly one of four individuals completed a lap -> completionRate 0.25"); // 13
+        assert(metrics.bestGenomeNodeCount == complexityD.nodeCount &&
+               metrics.bestGenomeConnectionGeneCount == complexityD.connectionGeneCount &&
+               metrics.bestGenomeEnabledConnectionCount == complexityD.enabledConnectionCount &&
+               "best genome complexity must be genomeComplexities[bestIndividualIndex]"); // 14
+        const float expectedAvgNodes = (5.0f + 7.0f + 3.0f + 9.0f) / 4.0f;
+        const float expectedAvgConnections = (8.0f + 12.0f + 4.0f + 14.0f) / 4.0f;
+        assert(std::fabs(metrics.avgGenomeNodeCount - expectedAvgNodes) < 1e-5f &&
+               std::fabs(metrics.avgGenomeConnectionGeneCount - expectedAvgConnections) < 1e-5f &&
+               "avg genome node/connection counts must be the population mean"); // 15
+        assert(metrics.generationDurationSeconds == 12.5f && "generationDurationSeconds must pass through unchanged"); // 16
+    }
+
+    // 17-20: buildGenerationMetrics input validation.
+    {
+        GenerationMetricsInput empty;
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(empty); }) &&
+               "empty rawFitness must be rejected"); // 17
+
+        GenerationMetricsInput mismatched;
+        mismatched.rawFitness = {1.0f, 2.0f};
+        mismatched.bestProgressValues = {0.1f}; // wrong size
+        mismatched.completedLap = {false, false};
+        mismatched.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(mismatched); }) &&
+               "a per-individual vector with the wrong size must be rejected"); // 18
+
+        GenerationMetricsInput badAdjusted;
+        badAdjusted.rawFitness = {1.0f, 2.0f};
+        badAdjusted.adjustedFitness = {1.0f}; // wrong size (and not empty)
+        badAdjusted.bestProgressValues = {0.1f, 0.2f};
+        badAdjusted.completedLap = {false, false};
+        badAdjusted.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(badAdjusted); }) &&
+               "a non-empty adjustedFitness with the wrong size must be rejected"); // 19
+
+        GenerationMetricsInput badIndex;
+        badIndex.rawFitness = {1.0f, 2.0f};
+        badIndex.bestProgressValues = {0.1f, 0.2f};
+        badIndex.completedLap = {false, false};
+        badIndex.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        badIndex.bestIndividualIndex = 2; // out of range for size 2
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(badIndex); }) &&
+               "an out-of-range bestIndividualIndex must be rejected"); // 20
+    }
+
+    TraceLog(LOG_INFO, "Training metrics verification: all deterministic checks passed");
+}
+
+namespace training_logger_verify
+{
+
+// Reads every line of path (assumed to exist) into a vector, in order,
+// without trailing newlines.
+std::vector<std::string> readLines(const std::string& path)
+{
+    std::ifstream in(path);
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line))
+    {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+std::size_t countFields(const std::string& csvLine)
+{
+    if (csvLine.empty())
+    {
+        return 0;
+    }
+    return static_cast<std::size_t>(std::count(csvLine.begin(), csvLine.end(), ',')) + 1;
+}
+
+training::RunMetadata makeTestMetadata()
+{
+    training::RunMetadata metadata;
+    metadata.buildVersion = "test-build";
+    metadata.trackName = "test-track";
+    metadata.maxEvaluationTimeSeconds = 30.0f;
+    return metadata;
+}
+
+// A fresh, empty scratch directory under the OS temp directory -- never
+// under the project's own results/ directory, so running this verification
+// (which happens on every program startup) can never pollute or collide
+// with real experiment output. Removed entirely both before (in case a
+// previous crashed run left it behind) and after this suite runs.
+std::filesystem::path scratchDir()
+{
+    return std::filesystem::temp_directory_path() / "oppari_training_logger_verify";
+}
+
+} // namespace training_logger_verify
+
+// One-shot, deterministic verification of training::TrainingLogger and its
+// free CSV-formatting functions (Stage 21): csvHeaderLine()/
+// generationMetricsToCsvRow()/formatFloat() as pure string-building (no
+// file I/O), then TrainingLogger's actual file creation/append/no-overwrite
+// behavior against a scratch directory under the OS temp directory (removed
+// before and after, so this never touches or leaves anything in the
+// project's real results/ directory).
+void verifyTrainingLogger()
+{
+    using namespace training_logger_verify;
+
+    // 1: formatFloat is locale-independent ('.' separator) and produces the
+    // shortest round-trippable representation -- no fixed decimal count, no
+    // trailing zeros.
+    assert(training::formatFloat(812.4f) == "812.4" && "formatFloat must format 812.4f as \"812.4\"");
+    assert(training::formatFloat(-3.5f) == "-3.5" && "formatFloat must handle negative values with '.' separator");
+    assert(training::formatFloat(100.0f) == "100" && "formatFloat must not pad an exact integer value with trailing zeros");
+    assert(training::formatFloat(0.0f) == "0" && "formatFloat must format zero as \"0\"");
+    // 2: non-finite inputs never throw/crash -- they format as fixed
+    // sentinel strings instead.
+    assert(training::formatFloat(std::numeric_limits<float>::quiet_NaN()) == "nan" && "formatFloat must format NaN as \"nan\"");
+    assert(training::formatFloat(std::numeric_limits<float>::infinity()) == "inf" && "formatFloat must format +Inf as \"inf\"");
+    assert(training::formatFloat(-std::numeric_limits<float>::infinity()) == "-inf" &&
+           "formatFloat must format -Inf as \"-inf\"");
+
+    // 3: csvHeaderLine() column count matches GenerationMetrics' own field
+    // count (21) exactly.
+    const std::string header = training::csvHeaderLine();
+    assert(countFields(header) == 21 && "CSV header must have exactly 21 columns, one per GenerationMetrics field");
+    assert(header.substr(0, 10) == "generation" && "CSV header's first column must be \"generation\"");
+
+    // 4: generationMetricsToCsvRow() produces the same column COUNT as the
+    // header, in the documented order, with every field's value recoverable
+    // by parsing the row back.
+    {
+        training::GenerationMetrics metrics;
+        metrics.generation = 42;
+        metrics.bestFitness = 812.4f;
+        metrics.avgFitness = 436.1f;
+        metrics.medianFitness = 421.8f;
+        metrics.worstFitness = 12.3f;
+        metrics.avgAdjustedFitness = 200.5f;
+        metrics.speciesCount = 5;
+        metrics.largestSpeciesSize = 20;
+        metrics.smallestSpeciesSize = 1;
+        metrics.bestSpeciesHistoricalFitness = 900.0f;
+        metrics.stagnantSpeciesExcluded = 2;
+        metrics.bestProgress = 1.5f;
+        metrics.avgProgress = 0.7f;
+        metrics.lapsCompletedCount = 3;
+        metrics.completionRate = 0.06f;
+        metrics.bestGenomeNodeCount = 14;
+        metrics.bestGenomeConnectionGeneCount = 31;
+        metrics.bestGenomeEnabledConnectionCount = 29;
+        metrics.avgGenomeNodeCount = 11.2f;
+        metrics.avgGenomeConnectionGeneCount = 20.4f;
+        metrics.generationDurationSeconds = 30.0f;
+
+        const std::string row = training::generationMetricsToCsvRow(metrics);
+        assert(countFields(row) == countFields(header) &&
+               "a CSV data row must have exactly as many columns as the header"); // 4
+
+        std::istringstream rowStream(row);
+        std::string field;
+        std::vector<std::string> fields;
+        while (std::getline(rowStream, field, ','))
+        {
+            fields.push_back(field);
+        }
+        assert(fields.size() == 21 && "split CSV row must yield exactly 21 fields"); // 5
+        assert(fields[0] == "42" && "column 0 (generation) must be \"42\""); // 6
+        assert(fields[1] == "812.4" && "column 1 (best_fitness) must be locale-independent \"812.4\""); // 7
+        assert(fields[15] == "14" && "column 15 (best_genome_nodes) must be \"14\""); // 8
+        assert(fields[16] == "31" && "column 16 (best_genome_connections) must be \"31\""); // 9
+        assert(fields[20] == "30" && "column 20 (generation_duration_seconds) must be \"30\""); // 10
+    }
+
+    // 11-16: TrainingLogger's real file behavior, against a scratch temp
+    // directory.
+    {
+        const std::filesystem::path dir = scratchDir();
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec); // clean slate, ignoring "did not exist"
+
+        training::TrainingLogger logger(dir.string(), makeTestMetadata());
+        assert(std::filesystem::exists(logger.getCsvPath()) && "TrainingLogger must create the CSV file"); // 11
+        assert(std::filesystem::exists(logger.getMetadataPath()) && "TrainingLogger must create the metadata file"); // 12
+
+        const std::vector<std::string> headerOnly = readLines(logger.getCsvPath());
+        assert(headerOnly.size() == 1 && headerOnly[0] == training::csvHeaderLine() &&
+               "a freshly constructed TrainingLogger's CSV file must contain exactly the header line"); // 13
+
+        training::GenerationMetrics m0;
+        m0.generation = 0;
+        m0.bestFitness = 100.0f;
+        training::GenerationMetrics m1;
+        m1.generation = 1;
+        m1.bestFitness = 150.0f;
+        logger.logGeneration(m0);
+        logger.logGeneration(m1);
+
+        const std::vector<std::string> afterTwoRows = readLines(logger.getCsvPath());
+        assert(afterTwoRows.size() == 3 &&
+               "header + 2 logGeneration() calls must produce exactly 3 lines, no duplicates/missing rows"); // 14
+        assert(afterTwoRows[1] == training::generationMetricsToCsvRow(m0) &&
+               afterTwoRows[2] == training::generationMetricsToCsvRow(m1) &&
+               "logged rows must appear in call order with no row lost or duplicated"); // 15
+
+        // 16: a second TrainingLogger constructed immediately afterward,
+        // pointed at the SAME resultsDir (almost certainly within the same
+        // second), must never overwrite the first run's files -- it gets a
+        // distinct run id (numeric suffix) and its own fresh CSV/metadata
+        // pair.
+        training::TrainingLogger secondLogger(dir.string(), makeTestMetadata());
+        assert(secondLogger.getRunId() != logger.getRunId() &&
+               secondLogger.getCsvPath() != logger.getCsvPath() &&
+               "two TrainingLoggers constructed against the same resultsDir must never collide on run id/CSV path"); // 16
+        assert(std::filesystem::exists(logger.getCsvPath()) &&
+               readLines(logger.getCsvPath()).size() == 3 &&
+               "constructing a second TrainingLogger must not touch the first run's existing CSV file"); // 16 (continued)
+
+        std::filesystem::remove_all(dir, ec); // leave no trace in the OS temp directory
+    }
+
+    TraceLog(LOG_INFO, "Training logger verification: all deterministic checks passed");
+}
+
+// End-to-end integration check (Stage 21): runs a small, fast-finishing
+// (crash genome -- see population_verify::makeCrashGenome()) Population
+// through its first generation transition, re-snapshotting every
+// individual's raw fitness/progress/hasCompletedLap/genome complexity
+// immediately before every update() call (the same technique
+// verifySpeciesAwareReproduction() already uses -- see its own comment for
+// why: generation-finish detection and reproduction happen together inside
+// one update() call, so this is the only way to observe the exact data
+// Population itself used), then confirms Population::getLastGenerationMetrics()
+// matches those independently-recomputed values, and that its species-level
+// fields agree with Population::getCurrentSpecies()/getReproductionStats()
+// read immediately after the transition (both of which continue to reflect
+// the just-finished generation until the NEXT transition -- see
+// Population.h).
+void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track)
+{
+    using ai::neat::CompatibilityConfig;
+    using ai::neat::CrossoverConfig;
+    using ai::neat::Genome;
+    using ai::neat::MutationConfig;
+    using ai::neat::Population;
+    using ai::neat::PopulationConfig;
+    using ai::neat::SpeciationConfig;
+
+    const Genome crashGenome = population_verify::makeCrashGenome();
+    const PopulationConfig popConfig = population_verify::makeTestPopulationConfig(10, 77u);
+    const MutationConfig mutationConfig;
+    const CrossoverConfig crossoverConfig;
+    const CompatibilityConfig compatibilityConfig;
+    const SpeciationConfig speciationConfig;
+
+    Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig, mutationConfig,
+                           crossoverConfig, compatibilityConfig, speciationConfig);
+
+    // Re-snapshot every individual's raw state immediately BEFORE every
+    // update() call, exactly like verifySpeciesAwareReproduction() above
+    // does (see its own comment for why): generation-finish detection and
+    // reproduction happen together inside a single update() call, so there
+    // is no way to observe Population's exact just-finished state from
+    // outside except via the snapshot taken right before whichever call
+    // turns out to trigger it. finishedBeforeTransitionCall records how many
+    // individuals had ALREADY finished going into that exact call: only
+    // when it equals the full population size is the preceding snapshot
+    // provably identical to what Population itself used (a finished
+    // individual's Genome/fitness/progress cannot change on a later
+    // update()) -- otherwise, one or more still-running individuals could
+    // gain a final, possibly checkpoint-sized burst of fitness/progress
+    // during that very last call, and the strict per-individual comparisons
+    // below are skipped in favor of the invariants that hold unconditionally
+    // either way.
+    std::vector<float> lastRawFitness;
+    std::vector<float> lastBestProgress;
+    std::vector<bool> lastCompletedLap;
+    std::size_t finishedBeforeTransitionCall = 0;
+    for (int step = 0; step < 4000 && population.getGeneration() == 0; ++step)
+    {
+        lastRawFitness.clear();
+        lastBestProgress.clear();
+        lastCompletedLap.clear();
+        for (std::size_t i = 0; i < population.size(); ++i)
+        {
+            const ai::neat::Individual& individual = population.getIndividual(i);
+            lastRawFitness.push_back(individual.getFitness());
+            lastBestProgress.push_back(individual.getProgress().getBestProgress());
+            lastCompletedLap.push_back(individual.getFitnessEvaluator().hasCompletedLap());
+        }
+        finishedBeforeTransitionCall = population.getFinishedCount();
+        population.update(kSimulationDt);
+    }
+    assert(population.getGeneration() == 1 && "setup: population must complete generation 0 within the step budget");
+
+    const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
+
+    assert(metrics.generation == 0 && "logged metrics must be for generation 0, the generation that just finished"); // 1
+    assert(metrics.bestFitness == population.getLastGenerationBestFitness() &&
+           "GenerationMetrics::bestFitness must agree with Population::getLastGenerationBestFitness()"); // 2
+
+    const bool snapshotIsExact = (finishedBeforeTransitionCall == population.size());
+    if (snapshotIsExact)
+    {
+        assert(metrics.bestFitness == training::computeMax(lastRawFitness) &&
+               metrics.avgFitness == training::computeMean(lastRawFitness) &&
+               metrics.medianFitness == training::computeMedian(lastRawFitness) &&
+               metrics.worstFitness == training::computeMin(lastRawFitness) &&
+               "GenerationMetrics fitness reduction must match an independent recomputation from the same snapshot"); // 3
+
+        float expectedAvgProgress = 0.0f;
+        std::size_t expectedLaps = 0;
+        for (std::size_t i = 0; i < lastBestProgress.size(); ++i)
+        {
+            expectedAvgProgress += lastBestProgress[i];
+            if (lastCompletedLap[i])
+            {
+                ++expectedLaps;
+            }
+        }
+        expectedAvgProgress /= static_cast<float>(lastBestProgress.size());
+        assert(std::fabs(metrics.avgProgress - expectedAvgProgress) < 1e-4f &&
+               "GenerationMetrics::avgProgress must match an independent recomputation"); // 4
+        assert(metrics.lapsCompletedCount == expectedLaps &&
+               std::fabs(metrics.completionRate -
+                         static_cast<float>(expectedLaps) / static_cast<float>(lastCompletedLap.size())) < 1e-6f &&
+               "GenerationMetrics laps-completed/completion-rate must match an independent recomputation"); // 5
+    }
+    else
+    {
+        // The snapshot's fitness/progress values are stale for whichever
+        // individual(s) finished during the transition-triggering call
+        // itself -- but metrics is still guaranteed self-consistent: its own
+        // best/avg/median/worst must obey the same ordering relationship any
+        // valid statistics of the same underlying (unobserved) data would.
+        assert(metrics.worstFitness <= metrics.medianFitness && metrics.medianFitness <= metrics.bestFitness &&
+               metrics.worstFitness <= metrics.avgFitness && metrics.avgFitness <= metrics.bestFitness &&
+               "GenerationMetrics fitness statistics must stay internally ordered (worst <= median/avg <= best)");
+        assert(metrics.lapsCompletedCount <= population.size() && metrics.completionRate >= 0.0f &&
+               metrics.completionRate <= 1.0f && "lapsCompletedCount/completionRate must stay within valid bounds");
+    }
+
+    assert(metrics.speciesCount == population.getCurrentSpecies().size() &&
+           "GenerationMetrics::speciesCount must match Population::getCurrentSpecies().size() read right after the "
+           "transition"); // 6
+
+    std::size_t expectedStagnantExcluded = 0;
+    for (const Population::SpeciesReproductionStats& stats : population.getReproductionStats())
+    {
+        if (stats.stagnant && !stats.reproductionEligible)
+        {
+            ++expectedStagnantExcluded;
+        }
+    }
+    assert(metrics.stagnantSpeciesExcluded == expectedStagnantExcluded &&
+           "GenerationMetrics::stagnantSpeciesExcluded must match Population::getReproductionStats()"); // 7
+
+    assert(metrics.generationDurationSeconds > 0.0f && metrics.generationDurationSeconds <= 30.0f + 1e-4f &&
+           "generation duration must be positive and bounded by the 30-second evaluation timeout"); // 8
+    assert(!std::isnan(metrics.bestFitness) && !std::isnan(metrics.avgFitness) && !std::isnan(metrics.avgProgress) &&
+           "no metric field may be NaN"); // 9
+
+    TraceLog(LOG_INFO, "Generation metrics / Population integration verification: all deterministic checks passed");
+}
+
 } // namespace
 
 int main()
@@ -10255,6 +10744,9 @@ int main()
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
     verifyPersistentSpeciesAndStagnation(track);
+    verifyTrainingMetrics();
+    verifyTrainingLogger();
+    verifyGenerationMetricsPopulationIntegration(track);
 
     // The whole training run starts from one hand-built, deterministic
     // demonstration Genome (see createDemonstrationGenome()) -- Population
@@ -10271,6 +10763,28 @@ int main()
     ai::neat::Population population(createDemonstrationGenome(), track, makeCarParams(), kSpawnPosition,
                                      kSpawnHeading, populationConfig, mutationConfig, crossoverConfig,
                                      compatibilityConfig, speciationConfig);
+
+    // Stage 21: one CSV row + one companion metadata file per program run,
+    // under results/ (created if missing, never overwritten -- see
+    // TrainingLogger.h). Metadata captures everything needed to reproduce
+    // this exact run later: the random seed the whole run is deterministic
+    // from (see Population.h's class comment -- no std::random_device,
+    // rand(), or time-based seeding exists anywhere in this codebase), the
+    // active track, and every NEAT/vehicle-physics config constructed
+    // above/below.
+    training::RunMetadata runMetadata;
+    runMetadata.buildVersion = OPPARI_BUILD_VERSION;
+    runMetadata.trackName = "extreme";
+    runMetadata.maxEvaluationTimeSeconds = 30.0f; // mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- see RunMetadata.h
+    runMetadata.populationConfig = populationConfig;
+    runMetadata.mutationConfig = mutationConfig;
+    runMetadata.crossoverConfig = crossoverConfig;
+    runMetadata.compatibilityConfig = compatibilityConfig;
+    runMetadata.speciationConfig = speciationConfig;
+    runMetadata.carParams = makeCarParams();
+    training::TrainingLogger trainingLogger("results", runMetadata);
+    TraceLog(LOG_INFO, "Training metrics logging to %s (metadata: %s)", trainingLogger.getCsvPath().c_str(),
+             trainingLogger.getMetadataPath().c_str());
 
     // Stage 20: a standalone manual-control car, entirely independent of
     // `population` -- lets the new Box2D vehicle handling be driven and
@@ -10332,9 +10846,20 @@ int main()
             if (population.getGeneration() != lastLoggedGeneration)
             {
                 lastLoggedGeneration = population.getGeneration();
-                TraceLog(LOG_INFO, "Generation %d started (previous generation's best fitness: %.1f)",
-                         static_cast<int>(lastLoggedGeneration),
-                         static_cast<double>(population.getLastGenerationBestFitness()));
+
+                // Stage 21: the just-finished generation's full metrics row
+                // -- captured inside Population::reproduce() before this
+                // transition replaced m_individuals (see
+                // Population::getLastGenerationMetrics()'s doc comment) --
+                // is persisted to CSV and summarized on one console line.
+                const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
+                trainingLogger.logGeneration(metrics);
+
+                TraceLog(LOG_INFO, "Gen %d | best %.1f | avg %.1f | median %.1f | species %d | best nodes %d | best connections %d",
+                         static_cast<int>(metrics.generation), static_cast<double>(metrics.bestFitness),
+                         static_cast<double>(metrics.avgFitness), static_cast<double>(metrics.medianFitness),
+                         static_cast<int>(metrics.speciesCount), static_cast<int>(metrics.bestGenomeNodeCount),
+                         static_cast<int>(metrics.bestGenomeConnectionGeneCount));
             }
         }
 
