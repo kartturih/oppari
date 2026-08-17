@@ -155,14 +155,6 @@ private:
 // separation so the closed loop never self-intersects.
 TrackDefinition createHardTrackDefinition(int simWidth, int simHeight);
 
-// Image-based test track: reuses createHardTrackDefinition()'s centerline
-// for progress/checkpoints/spawn, with visualImagePath/maskImagePath
-// pointing at assets/tracks/test/ for rendering/collision (its mask width
-// deliberately varies while the visual road doesn't, demonstrating layer
-// independence -- see generate_test_track_assets.py).
-TrackDefinition createStage18TestTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
-                                                  const std::string& maskImagePath);
-
 // User-authored extreme track: a hand-traced 39-control-point closed loop
 // following assets/tracks/extreme/track_mask.png. Road width genuinely
 // varies (collision from maskImagePath only), and it deliberately has

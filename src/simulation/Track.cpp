@@ -521,24 +521,6 @@ TrackDefinition createHardTrackDefinition(int simWidth, int simHeight)
     return def;
 }
 
-TrackDefinition createStage18TestTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
-                                                   const std::string& maskImagePath)
-{
-    // Reuses createHardTrackDefinition()'s control points/sample density.
-    // IMPORTANT: must exactly match CONTROL_POINTS/SAMPLES_PER_SEGMENT in
-    // assets/tracks/test/generate_test_track_assets.py (the rasterizer for
-    // track_visual.png/track_mask.png) -- regenerate assets if either changes.
-    TrackDefinition def = createHardTrackDefinition(simWidth, simHeight);
-
-    def.visualImagePath = visualImagePath;
-    def.maskImagePath = maskImagePath;
-
-    // trackWidth is now just a separation-check floor (mask comes from
-    // maskImagePath); spawnDistanceAlongTrack stays at its default (sample 0).
-
-    return def;
-}
-
 TrackDefinition createExtremeTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
                                               const std::string& maskImagePath)
 {

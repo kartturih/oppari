@@ -126,3 +126,13 @@ target_compile_definitions(neat_car_simulation PRIVATE
 )
 
 target_link_libraries(neat_car_simulation PRIVATE raylib box2d::box2d)
+
+# Dev-only tool: regenerates assets/tracks/test/fixtures/*.png (see
+# tools/generate_test_fixtures.cpp). Not built by default, not a dependency
+# of neat_car_simulation -- build/run it explicitly only when a fixture
+# needs to be regenerated.
+add_executable(generate_test_fixtures EXCLUDE_FROM_ALL tools/generate_test_fixtures.cpp)
+target_link_libraries(generate_test_fixtures PRIVATE raylib)
+target_compile_definitions(generate_test_fixtures PRIVATE
+    OPPARI_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+)

@@ -26,9 +26,8 @@ constexpr float kSimulationDt = 1.0f / 60.0f;
 std::string assetPath(const std::string& relativePath);
 
 // The active track: the user-authored extreme track. This is the only place
-// the active track is chosen -- see createHardTrackDefinition()/
-// createStage18TestTrackDefinition() for the other available (unused by
-// normal training) tracks.
+// the active track is chosen -- see createHardTrackDefinition() for the
+// other available (unused by normal training) track.
 simulation::TrackDefinition makeTrackDefinition();
 
 // Spawn pose derived from the Track itself, shared by every verify*()
