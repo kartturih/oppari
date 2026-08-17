@@ -9,21 +9,14 @@ namespace ai
 namespace
 {
 
-// Output ordering contract, matching NeuralNetwork.h and the PhenotypeBuilder
-// ordering guarantee: evaluate() returns exactly two values, output 0 is
-// steering and output 1 is throttle. kOutputCount is a compile-time
-// constant, so "exactly two outputs" is enforced by the type system itself
-// -- std::array<float, 2> cannot hold any other number of elements.
+// Output 0 = steering, output 1 = throttle (matches PhenotypeBuilder's ordering).
 static_assert(NeuralNetwork::kOutputCount == 2,
               "AIController assumes exactly two network outputs: steering, throttle");
 
 constexpr int kSteeringOutputIndex = 0;
 constexpr int kThrottleOutputIndex = 1;
 
-// Network outputs come from tanh and are already within [-1, 1]; the clamp
-// is defensive so this mapping is correct even if that assumption ever
-// changes. No braking or reverse: throttle is clamped to [0, 1], never
-// negative.
+// Clamp is defensive (tanh outputs are already in [-1,1]). No braking/reverse.
 float mapSteering(float rawSteering)
 {
     return std::clamp(rawSteering, -1.0f, 1.0f);

@@ -34,9 +34,7 @@ float computeMedian(std::vector<float> values)
     {
         return values[mid];
     }
-    // Even count: the standard definition -- the mean of the two middle
-    // (already sorted) elements, e.g. [1, 2, 3, 4] -> (2 + 3) / 2 = 2.5.
-    return (values[mid - 1] + values[mid]) / 2.0f;
+    return (values[mid - 1] + values[mid]) / 2.0f; // mean of the two middle elements
 }
 
 float computeMin(const std::vector<float>& values)
@@ -81,10 +79,10 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
     }
     const std::size_t count = input.rawFitness.size();
     if (input.bestProgressValues.size() != count || input.completedLap.size() != count ||
-        input.genomeComplexities.size() != count)
+        input.genomeComplexities.size() != count || input.finishReasons.size() != count)
     {
-        throw std::invalid_argument(
-            "buildGenerationMetrics: bestProgressValues/completedLap/genomeComplexities must match rawFitness in size");
+        throw std::invalid_argument("buildGenerationMetrics: bestProgressValues/completedLap/genomeComplexities/"
+                                     "finishReasons must match rawFitness in size");
     }
     if (!input.adjustedFitness.empty() && input.adjustedFitness.size() != count)
     {
@@ -93,6 +91,15 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
     if (input.bestIndividualIndex >= count)
     {
         throw std::invalid_argument("buildGenerationMetrics: bestIndividualIndex out of range");
+    }
+    for (ai::EvaluationFinishReason reason : input.finishReasons)
+    {
+        if (reason == ai::EvaluationFinishReason::None)
+        {
+            throw std::invalid_argument(
+                "buildGenerationMetrics: finishReasons must not contain EvaluationFinishReason::None -- every "
+                "individual's evaluation must have already finished");
+        }
     }
 
     GenerationMetrics metrics;
@@ -140,6 +147,27 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
     metrics.avgGenomeConnectionGeneCount = static_cast<float>(totalConnections) / static_cast<float>(count);
 
     metrics.generationDurationSeconds = input.generationDurationSeconds;
+
+    for (ai::EvaluationFinishReason reason : input.finishReasons)
+    {
+        switch (reason)
+        {
+        case ai::EvaluationFinishReason::Collision:
+            ++metrics.terminatedCollisionCount;
+            break;
+        case ai::EvaluationFinishReason::TimeLimit:
+            ++metrics.terminatedMaxTimeCount;
+            break;
+        case ai::EvaluationFinishReason::NoProgress:
+            ++metrics.terminatedNoProgressCount;
+            break;
+        case ai::EvaluationFinishReason::InsufficientInitialProgress:
+            ++metrics.terminatedSlowStartCount;
+            break;
+        case ai::EvaluationFinishReason::None:
+            break; // unreachable -- already rejected by the validation loop above
+        }
+    }
 
     return metrics;
 }

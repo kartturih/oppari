@@ -31,11 +31,8 @@ void validateCompatibilityConfig(const CompatibilityConfig& config)
     }
 }
 
-// Maps each connection gene's innovation number to itself, throwing if the
-// same genome uses the same innovation number twice -- Genome::validate()
-// checks structural endpoints and duplicate (source, target) pairs, but not
-// innovation-number uniqueness, so this must be checked explicitly before
-// innovation numbers can be trusted as an alignment key.
+// Genome::validate() doesn't check innovation-number uniqueness, so this
+// must, before innovation numbers can be trusted as an alignment key.
 std::map<InnovationNumber, const ConnectionGene*> buildInnovationMap(const Genome& genome, bool isGenomeA)
 {
     std::map<InnovationNumber, const ConnectionGene*> result;
@@ -52,11 +49,8 @@ std::map<InnovationNumber, const ConnectionGene*> buildInnovationMap(const Genom
     return result;
 }
 
-// The largest innovation number present, or -1 if the map is empty --
-// std::map iterates ascending by key, so the last element (via rbegin())
-// holds the maximum. -1 is a safe "no genes at all" sentinel since
-// ConnectionGene rejects negative innovation numbers, so every real
-// innovation number compares greater than it.
+// Largest innovation number present, or -1 (safe sentinel; innovation
+// numbers are never negative) if empty.
 InnovationNumber maxInnovation(const std::map<InnovationNumber, const ConnectionGene*>& innovationMap)
 {
     return innovationMap.empty() ? InnovationNumber{-1} : innovationMap.rbegin()->first;
@@ -80,8 +74,7 @@ CompatibilityBreakdown compatibilityBreakdown(const Genome& genomeA, const Genom
     std::size_t excess = 0;
     float weightDifferenceSum = 0.0f;
 
-    // Genes present in A: matching (also validated for endpoint
-    // consistency) or disjoint/excess relative to B's highest innovation.
+    // Genes in A: matching, or disjoint/excess relative to B's max.
     for (const auto& [innovation, connA] : mapA)
     {
         const auto itB = mapB.find(innovation);
@@ -109,8 +102,7 @@ CompatibilityBreakdown compatibilityBreakdown(const Genome& genomeA, const Genom
         weightDifferenceSum += std::fabs(connA->getWeight() - connB->getWeight());
     }
 
-    // Genes present only in B (already-matched innovations were counted
-    // above): disjoint/excess relative to A's highest innovation.
+    // Genes only in B: disjoint/excess relative to A's max.
     for (const auto& [innovation, connB] : mapB)
     {
         (void)connB;

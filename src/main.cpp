@@ -52,34 +52,21 @@ constexpr int kPanelWidth = 400;
 constexpr int kScreenWidth = kSimWidth + kPanelWidth;
 constexpr int kScreenHeight = kSimHeight;
 
-// Stage 2 executes exactly one fixed-size simulation step per rendered
-// frame. This is intentionally not GetFrameTime(): Car must always see the
-// same dt regardless of measured render duration.
+// One fixed simulation step per rendered frame -- never GetFrameTime(), so
+// Car always sees the same dt regardless of render duration.
 constexpr float kSimulationDt = 1.0f / 60.0f;
 
-// Stage 18: track image assets live under assets/tracks/... in the source
-// tree, addressed via an absolute path baked in at compile time
-// (OPPARI_ASSETS_DIR, set by CMakeLists.txt) rather than a path relative to
-// the executable's current working directory -- so asset loading behaves
-// the same whether the executable is run from build/ directly or launched
-// from an IDE with a different working directory.
+// Absolute path baked in at compile time (OPPARI_ASSETS_DIR), so asset
+// loading is independent of the executable's working directory.
 std::string assetPath(const std::string& relativePath)
 {
     return std::string(OPPARI_ASSETS_DIR) + "/" + relativePath;
 }
 
-// Stage 19: the track is the user-authored extreme track (see
-// simulation::createExtremeTrackDefinition()) -- collision comes from
-// assets/tracks/extreme/track_mask.png, rendering from
-// assets/tracks/extreme/track_visual.png (both already exactly
-// kSimWidth x kSimHeight, so no runtime-resized copies are needed), and
-// progress/checkpoints/spawn come from the hand-traced 39-point centerline,
-// exactly as documented in Track.h. This is the only place the active
-// track's shape/assets are chosen; see simulation::createHardTrackDefinition()
-// and simulation::createStage18TestTrackDefinition() for the still-available,
-// now-unused earlier tracks (the Stage 18 test assets remain in use only by
-// verifyImageBasedTrackSystem()'s fixture-based checks, not by normal
-// training).
+// The active track: the user-authored extreme track. This is the only place
+// the active track is chosen -- see createHardTrackDefinition()/
+// createStage18TestTrackDefinition() for the other available (unused by
+// normal training) tracks.
 simulation::TrackDefinition makeTrackDefinition()
 {
     return simulation::createExtremeTrackDefinition(kSimWidth, kSimHeight,
@@ -87,15 +74,9 @@ simulation::TrackDefinition makeTrackDefinition()
                                                       assetPath("tracks/extreme/track_mask.png"));
 }
 
-// The spawn pose is derived entirely from the Track itself
-// (Track::getSpawnPosition()/getSpawnHeading(), which in turn come from the
-// sampled centerline -- see Track.h/.cpp), never hardcoded here. This is
-// computed once, from a Track built solely for that purpose (identical
-// geometry to the `track` constructed in main() below, since both come from
-// the same deterministic makeTrackDefinition()), so every verify*()
-// function and every Population/Individual construction in this file
-// shares exactly the same deterministic spawn pose without duplicating any
-// coordinates.
+// Spawn pose derived from the Track itself, computed once from a
+// throwaway Track so every verify*() function and every Population shares
+// the same deterministic pose.
 struct SpawnPose
 {
     Vector2 position;
@@ -117,31 +98,11 @@ simulation::CarParams makeCarParams()
     return simulation::CarParams{};
 }
 
-// Builds one hand-built, deterministic demonstration Genome: 9 Input nodes
-// (IDs 0..8, matching Observation slot order -- see ai::Observation), 1 Bias
-// node, 2 Output nodes, and only direct Input/Bias -> Output connections (no
-// hidden nodes). All weights below are fixed literals chosen by hand to
-// produce visibly reactive steering/throttle -- this is NOT a trained or
-// evolved network, and no random values are used anywhere in its
-// construction.
-//
-// Observation input slots used here (see ai::Observation for the full list):
-//   0 = sensor at -60 deg (left),   1 = sensor at -30 deg (left)
-//   2 = sensor at   0 deg (center)
-//   3 = sensor at +30 deg (right),  4 = sensor at +60 deg (right)
-//
-// Steering (output ID 100, the lower Output ID -> output slot 0):
-//   left sensors  (0, 1) -> steering, weight -0.5 / -0.3  (more open space on
-//                            the left pulls steering negative)
-//   right sensors (3, 4) -> steering, weight +0.3 / +0.5  (more open space on
-//                            the right pulls steering positive)
-//   center sensor (2)    -> no connection (zero contribution, per the
-//                            "may contribute zero" guidance)
-//
-// Throttle (output ID 101, the higher Output ID -> output slot 1):
-//   Bias (9)       -> throttle, weight +0.6 (steady baseline forward drive)
-//   center sensor  -> throttle, weight +0.4 (more open space ahead adds a
-//                      little more throttle on top of the baseline)
+// Hand-built, deterministic demonstration Genome (not trained/evolved): 9
+// Input nodes (0-8, matching Observation slot order), 1 Bias, 2 Output
+// (100 = steering, 101 = throttle), direct Input/Bias -> Output only.
+// Left sensors steer negative, right sensors steer positive; bias + center
+// sensor drive throttle.
 ai::neat::Genome createDemonstrationGenome()
 {
     using ai::neat::ConnectionGene;
@@ -207,8 +168,8 @@ float cross2D(Vector2 a, Vector2 b, Vector2 c)
 
 // True if segments (a1,a2) and (b1,b2) properly intersect or overlap, via
 // the standard orientation + bounding-box test. Only used by verification
-// (Stage 14B's self-intersection check on the sampled centerline), never by
-// any production/runtime code path.
+// (self-intersection check on the sampled centerline), never by any
+// production/runtime code path.
 bool segmentsIntersect(Vector2 a1, Vector2 a2, Vector2 b1, Vector2 b2)
 {
     const float d1 = cross2D(b1, b2, a1);
@@ -356,16 +317,8 @@ void verifyTrack(const simulation::Track& track)
     assert(!centerline.empty() && "sampled centerline must be non-empty");
     assert(centerline.size() == cumulative.size() && "cumulative distances must have one entry per sample");
 
-    // 8 & 9: the loop is closed (the wraparound segment from the last
-    // sample back to the first is a real, non-degenerate segment, not a
-    // duplicate zero-length seam sample) and every ordinary consecutive
-    // pair of samples is distinct. Stage 14B's hard track deliberately
-    // mixes a long straight with tight corners, so consecutive-sample
-    // spacing varies a lot more than the old easy oval's did (Catmull-Rom
-    // sampling is uniform in the parametric t, not in arc length, so a
-    // straight section advances much further per sample than a tight
-    // corner does) -- this check only requires every segment to be
-    // non-degenerate, not similarly sized.
+    // 8 & 9: the loop is closed (wraparound segment is real, non-degenerate)
+    // and every consecutive pair of samples is distinct.
     {
         const std::size_t n = centerline.size();
         float sumOfLengths = 0.0f;
@@ -395,13 +348,9 @@ void verifyTrack(const simulation::Track& track)
     }
     assert(cumulative.back() < track.getTotalLength() && "the last sample's cumulative distance must be below the total length");
 
-    // 13, 14, 15, 17 & 18: projecting a centerline sample itself back onto
-    // the centerline returns (approximately) that same point, at
-    // near-zero distance, with a deterministic tie-break to the lower of
-    // the two segments meeting at that sample (the segment ending there,
-    // not the one starting there, since segments are scanned in ascending
-    // index order and only a strictly smaller distance updates the best
-    // match).
+    // 13, 14, 15, 17 & 18: projecting a centerline sample back onto the
+    // centerline returns that same point at near-zero distance, with a
+    // deterministic tie-break to the lower of the two segments meeting there.
     {
         const std::size_t sampleIndex = 5; // arbitrary interior sample, away from the wraparound seam
         const simulation::TrackProjection proj = track.projectOntoCenterline(centerline[sampleIndex]);
@@ -414,9 +363,7 @@ void verifyTrack(const simulation::Track& track)
         assert(proj.segmentIndex == sampleIndex - 1 && std::fabs(proj.segmentT - 1.0f) < 1e-3f &&
                "tie-break between two equally-close segments must deterministically choose the lower segment index");
 
-        // The projected point must actually lie on the chosen segment: it
-        // must be collinear with the segment's two endpoints and within
-        // the segment's span (segmentT already checked above).
+        // Must be collinear with the segment's endpoints and within its span.
         const Vector2& a = centerline[proj.segmentIndex];
         const Vector2& b = centerline[(proj.segmentIndex + 1) % centerline.size()];
         const float cross = (b.x - a.x) * (proj.point.y - a.y) - (b.y - a.y) * (proj.point.x - a.x);
@@ -438,15 +385,10 @@ void verifyTrack(const simulation::Track& track)
                "distanceFromCenterline must match a known perpendicular offset from the centerline");
     }
 
-    // 19 & 21: the CPU mask agrees with the centerline geometry at the
-    // spawn point, and rejects out-of-bounds coordinates. (A generic "the
-    // middle of the simulation area must be non-drivable" check does not
-    // belong here: it assumed a simple convex-ish loop, which is not true
-    // of every track this function is asked to verify -- e.g. Stage 19's
-    // maze-like extreme track has road running directly through its
-    // bounding-box center. A track-specific known-non-drivable-point check
-    // for the currently active track lives in
-    // verifyImageBasedTrackSystem() instead.)
+    // 19 & 21: the CPU mask agrees with the centerline at spawn, and
+    // rejects out-of-bounds coordinates. (No generic "center must be
+    // non-drivable" check: not true of every track shape -- see
+    // verifyImageBasedTrackSystem() for a track-specific version.)
     {
         const Vector2 spawn = track.getSpawnPosition();
         assert(track.isDrivable(static_cast<int>(spawn.x), static_cast<int>(spawn.y)) &&
@@ -482,29 +424,16 @@ void verifyTrack(const simulation::Track& track)
                "spawn heading must follow the forward centerline tangent");
     }
 
-    // Stage 14B/19: an asymmetric closed loop folded into a bounded
-    // simulation area makes it possible in principle for two *non-adjacent*
-    // sections to cross -- unlike a convex oval, which rules that out by
-    // construction. This is a deterministic, O(sampleCount^2) geometry
-    // check over the actual sampled centerline (the same one the mask/
-    // rendering/progress all use) -- purely verification, not a runtime
-    // path, and it does not change projectOntoCenterline() or add any
-    // spatial acceleration structure to Track itself.
+    // An asymmetric closed loop can fold two non-adjacent sections into a
+    // crossing (unlike a convex oval). O(sampleCount^2) geometry check over
+    // the real sampled centerline -- verification only.
     {
         const std::size_t n = centerline.size();
 
-        // Segments within this many indices of each other (in either
-        // direction around the closed loop, including the wraparound) are
-        // "adjacent" for these purposes -- ordinary consecutive curvature
-        // (especially through a multi-control-point corner, where samples
-        // on the entry and exit sides of the SAME turn can still be well
-        // within 100 indices of each other yet close in space) naturally
-        // brings them near/touching, so they are excluded from the crossing
-        // check below (it would otherwise false-positive on the track's own
-        // curvature, not a real overlap). Stage 19's extreme track uses
-        // shorter control-point segments (20 samples each, vs. Stage 14B's
-        // 24) with some corners spanning 4-5 of them, so this needed
-        // widening from Stage 14B's 40 to comfortably cover a full corner.
+        // Segments within this many indices (either direction, wrapping)
+        // are "adjacent" and excluded -- ordinary corner curvature can
+        // bring same-turn entry/exit samples this close without it being a
+        // real overlap; wide enough to cover a full corner on this track.
         constexpr std::size_t kAdjacencyWindow = 100;
 
         float worstSeparation = std::numeric_limits<float>::max();
@@ -521,7 +450,7 @@ void verifyTrack(const simulation::Track& track)
                 const std::size_t backwardGap = n - forwardGap;
                 if (std::min(forwardGap, backwardGap) <= kAdjacencyWindow)
                 {
-                    continue; // adjacent (or the same/neighboring) segment -- not a candidate for overlap
+                    continue; // adjacent segment -- not a candidate for overlap
                 }
 
                 const Vector2& b1 = centerline[j];
@@ -536,26 +465,13 @@ void verifyTrack(const simulation::Track& track)
             }
         }
 
-        // 8: no two non-adjacent centerline segments may cross -- this
-        // remains a hard invariant regardless of track design, since a
-        // literal crossing would break arc-length monotonicity along the
-        // loop (not just create a local-projection ambiguity).
+        // No two non-adjacent centerline segments may cross -- a literal
+        // crossing would break arc-length monotonicity along the loop.
         assert(!anyIntersection && "the closed centerline must not self-intersect between non-adjacent sections");
 
-        // Stage 14B/18's tracks additionally required a generous minimum
-        // separation between every non-adjacent section pair (comfortably
-        // more than the road's width), on the theory that keeping sections
-        // physically far apart was the only way to prevent
-        // projectOntoCenterline() from ambiguously jumping between them.
-        // Stage 19's extreme track deliberately does NOT uphold that: its
-        // hand-traced route genuinely brings two non-adjacent corridors as
-        // close as ~94px together (see createExtremeTrackDefinition()) --
-        // by design, since that closeness is exactly the case
-        // TrackProgress's local projection tracking and global recovery
-        // exist to handle correctly (see verifyImageBasedTrackSystem() and
-        // TrackProgress.h), rather than a defect to be designed away. No
-        // minimum-separation assertion is made here; worstSeparation is
-        // still computed and logged as a diagnostic.
+        // No minimum-separation assertion: the extreme track deliberately
+        // brings two non-adjacent corridors within ~94px (by design -- see
+        // TrackProgress's local tracking/recovery). Logged as a diagnostic only.
         TraceLog(LOG_INFO, "Track verification: closest non-adjacent centerline separation is %.1fpx",
                  static_cast<double>(worstSeparation));
     }
@@ -582,14 +498,9 @@ void verifyCar(const simulation::Track& track)
     {
         car.update(steerOnly, kSimulationDt);
     }
-    // Stage 20: exact bit-for-bit equality no longer applies here -- Box2D
-    // stores body rotation as a (cos, sin) pair and getHeading() reconstructs
-    // the angle via atan2 every update() (see Car::update()), so even a
-    // heading that truly never changes accumulates a tiny (sub-1e-4 rad)
-    // floating-point round-trip drift over repeated update() calls, unlike
-    // the old analytic model that stored the angle itself and left it
-    // untouched when its increment was exactly 0. A small epsilon is the
-    // physically correct check here, not a weakening of it.
+    // Not bit-for-bit equal: Box2D stores rotation as (cos, sin) and
+    // getHeading() reconstructs via atan2 every update(), so even an
+    // unchanging heading accumulates tiny round-trip drift.
     assert(std::fabs(car.getHeading() - kSpawnHeading) < 1e-3f &&
            "steering must have no effect while stationary");
 
@@ -686,13 +597,8 @@ void verifySensors(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // 6: a sensor directed at a nearby track boundary reports less than
-    // maximum distance. Spawn sits on the centerline of a road band well
-    // under the 200px sensor range wide (see the active Track's mask), so a
-    // sensor aimed 90 degrees off the spawn heading (i.e. across the road,
-    // not along it) must hit that edge well within range, regardless of the
-    // spawn tangent's exact absolute direction -- unlike a hardcoded
-    // absolute heading, this stays correct for any track's spawn geometry.
+    // 6: a sensor aimed across the road (90 deg off spawn heading) must hit
+    // the boundary well within the 200px range, for any track's spawn geometry.
     {
         car.reset(kSpawnPosition, kSpawnHeading + static_cast<float>(PI) * 0.5f);
         const simulation::SensorReading& front = car.getSensors()[2];
@@ -832,30 +738,19 @@ void verifyObservation(const simulation::Track& track)
     TraceLog(LOG_INFO, "Observation verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of the Box2D-backed single-track
-// (bicycle model) tire model -- Stage 20.2. Unlike Stage 20/20.1's checks
-// (which mostly verified the old shared-grip-budget/yaw-controller model's
-// own internal bookkeeping), these are written directly against the
-// BEHAVIOR the new front/rear tire model must produce: a standing-start
-// full-throttle/full-steering input must curve the car without it sliding
-// almost sideways, ordinary cornering must keep tire slip angles small,
-// the turn radius must genuinely widen with speed, grip loss under a hard
-// high-speed turn must be progressive (slip angles growing smoothly with
-// speed, not jumping straight to an extreme), releasing steering must let
-// slip settle back down, straight-line acceleration must stay stable, and
-// nothing here should ever produce a NaN, an oscillating heading, or an
-// unbounded spin. Runs once at startup, independent of keyboard/render
-// timing.
+// Deterministic behavioral check of the front/rear bicycle-model tire
+// model: standing-start full throttle/steering curves without sliding
+// sideways, ordinary cornering keeps slip angles small, turn radius widens
+// with speed, grip loss under hard turns is progressive, steering release
+// lets slip settle, straight-line acceleration is stable, and nothing ever
+// produces a NaN or unbounded spin.
 void verifyVehiclePhysics(const simulation::Track& track)
 {
     simulation::Car car(makeCarParams(), track);
 
-    // getHeading() comes from atan2() (see Car::update()), so it is always
-    // wrapped into (-pi, pi] -- a real, continuous rotation can still make
-    // the raw scalar jump by ~2*pi if it crosses that branch cut
-    // (kSpawnHeading on this track sits almost exactly at +-pi, so this is
-    // not a hypothetical edge case here). Every heading-based measurement
-    // below uses this shortest-path signed delta, never a naive subtraction.
+    // getHeading() wraps into (-pi, pi] (atan2), so a continuous rotation
+    // can jump by ~2*pi crossing that branch cut -- always use this
+    // shortest-path signed delta, never a naive subtraction.
     constexpr float kTwoPi = 2.0f * static_cast<float>(PI);
     auto headingDelta = [](float from, float to) -> float
     {
@@ -896,9 +791,8 @@ void verifyVehiclePhysics(const simulation::Track& track)
         assert(car.getForwardVelocity() > 0.0f && "sustained throttle must produce positive forward velocity");
     }
 
-    // 2: releasing throttle must let resistance reduce speed over time
-    // (lift-off) -- no separate brake input exists (see CarInput), this is
-    // the only deceleration channel besides tire grip/steering.
+    // 2: releasing throttle (lift-off) must let resistance reduce speed --
+    // there is no separate brake input.
     {
         const float speedBeforeLiftOff = car.getSpeed();
         assert(speedBeforeLiftOff > 50.0f && "must still be moving meaningfully before lift-off");
@@ -916,9 +810,8 @@ void verifyVehiclePhysics(const simulation::Track& track)
                  static_cast<double>(speedBeforeLiftOff - speedAfterLiftOff));
     }
 
-    // 3: straight-line acceleration remains stable -- no NaNs, and heading
-    // stays essentially frozen frame to frame (no per-frame snapping) and
-    // overall (no drift) under sustained full throttle with zero steering.
+    // 3: straight-line acceleration stays stable -- no NaNs, heading
+    // frozen frame-to-frame and overall, under full throttle/zero steering.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput throttleOnly;
@@ -940,26 +833,17 @@ void verifyVehiclePhysics(const simulation::Track& track)
     }
 
     // 4: standing-start full throttle + full steering must curve the car
-    // through a stable trajectory -- it must NOT instantly rotate the body
-    // out from under the velocity vector, nor drift almost sideways/onto
-    // an ice-skating slide. The whole-body slip angle (heading vs. actual
-    // velocity direction -- see Car::getSlipAngle()) is tracked over the
-    // full run and must stay well short of a perpendicular (~90 degree)
-    // slide at every single frame, not just on average.
+    // through a stable trajectory -- never instantly rotating the body out
+    // from under the velocity vector or sliding near-perpendicular ("on ice").
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput fullLock;
         fullLock.throttle = 1.0f;
         fullLock.steering = 1.0f;
 
-        // 0.5s, not longer: continuous full-throttle + full-lock steering is
-        // an accelerating spiral by construction -- given enough time it
-        // will inevitably leave any bounded-width corridor no matter how
-        // realistic the underlying physics is (this is geometry, not a
-        // physics defect: by inspection, this exact maneuver reaches the
-        // spawn straight's 130px-wide corridor edge around 0.7-0.8s in).
-        // 0.5s is long enough to see the car build up real speed while
-        // turning, comfortably inside that margin.
+        // 0.5s: this maneuver is an accelerating spiral that leaves the
+        // 130px corridor around 0.7-0.8s regardless of physics -- 0.5s
+        // stays comfortably inside that geometric margin.
         float maxAbsBodySlipAngle = 0.0f;
         for (int i = 0; i < 30 && car.isAlive(); ++i)
         {
@@ -971,9 +855,7 @@ void verifyVehiclePhysics(const simulation::Track& track)
         assert(car.getSpeed() > 30.0f && "the car must still have accelerated meaningfully while turning");
         assert(std::fabs(headingDelta(kSpawnHeading, car.getHeading())) > 0.3f &&
                "the car must have genuinely turned, not just spun in place");
-        // 60 degrees =~ 1.047 rad: comfortably short of a perpendicular
-        // (90 degree) slide, and well above what a merely-noisy reading
-        // near rest could produce.
+        // 60 deg -- short of a perpendicular slide, above rest-noise level.
         assert(maxAbsBodySlipAngle < 1.047f &&
                "standing-start full-lock steering must not make the car slide almost sideways");
         TraceLog(LOG_INFO,
@@ -984,22 +866,15 @@ void verifyVehiclePhysics(const simulation::Track& track)
                  static_cast<double>(maxAbsBodySlipAngle * RAD2DEG));
     }
 
-    // 5: ordinary moderate-speed cornering keeps tire slip angles small
-    // (planted, not "on ice"), and the front/rear tire forces are what is
-    // actually producing the car's rotation -- both axle forces and the
-    // resulting yaw rate must be genuinely nonzero, confirming yaw comes
-    // from the tire model's moment arms rather than from nowhere.
+    // 5: moderate-speed cornering keeps slip angles small (planted, not "on
+    // ice"), and axle forces + yaw rate are genuinely nonzero -- yaw comes
+    // from the tire model's moment arms, not from nowhere.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput moderateTurn;
         moderateTurn.throttle = 1.0f;
         moderateTurn.steering = 0.5f;
-        // 0.75s: by inspection this exact maneuver (continuous moderate
-        // turn while accelerating) reaches the spawn straight's corridor
-        // edge around 0.9s in -- same geometric inevitability as test 4
-        // above, not a physics defect (and by 0.75s slip angle has, if
-        // anything, been shrinking as speed builds -- see the assertions
-        // below).
+        // 0.75s: stays inside the corridor (same geometric limit as test 4).
         for (int i = 0; i < 45 && car.isAlive(); ++i)
         {
             car.update(moderateTurn, kSimulationDt);
@@ -1007,8 +882,7 @@ void verifyVehiclePhysics(const simulation::Track& track)
         assert(car.isAlive() && "test setup must keep the car on the road");
 
         const simulation::TireDebugInfo& debug = car.getTireDebugInfo();
-        // 20 degrees =~ 0.349 rad: real road cars rarely exceed this even
-        // under enthusiastic (not extreme) cornering.
+        // 20 deg -- rarely exceeded by real road cars even under enthusiastic cornering.
         assert(std::fabs(debug.frontSlipAngle) < 0.349f && "moderate-speed cornering must keep the front slip angle small");
         assert(std::fabs(debug.rearSlipAngle) < 0.349f && "moderate-speed cornering must keep the rear slip angle small");
         assert(std::fabs(car.getSlipAngle()) < 0.349f && "moderate-speed cornering must keep the whole-body slip angle small");
@@ -1026,9 +900,8 @@ void verifyVehiclePhysics(const simulation::Track& track)
                  static_cast<double>(debug.yawRate));
     }
 
-    // 6: releasing steering after a hard turn lets the car settle back
-    // down -- slip angle must shrink over subsequent updates, not persist
-    // or oscillate/grow.
+    // 6: releasing steering after a hard turn must let slip angle shrink,
+    // not persist or grow.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput throttleOnly;
@@ -1048,12 +921,8 @@ void verifyVehiclePhysics(const simulation::Track& track)
         const float slipAfterTurn = std::fabs(car.getSlipAngle());
         assert(slipAfterTurn > 0.03f && "test setup must actually induce measurable slip before testing recovery");
 
-        // Coast (throttle off too) while straightening: this is also
-        // simply less distance covered per frame as speed drops, giving
-        // more room to observe settling before any track boundary matters
-        // -- releasing steering is still the thing actually being tested
-        // (see the slip-angle assertions below, which are about slip
-        // angle, not about speed).
+        // Coast while straightening -- less distance per frame gives more
+        // room to observe settling before the track boundary matters.
         simulation::CarInput straighten;
         straighten.throttle = 0.0f;
         straighten.steering = 0.0f;
@@ -1276,13 +1145,9 @@ void verifyVehiclePhysics(const simulation::Track& track)
         }
     }
 
-    // ---- Stage 20.3: rear-wheel drive + per-axle friction circle ----
-    // The checks below specifically exercise the RWD friction-circle model
-    // (Car.cpp): throttle and rear cornering force now share one grip
-    // budget at the rear axle, front is lateral-only. Nothing here
-    // weakens or replaces the checks above -- those already establish the
-    // base tire model is sound; these establish the new throttle/grip
-    // coupling specifically.
+    // ---- RWD + per-axle friction circle ----
+    // Exercises throttle and rear cornering force sharing one grip budget
+    // at the rear axle (front stays lateral-only).
 
     // 11 & 12 & 20: neither axle's combined tire force ever exceeds its
     // configured grip budget, and nothing here produces a NaN/Inf state or
@@ -1339,9 +1204,7 @@ void verifyVehiclePhysics(const simulation::Track& track)
                  static_cast<double>(maxRearGripStraight * 100.0f));
     }
 
-    // 14: moderate cornering at PARTIAL throttle stays planted (small slip
-    // angles) -- the partial-throttle counterpart to check 5 above (which
-    // used full throttle).
+    // 14: moderate cornering at PARTIAL throttle also stays planted (partial-throttle version of check 5).
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput partialThrottleTurn;
@@ -1356,29 +1219,18 @@ void verifyVehiclePhysics(const simulation::Track& track)
                "moderate cornering at partial throttle must keep the whole-body slip angle small");
     }
 
-    // 15 & 16 & 17: the central Stage 20.3 behavior -- full throttle
-    // mid-corner measurably reduces available rear lateral force and
-    // increases rear slip compared to the SAME corner at zero throttle,
-    // and a sufficiently aggressive combination saturates the rear
-    // friction circle and produces genuine throttle-induced oversteer
-    // (rear slip angle exceeding front slip angle -- the rear of the car
-    // sliding out more than the front).
+    // 15, 16 & 17: full throttle mid-corner must reduce available rear
+    // lateral force and increase rear slip vs. the SAME corner at zero
+    // throttle, and a sufficiently aggressive combination must saturate the
+    // rear friction circle and produce genuine throttle-induced oversteer
+    // (rear slip exceeding front slip).
     //
-    // Comparing two INDEPENDENT multi-frame runs (one at each throttle)
-    // would confound the comparison: full throttle keeps accelerating
-    // through the corner, so its trajectory (and therefore its slip angle)
-    // diverges from the zero-throttle run for reasons that have nothing to
-    // do with the friction circle. Instead, both throttle values are
-    // applied from an IDENTICAL checkpoint state (reached by two
-    // deterministic replays of the exact same input sequence -- this
-    // simulation has no RNG, so the replay lands on bit-identical state
-    // both times), each for exactly one final update(). That final
-    // update()'s rear slip angle -- and therefore its DESIRED
-    // (pre-friction-circle) lateral force -- is computed from the
-    // checkpoint's velocity/yaw state, which is identical between the two
-    // forks; only the requested drive force differs. Any difference in the
-    // ACHIEVED force or slip angle after that one update() is therefore
-    // attributable to the friction circle alone.
+    // Two independent multi-frame runs would confound the comparison (full
+    // throttle's trajectory diverges for reasons unrelated to the friction
+    // circle). Instead both throttle values are applied from an IDENTICAL
+    // checkpoint state (two deterministic replays of the same input
+    // sequence -- no RNG, so bit-identical both times), each for one final
+    // update() -- so any difference is attributable to the friction circle alone.
     {
         auto driveToCheckpoint = [&]()
         {
@@ -1390,9 +1242,8 @@ void verifyVehiclePhysics(const simulation::Track& track)
                 car.update(burst, kSimulationDt);
             }
 
-            // Moderate throttle while approaching the corner, so both
-            // forks share an identical, realistic mid-corner slip history
-            // right up to the checkpoint.
+            // Moderate throttle approaching the corner, so both forks share
+            // identical slip history right up to the checkpoint.
             simulation::CarInput approach;
             approach.throttle = 0.3f;
             approach.steering = 0.6f;
@@ -1424,13 +1275,9 @@ void verifyVehiclePhysics(const simulation::Track& track)
         assert(std::fabs(fullThrottle.rearForceY) < std::fabs(zeroThrottle.rearForceY) &&
                "full throttle mid-corner must reduce the rear axle's available lateral force versus zero throttle");
 
-        // 16 & 17: continue each fork at ITS OWN throttle for several more
-        // frames (from the already-diverged-by-one-frame state each is now
-        // in) -- oversteer is a developing/compounding effect, not
-        // necessarily visible in the single checkpoint+1 frame captured
-        // above as fullThrottle/zeroThrottle, so both checks read the
-        // followed-forward state instead.
-        constexpr int kFollowFrames = 14; // long enough for the circle's effect to dominate over 1-frame noise
+        // 16 & 17: continue each fork at its own throttle for more frames --
+        // oversteer is a compounding effect, not necessarily visible in one frame.
+        constexpr int kFollowFrames = 14;
         for (int i = 0; i < kFollowFrames && car.isAlive(); ++i)
         {
             car.update(zeroFinal, kSimulationDt); // continues from the zero-throttle fork, still at zero throttle
@@ -1451,13 +1298,9 @@ void verifyVehiclePhysics(const simulation::Track& track)
         assert(fullSlipAfter > zeroSlipAfter &&
                "full throttle mid-corner must grow rear slip angle faster than zero throttle from the same state");
 
-        // 17: throttle-induced oversteer: under sustained full throttle,
-        // the rear circle is genuinely saturated (grip utilization at/near
-        // 100%), and the rear ends up sliding more than the front -- the
-        // defining signature of the rear being the limiting (sliding) axle
-        // here, specifically because of throttle (checks 5/7 above already
-        // establish this SAME car understeers -- front slides first --
-        // once throttle is out of the picture).
+        // 17: throttle-induced oversteer -- rear circle saturated (~100%
+        // grip) and rear sliding more than front (this same car understeers
+        // -- checks 5/7 -- once throttle is out of the picture).
         assert(fullFollowed.rearGripUtilization > 0.9f &&
                "sustained full throttle through a hard corner must saturate the rear friction circle");
         assert(fullSlipAfter > std::fabs(fullFollowed.frontSlipAngle) &&
@@ -1510,12 +1353,9 @@ void verifyVehiclePhysics(const simulation::Track& track)
                "releasing throttle during a slide must let rear slip angle recover substantially");
     }
 
-    // 19: excessive high-speed corner entry still produces understeer (the
-    // front axle's grip utilization climbs toward saturation) -- already
-    // demonstrated quantitatively by check 7 above (front slip angle
-    // growing continuously from low to high speed, radius widening); this
-    // adds an explicit grip-utilization assertion tying it to the Stage
-    // 20.3 telemetry specifically.
+    // 19: excessive high-speed corner entry produces understeer (front grip
+    // utilization climbs toward saturation) -- an explicit grip-utilization
+    // check on top of check 7's slip-angle evidence.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::CarInput burst;
@@ -1685,10 +1525,8 @@ void verifyNeuralNetwork()
         assert(std::fabs(out[0] - expected) < kEps && "skip connection combined with hidden path result mismatch");
     }
 
-    // 8: evaluation does not depend on node ID numerical order. Hidden node
-    // ID (999) is numerically larger than the Output node ID (100) it feeds,
-    // and larger than the Bias ID (9); topological order must still put the
-    // hidden node before the output regardless.
+    // 8: evaluation doesn't depend on node ID order -- Hidden 999 feeds
+    // Output 100 despite the larger ID; topological order must still put it first.
     {
         std::vector<ai::Node> nodes = makeBaseNodes();
         nodes.push_back(ai::Node{999, ai::NodeType::Hidden});
@@ -1797,10 +1635,8 @@ void verifyNeuralNetwork()
     TraceLog(LOG_INFO, "Neural network verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of the NEAT gene definitions
-// (NodeGene, ConnectionGene), independent of Car/Track/keyboard/render
-// timing. Runs once at startup. These are pure data structures -- no
-// runtime network is built or evaluated here.
+// Deterministic check of the NEAT gene definitions (NodeGene,
+// ConnectionGene) -- pure data structures, no runtime network involved.
 void verifyNeatGenes()
 {
     using ai::neat::ConnectionGene;
@@ -1902,10 +1738,8 @@ void verifyNeatGenes()
     TraceLog(LOG_INFO, "NEAT gene verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of ai::neat::Genome, independent of
-// Car/Track/keyboard/render timing. Runs once at startup. Genome is a pure
-// genetic container -- no evaluation, mutation, or crossover is exercised
-// here.
+// Deterministic check of ai::neat::Genome -- a pure genetic container, no
+// evaluation/mutation/crossover here.
 void verifyGenome()
 {
     using ai::neat::ConnectionGene;
@@ -2038,9 +1872,8 @@ void verifyGenome()
         genome.validate(); // must not throw
     }
 
-    // 11: validate() rejects a genome with duplicate node IDs. Such a genome
-    // cannot be built via addNode, so it is assembled through the raw bulk
-    // constructor, which intentionally skips validation at construction time.
+    // 11: validate() rejects duplicate node IDs (built via the raw bulk
+    // constructor, since addNode itself would reject this).
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{0, NodeType::Hidden}};
         Genome genome(nodes, {});
@@ -2076,14 +1909,9 @@ void verifyGenome()
 namespace phenotype_verify
 {
 
-// Builds a Genome with exactly ai::NeuralNetwork::kInputCount Input nodes
-// (IDs 0..8, one per Observation slot), one Bias node (ID 9), and
-// ai::NeuralNetwork::kOutputCount Output nodes (ID 100 = steering, the
-// lower ID; ID 101 = throttle, the higher ID). Nodes are deliberately added
-// out of ID order -- Bias first, then the higher-ID Output before the
-// lower-ID one, then Inputs in descending ID order -- so any test built on
-// top of this proves buildPhenotype()'s slot ordering depends on node ID,
-// never on Genome insertion order.
+// 9 Inputs (0-8) + Bias (9) + 2 Outputs (100 = steering, 101 = throttle),
+// added out of ID order -- proves buildPhenotype()'s slot ordering depends
+// on node ID, never insertion order.
 ai::neat::Genome makeBaseGenome()
 {
     ai::neat::Genome genome;
@@ -2124,11 +1952,8 @@ bool throwsInvalidArgument(Callable&& callable)
 
 } // namespace phenotype_verify
 
-// One-shot, deterministic sanity check of ai::neat::buildPhenotype, covering
-// Genome -> NeuralNetwork conversion end to end. Independent of
-// Car/Track/keyboard/render timing. Runs once at startup. No mutation,
-// crossover, or evolutionary behavior is exercised here -- only phenotype
-// construction.
+// Deterministic check of ai::neat::buildPhenotype (Genome -> NeuralNetwork),
+// end to end. No mutation/crossover here.
 void verifyPhenotypeBuilder()
 {
     using namespace phenotype_verify;
@@ -2139,23 +1964,17 @@ void verifyPhenotypeBuilder()
     using ai::neat::NodeType;
     constexpr float kEps = 1e-4f;
 
-    // 1 & 3: a minimal valid Genome (9 Input + 1 Bias + 2 Output NodeGenes)
-    // builds successfully. This is only possible if Input/Bias/Output
-    // NodeGene types were mapped to the matching runtime NodeType -- a
-    // mismapping would make NeuralNetwork's own Input/Bias/Output count
-    // checks fail.
+    // 1 & 3: a minimal valid Genome builds successfully -- only possible if
+    // NodeGene types were mapped to the matching runtime NodeType.
     {
         ai::NeuralNetwork net = buildPhenotype(makeBaseGenome());
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
         assert(out[0] == 0.0f && out[1] == 0.0f && "a fully disconnected phenotype must evaluate to exactly 0");
     }
 
-    // 2 & 8: node IDs (and the source/target IDs connections reference) are
-    // preserved exactly, including when they are large and non-contiguous.
-    // If the builder silently renumbered nodes without updating connection
-    // endpoints to match, this construction would fail with unknown-node
-    // errors; if it evaluated the wrong node, the arithmetic below would not
-    // match.
+    // 2 & 8: large, non-contiguous node IDs (and connection endpoints
+    // referencing them) are preserved exactly -- renumbering would fail
+    // construction or evaluate the wrong node.
     {
         Genome genome;
         for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
@@ -2299,9 +2118,8 @@ void verifyPhenotypeBuilder()
         assert(std::fabs(out[0] - expected) < kEps && "skip connection combined with hidden path result mismatch");
     }
 
-    // 17: an invalid Genome (duplicate node IDs, only reachable via the raw
-    // bulk constructor) fails because buildPhenotype calls genome.validate()
-    // before ever touching NeuralNetwork.
+    // 17: an invalid Genome fails because buildPhenotype calls validate()
+    // before touching NeuralNetwork.
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{0, NodeType::Hidden}};
         Genome invalidGenome(nodes, {});
@@ -2309,9 +2127,8 @@ void verifyPhenotypeBuilder()
                "a Genome that fails validate() must be rejected by buildPhenotype");
     }
 
-    // 18: a Genome whose enabled connections form a cycle is structurally
-    // valid at the Genome level (validate() does not check for cycles) but
-    // must fail phenotype construction because NeuralNetwork rejects it.
+    // 18: a cyclic Genome is valid at the Genome level (no cycle check
+    // there) but must fail phenotype construction (NeuralNetwork rejects it).
     {
         Genome genome = makeBaseGenome();
         genome.addNode(NodeGene{50, NodeType::Hidden});
@@ -2372,10 +2189,8 @@ void verifyPhenotypeBuilder()
 namespace genome_mutator_verify
 {
 
-// A small, fixed test genome: 9 Input + 1 Bias + 2 Output nodes (matching
-// ai::NeuralNetwork::kInputCount/kOutputCount, so it can also be used to
-// build a phenotype), plus four connections with known weights -- one of
-// them disabled, specifically so mutation of disabled genes can be checked.
+// 9 Input + 1 Bias + 2 Output nodes plus four connections with known
+// weights, one disabled (so mutation of disabled genes can be checked).
 ai::neat::Genome makeTestGenome()
 {
     using ai::neat::ConnectionGene;
@@ -2527,21 +2342,11 @@ ai::neat::Genome makeAlreadyConnectedGenome(bool enabled)
     return genome;
 }
 
-// Two Hidden nodes with a deliberately "descending" ID edge -- 10 -> 3, from
-// the numerically larger ID to the smaller one -- so a check that assumed
-// ascending IDs meant "topologically later" would get this wrong. With only
-// two nodes, exactly two directed pairs are structurally possible: the
-// existing 10 -> 3, and its reverse, 3 -> 10.
-//
-// When existingEdgeEnabled is true, 10 -> 3 blocks 3 -> 10 twice over: as an
-// existing (source, target) pair in the reverse direction it is unrelated
-// to duplication, but 3 -> 10 would close a direct 2-cycle (10 already has
-// an enabled path to 3), so it must be rejected -- leaving no valid pair at
-// all, since 10 -> 3 itself is already a duplicate.
-//
-// When existingEdgeEnabled is false, 10 -> 3 no longer contributes to the
-// *enabled* graph, so 3 -> 10 is no longer a cycle and must be accepted --
-// proving disabled edges do not participate in cycle detection.
+// Descending-ID edge 10 -> 3 (so ascending-ID assumptions can't sneak in).
+// With existingEdgeEnabled true, the reverse 3 -> 10 closes a 2-cycle and
+// must be rejected, leaving no valid pair. With it false, 10 -> 3 no
+// longer counts toward the enabled graph, so 3 -> 10 must be accepted --
+// proving disabled edges don't participate in cycle detection.
 ai::neat::Genome makeCycleGenome(bool existingEdgeEnabled)
 {
     using ai::neat::ConnectionGene;
@@ -2556,12 +2361,9 @@ ai::neat::Genome makeCycleGenome(bool existingEdgeEnabled)
     return genome;
 }
 
-// Nodes 0:Input, 1:Bias, 2:Hidden, 3:Output with every valid pair already
-// connected except Bias(1) -> Output(3), out of the 6 (source, target)
-// combinations reachable by candidate selection (3 sources x 2 targets).
-// Used to exercise the deterministic exhaustive fallback: with very few
-// random attempts, it is likely that none of them land on the single
-// remaining valid pair, so the fallback scan has to find it.
+// Every valid (source, target) pair connected except Bias(1) -> Output(3):
+// exercises the deterministic exhaustive fallback, since random attempts
+// are unlikely to land on the single remaining pair.
 ai::neat::Genome makeSparseValidPairGenome()
 {
     using ai::neat::ConnectionGene;
@@ -2581,10 +2383,8 @@ ai::neat::Genome makeSparseValidPairGenome()
     return genome;
 }
 
-// Same node set as makeSparseValidPairGenome(), but with the fifth (and
-// last remaining) valid pair, Bias(1) -> Output(3), also already connected
-// -- every valid feed-forward pair now exists, so the genome is fully
-// saturated.
+// Same as makeSparseValidPairGenome() but with Bias(1) -> Output(3) also
+// connected -- every valid pair exists, fully saturated.
 ai::neat::Genome makeSaturatedGenome()
 {
     using ai::neat::ConnectionGene;
@@ -2607,11 +2407,8 @@ ai::neat::Genome makeSaturatedGenome()
 
 } // namespace genome_mutator_verify
 
-// One-shot, deterministic sanity check of ai::neat::GenomeMutator, covering
-// connection-weight mutation end to end. Independent of Car/Track/AI/
-// keyboard/render timing. Runs once at startup. No structural mutation,
-// InnovationTracker, crossover, species, or population logic exists to
-// verify here -- only weight mutation, per Stage 9A's scope.
+// Deterministic check of ai::neat::GenomeMutator's connection-weight
+// mutation, end to end. No structural mutation/crossover/species/population here.
 void verifyGenomeMutator()
 {
     using namespace genome_mutator_verify;
@@ -2637,10 +2434,8 @@ void verifyGenomeMutator()
         }
     }
 
-    // 2: mutation probability 1 selects every connection -- every weight
-    // must change (a perturb/replace mix drawing continuous random values
-    // colliding exactly with the original weight is astronomically
-    // unlikely, so strict inequality is a safe deterministic check here).
+    // 2: probability 1 selects every connection -- every weight must change
+    // (colliding exactly with the original value is astronomically unlikely).
     {
         Genome genome = makeTestGenome();
         const std::vector<ConnectionGene> before = genome.connections();
@@ -2829,9 +2624,7 @@ void verifyGenomeMutator()
         assert(anyDifferent && "different seeds must be capable of producing different results");
     }
 
-    // 16: repeated mutations advance the owned RNG state -- a second
-    // mutation from the same mutator must continue from where the first
-    // left off, not repeat the same draws.
+    // 16: repeated mutations advance the owned RNG state -- must not repeat the same draws.
     {
         Genome genomeA = makeTestGenome();
         Genome genomeB = makeTestGenome();
@@ -2935,9 +2728,8 @@ void verifyGenomeMutator()
         assert((outBefore[0] != outAfter[0] || outBefore[1] != outAfter[1]) &&
                "mutated weights must produce a changed phenotype output");
 
-        // Determinism: repeating the exact same mutation from the same seed
-        // on a fresh identical genome must reproduce the same phenotype
-        // output.
+        // Determinism: the same mutation from the same seed on a fresh
+        // identical genome reproduces the same phenotype output.
         Genome genomeRepeat = makeTestGenome();
         GenomeMutator mutatorRepeat(999u);
         mutatorRepeat.mutateWeights(genomeRepeat, config);
@@ -3003,14 +2795,9 @@ bool throwsOverflowError(Callable&& callable)
 
 } // namespace innovation_tracker_verify
 
-// One-shot, deterministic sanity check of ai::neat::InnovationTracker,
-// independent of Car/Track/AI/Genome/keyboard/render timing. Runs once at
-// startup. InnovationTracker's API takes no Genome parameter anywhere, so
-// every check below -- construction and every operation on it -- needed no
-// Genome and could not have mutated one even in principle; that guarantee
-// is enforced by the type signatures themselves, not by a runtime check.
-// No structural mutation is implemented or exercised here -- only the
-// historical-marking bookkeeping itself, per Stage 9B's scope.
+// Deterministic check of ai::neat::InnovationTracker's historical-marking
+// bookkeeping. Its API takes no Genome parameter anywhere, so it can't
+// mutate one even in principle -- enforced by the type signatures themselves.
 void verifyInnovationTracker()
 {
     using namespace innovation_tracker_verify;
@@ -3120,9 +2907,8 @@ void verifyInnovationTracker()
                "a negative splitConnectionInnovation must be rejected");
     }
 
-    // 19 & 20: split-created connection innovations are registered in the
-    // same global connection history -- later direct requests for
-    // source->newNode and newNode->target reuse them exactly.
+    // 19 & 20: split-created connection innovations share the global
+    // connection history -- direct requests for the same pairs reuse them.
     {
         InnovationTracker tracker(100, 200);
         const NodeSplitInnovation split = tracker.getNodeSplitInnovation(50, 1, 2);
@@ -3156,10 +2942,8 @@ void verifyInnovationTracker()
                "only the split's new (outgoing) connection should allocate a fresh innovation -- the incoming one was reused");
     }
 
-    // 22 & 23: no node ID or connection innovation is ever reused for a
-    // different structure, across a batch of distinct splits. Node IDs are
-    // allocated starting well above the source/target range used below, so
-    // a freshly allocated new node ID can never coincide with one of them.
+    // 22 & 23: no node ID or innovation is ever reused for a different
+    // structure, across a batch of distinct splits.
     {
         InnovationTracker tracker(1000, 0);
         std::vector<NodeId> nodeIds;
@@ -3190,10 +2974,7 @@ void verifyInnovationTracker()
         }
     }
 
-    // 24: a fixed request sequence is deterministic across two identically
-    // constructed trackers. Node IDs start at 100, well above the 0..3
-    // source/target range the sequence below uses, so the split's freshly
-    // allocated new node ID can never collide with one of them.
+    // 24: a fixed request sequence is deterministic across two identically constructed trackers.
     {
         InnovationTracker trackerA(100, 0);
         InnovationTracker trackerB(100, 0);
@@ -3253,23 +3034,14 @@ void verifyInnovationTracker()
                "a new connection when the innovation counter is exhausted must throw std::overflow_error");
     }
 
-    // 28 & 29: an InnovationTracker requires no Genome to construct or use
-    // -- see the function's doc comment; enforced by the absence of any
-    // Genome parameter anywhere in its API, not by a runtime check.
-
-    // 30: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function unchanged.
+    // 28 & 29: no Genome parameter exists anywhere in InnovationTracker's API.
+    // 30: all previous verification suites still pass (main() calls every verify*() function).
 
     TraceLog(LOG_INFO, "Innovation tracker verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of
-// ai::neat::GenomeMutator::mutateAddConnection() (Stage 9C), independent of
-// Car/Track/AI/keyboard/render timing. Runs once at startup. No add-node
-// mutation, crossover, species, or population logic exists to verify here
-// -- only add-connection structural mutation, per Stage 9C's scope. This
-// mutation is never invoked from the normal driving loop; it is exercised
-// only by this verification.
+// Deterministic check of ai::neat::GenomeMutator::mutateAddConnection().
+// No add-node/crossover/species/population logic here.
 void verifyAddConnectionMutation()
 {
     using namespace genome_mutator_verify;
@@ -3498,10 +3270,8 @@ void verifyAddConnectionMutation()
                "the existing disabled connection must not be re-enabled or duplicated");
     }
 
-    // 26 & 28: a connection that would create an enabled cycle is
-    // rejected, even with a deliberately "descending" node ID edge (10 ->
-    // 3): the only other structurally possible pair, 3 -> 10, would close
-    // a direct 2-cycle and must be rejected, leaving no valid pair at all.
+    // 26 & 28: a connection that would create an enabled cycle is rejected
+    // (10 -> 3 exists, so 3 -> 10 would close a 2-cycle), regardless of node ID order.
     {
         Genome genome = makeCycleGenome(/*existingEdgeEnabled=*/true);
         InnovationTracker tracker(0, 0);
@@ -3529,13 +3299,9 @@ void verifyAddConnectionMutation()
                "the new connection must be exactly 3 -> 10, proving disabled edges do not create false cycle detection");
     }
 
-    // 29: the deterministic exhaustive fallback finds the sole valid pair
-    // even when limited random attempts are likely to miss it. Looping
-    // over many seeds with maxAttempts = 1 makes it overwhelmingly likely
-    // that at least some of them exhaust their one random attempt without
-    // landing on the only valid pair (Bias(1) -> Output(3), 1 of 6
-    // reachable combinations), relying on the fallback scan to still find
-    // it -- every seed must still succeed and land on that same pair.
+    // 29: the exhaustive fallback finds the sole valid pair even with
+    // maxAttempts = 1 (overwhelmingly likely to miss it randomly) -- every
+    // seed must still succeed via the fallback scan.
     {
         for (std::uint32_t seed = 1; seed <= 20; ++seed)
         {
@@ -3696,8 +3462,7 @@ void verifyAddConnectionMutation()
         assert(out1[0] == out2[0] && out1[1] == out2[1] && "the phenotype built from a mutated genome must be deterministic");
     }
 
-    // 41: weight mutation behavior from Stage 9A remains unchanged (spot
-    // regression check -- zero probability still changes no weights).
+    // 41: mutateWeights() regression check -- zero probability still changes nothing.
     {
         Genome genome = makeTestGenome();
         const std::vector<ConnectionGene> before = genome.connections();
@@ -3708,13 +3473,11 @@ void verifyAddConnectionMutation()
         for (std::size_t i = 0; i < before.size(); ++i)
         {
             assert(genome.connections()[i].getWeight() == before[i].getWeight() &&
-                   "Stage 9A's mutateWeights() behavior must remain unchanged: zero probability still changes nothing");
+                   "mutateWeights() behavior must remain unchanged: zero probability still changes nothing");
         }
     }
 
-    // 42: no add-node behavior occurs -- across a batch of seeds, the
-    // tracker's node-ID counter never advances (13 already checks this
-    // once; re-confirmed here for extra confidence).
+    // 42: no add-node behavior occurs -- node-ID counter never advances, across a batch of seeds.
     {
         for (std::uint32_t seed = 1; seed <= 5; ++seed)
         {
@@ -3729,8 +3492,7 @@ void verifyAddConnectionMutation()
         }
     }
 
-    // 43: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function unchanged.
+    // 43: all previous verification suites still pass.
 
     TraceLog(LOG_INFO, "Add-connection mutation verification: all deterministic checks passed");
 }
@@ -3773,12 +3535,8 @@ ai::neat::Genome makeOnlyDisabledConnectionGenome()
 
 } // namespace add_node_verify
 
-// One-shot, deterministic sanity check of
-// ai::neat::GenomeMutator::mutateAddNode, covering add-node structural
-// mutation end to end. Independent of Car/Track/AI/keyboard/render timing.
-// Runs once at startup. No crossover, species, or population logic exists
-// to verify here -- only add-node structural mutation, per Stage 9D's
-// scope.
+// Deterministic check of ai::neat::GenomeMutator::mutateAddNode(), end to
+// end. No crossover/species/population logic here.
 void verifyAddNodeMutation()
 {
     using namespace add_node_verify;
@@ -3841,9 +3599,8 @@ void verifyAddNodeMutation()
                "the sole disabled connection must remain untouched");
     }
 
-    // 2, 5-21: probability 1 splits the sole enabled connection of a
-    // minimal genome, producing exactly the structure NEAT's add-node
-    // mutation specifies.
+    // 2, 5-21: probability 1 splits the sole enabled connection, producing
+    // exactly the structure NEAT's add-node mutation specifies.
     {
         Genome genome = makeSimpleSplitGenome();
         InnovationTracker tracker(50, 60);
@@ -3854,8 +3611,7 @@ void verifyAddNodeMutation()
         const bool result = mutator.mutateAddNode(genome, tracker, config);
         assert(result && "probability 1 with an eligible connection must split it"); // 2
 
-        // NEW 5: a successful, brand-new split advances the tracker by
-        // exactly one node ID and exactly two innovation numbers.
+        // 5: a brand-new split advances the tracker by one node ID and two innovation numbers.
         assert(tracker.getNextAvailableNodeId() == 51 && "a successful split must allocate exactly one new node ID");
         assert(tracker.getNextAvailableInnovation() == 62 &&
                "a successful split must allocate exactly two new innovation numbers");
@@ -3874,9 +3630,8 @@ void verifyAddNodeMutation()
         const NodeGene& newNode = genome.nodes().back();
         assert(newNode.getType() == NodeType::Hidden && "the new node must be Hidden"); // 10
 
-        // Re-requesting the same split from the tracker is idempotent and
-        // must return exactly what mutateAddNode used -- proving the new
-        // node ID and both new innovations came from InnovationTracker.
+        // Re-requesting the same split is idempotent, proving the new node
+        // ID and both new innovations came from InnovationTracker.
         const NodeSplitInnovation split = tracker.getNodeSplitInnovation(0, 0, 1);
         assert(newNode.getId() == split.newNodeId && "the new node's ID must come from InnovationTracker"); // 11
 
@@ -3903,10 +3658,8 @@ void verifyAddNodeMutation()
         genome.validate(); // 18: must not throw
     }
 
-    // 18, 19, 20 & 21: on an Observation-shaped genome, Genome::validate()
-    // and buildPhenotype() succeed after mutation, the phenotype is
-    // acyclic (buildPhenotype would otherwise throw), and the disabled
-    // original connection never affects evaluation.
+    // 18, 19, 20 & 21: validate()/buildPhenotype() succeed after mutation
+    // (phenotype stays acyclic), and disabled connections never affect evaluation.
     {
         Genome genome = makeTestGenome();
         InnovationTracker tracker(200, 300);
@@ -3968,10 +3721,8 @@ void verifyAddNodeMutation()
     }
 
     // 23 & 33: different seeds can select different enabled connections to
-    // split (looped over a batch of seeds, at least two distinct choices
-    // must occur since makeTestGenome() has three eligible connections),
-    // and the pre-existing disabled connection is never selected or
-    // altered.
+    // split (makeTestGenome() has three eligible), and the pre-existing
+    // disabled connection is never selected or altered.
     {
         MutationConfig config;
         config.addNodeProbability = 1.0f;
@@ -4005,11 +3756,8 @@ void verifyAddNodeMutation()
         assert(sawMoreThanOneChoice && "different seeds must be capable of selecting different eligible connections");
     }
 
-    // 24: repeated calls on the same mutator advance its RNG state. A
-    // single pair of consecutive calls could coincidentally land on the
-    // same one of makeTestGenome()'s three eligible connections even with
-    // an advancing RNG, so this drives ten consecutive calls from one
-    // mutator and requires at least one of them to differ from the first.
+    // 24: repeated calls advance the mutator's RNG state -- ten consecutive
+    // calls (a single pair could coincidentally repeat) must show variation.
     {
         MutationConfig config;
         config.addNodeProbability = 1.0f;
@@ -4043,9 +3791,8 @@ void verifyAddNodeMutation()
         GenomeMutator mutatorA(1u);
         assert(mutatorA.mutateAddNode(genomeA, sharedTracker, config) && "first genome's split must succeed");
 
-        // NEW 6: genomeB's split reuses the historical record genomeA's
-        // split already committed, so it must not advance the tracker any
-        // further.
+        // genomeB's split reuses genomeA's committed historical record, so
+        // it must not advance the tracker further.
         const NodeId nodeCounterBeforeReuse = sharedTracker.getNextAvailableNodeId();
         const InnovationNumber innovationCounterBeforeReuse = sharedTracker.getNextAvailableInnovation();
 
@@ -4094,8 +3841,7 @@ void verifyAddNodeMutation()
 
         assert(throwsInvalidArgument([&]() { mutator.mutateAddNode(genome, tracker, config); }) &&
                "a conflicting existing non-Hidden node at the split's new node ID must be rejected");
-        // NEW 4: the throw is detected purely by inspection, before any
-        // allocation, so it must leave the tracker completely unchanged.
+        // Detected by inspection before any allocation -- tracker unchanged.
         assert(tracker.getNextAvailableNodeId() == 5 && tracker.getNextAvailableInnovation() == 10 &&
                "a structural conflict must never alter the tracker's state");
     }
@@ -4118,9 +3864,6 @@ void verifyAddNodeMutation()
 
         assert(throwsInvalidArgument([&]() { mutator.mutateAddNode(genome, tracker, config); }) &&
                "an existing connection with a conflicting innovation number at the split's endpoints must be rejected");
-        // NEW 4: same as above -- a structural conflict must never alter
-        // the tracker's state, whether detected via a recorded split or
-        // (as here) via the not-yet-recorded-split prediction path.
         assert(tracker.getNextAvailableNodeId() == 5 && tracker.getNextAvailableInnovation() == 10 &&
                "a structural conflict must never alter the tracker's state");
     }
@@ -4138,15 +3881,11 @@ void verifyAddNodeMutation()
         genome.addConnection(ConnectionGene{0, 1, 0.5f, true, 0}); // connA: already "split" below
         genome.addConnection(ConnectionGene{0, 2, 0.9f, true, 1}); // connB: fresh, another eligible candidate
 
-        // Pre-populate the genome with connA's split genes (as if this
-        // exact structural event already happened), while deliberately
-        // leaving connA itself enabled, so it remains an
-        // eligible-but-unsuitable candidate. Note this also makes the two
-        // new split connections themselves fresh, otherwise-splittable
-        // enabled connections -- so besides connB, either of them is an
-        // equally valid alternative candidate; the test only requires that
-        // *some* valid alternative gets split, and that connA and its
-        // existing split are left completely untouched.
+        // Pre-populate connA's split genes as if it already happened, while
+        // leaving connA itself enabled -- eligible but unsuitable. The two
+        // new split connections are themselves splittable, so any of connB
+        // or either of them is a valid alternative; the test only requires
+        // some valid alternative gets split and connA's split is untouched.
         const NodeSplitInnovation splitA = tracker.getNodeSplitInnovation(0, 0, 1);
         genome.addNode(NodeGene{splitA.newNodeId, NodeType::Hidden});
         genome.addConnection(ConnectionGene{0, splitA.newNodeId, 1.0f, true, splitA.incomingInnovation});
@@ -4172,10 +3911,8 @@ void verifyAddNodeMutation()
             const bool result = mutator.mutateAddNode(trial, trialTracker, config);
             assert(result && "some other eligible connection must always remain available even if connA is inspected first and rejected");
 
-            // NEW 3: regardless of whether connA (already split, unsuitable)
-            // was inspected and skipped first, the tracker must advance by
-            // exactly one node ID and exactly two innovations -- the cost
-            // of the one candidate actually selected, never more.
+            // Regardless of whether connA was inspected and skipped first,
+            // the tracker advances by exactly the one selected candidate's cost.
             assert(trialTracker.getNextAvailableNodeId() == nodeCounterBeforeCall + 1 &&
                    "an inspected-but-skipped candidate must never itself allocate a node ID");
             assert(trialTracker.getNextAvailableInnovation() == innovationCounterBeforeCall + 2 &&
@@ -4198,8 +3935,8 @@ void verifyAddNodeMutation()
         }
     }
 
-    // NEW 1 & NEW 2: a failed add-node mutation (every eligible candidate
-    // turns out unsuitable) must never advance either tracker counter.
+    // A failed add-node mutation (every eligible candidate unsuitable) must
+    // never advance either tracker counter.
     {
         InnovationTracker tracker(50, 60);
         Genome genome;
@@ -4207,13 +3944,9 @@ void verifyAddNodeMutation()
         genome.addNode(NodeGene{1, NodeType::Output});
         genome.addConnection(ConnectionGene{0, 1, 0.5f, true, 0});
 
-        // The sole enabled connection's split already fully exists in the
-        // genome, so it is unsuitable and no candidate can ever be
-        // selected. The two pre-populated split connections are themselves
-        // added disabled -- purely so they don't become additional
-        // eligible (enabled) candidates in their own right, which would
-        // let the mutation succeed via one of them instead of exercising
-        // the "nothing eligible works" path this test targets.
+        // The sole enabled connection's split already exists, so it's
+        // unsuitable. The two split connections are added disabled so they
+        // don't become alternative eligible candidates themselves.
         const NodeSplitInnovation split = tracker.getNodeSplitInnovation(0, 0, 1);
         genome.addNode(NodeGene{split.newNodeId, NodeType::Hidden});
         genome.addConnection(ConnectionGene{0, split.newNodeId, 1.0f, false, split.incomingInnovation});
@@ -4229,9 +3962,9 @@ void verifyAddNodeMutation()
         const bool result = mutator.mutateAddNode(genome, tracker, config);
         assert(!result && "the only eligible candidate is already fully split; nothing else to try");
         assert(tracker.getNextAvailableNodeId() == nodeCounterBeforeAttempt &&
-               "a failed add-node mutation must never advance the node ID counter"); // NEW 1
+               "a failed add-node mutation must never advance the node ID counter");
         assert(tracker.getNextAvailableInnovation() == innovationCounterBeforeAttempt &&
-               "a failed add-node mutation must never advance the innovation counter"); // NEW 2
+               "a failed add-node mutation must never advance the innovation counter");
     }
 
     // 34 & 35: invalid addNodeProbability configuration is rejected, and
@@ -4265,7 +3998,7 @@ void verifyAddNodeMutation()
                "rejected configuration must never touch the tracker");
     }
 
-    // 36: weight mutation behavior from Stage 9A remains unchanged.
+    // 36: mutateWeights() behavior remains unchanged.
     {
         Genome genome = makeTestGenome();
         const std::vector<ConnectionGene> before = genome.connections();
@@ -4276,11 +4009,11 @@ void verifyAddNodeMutation()
         for (std::size_t i = 0; i < before.size(); ++i)
         {
             assert(genome.connections()[i].getWeight() == before[i].getWeight() &&
-                   "Stage 9A's mutateWeights() behavior must remain unchanged");
+                   "mutateWeights() behavior must remain unchanged");
         }
     }
 
-    // 37: add-connection mutation behavior from Stage 9C remains unchanged.
+    // 37: mutateAddConnection() behavior remains unchanged.
     {
         Genome genome = makeTestGenome();
         InnovationTracker tracker(200, 300);
@@ -4289,15 +4022,11 @@ void verifyAddNodeMutation()
         GenomeMutator mutator(1u);
         const bool added = mutator.mutateAddConnection(genome, tracker, config);
         assert(!added &&
-               "Stage 9C's mutateAddConnection() behavior must remain unchanged: probability 0 still adds nothing");
+               "mutateAddConnection() behavior must remain unchanged: probability 0 still adds nothing");
     }
 
-    // 38 & 39: no crossover or population behavior exists to exercise -- no
-    // such API is called anywhere above or anywhere else in the codebase.
-
-    // 40: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function
-    // unchanged.
+    // 38 & 39: no crossover or population API is called anywhere here.
+    // 40: all previous verification suites still pass.
 
     TraceLog(LOG_INFO, "Add-node mutation verification: all deterministic checks passed");
 }
@@ -4305,14 +4034,9 @@ void verifyAddNodeMutation()
 namespace genome_crossover_verify
 {
 
-// 9 Input (0..8) + 1 Bias (9) + 2 Output (100 steering, 101 throttle), no
-// connections -- the minimal interface every phenotype-buildable genome in
-// this suite needs, matching ai::NeuralNetwork's fixed Input/Bias/Output
-// counts. Every test that expects crossover() to *succeed* builds on a copy
-// of this (both parents keep the same interface, so the child automatically
-// inherits it regardless of which connections are inherited); tests that
-// expect crossover() to throw don't need it, since the throw happens before
-// buildPhenotype() is ever reached.
+// 9 Input + 1 Bias + 2 Output, no connections -- the minimal interface
+// every phenotype-buildable genome in this suite needs; both parents share
+// it so the child inherits it regardless of which connections it gets.
 ai::neat::Genome makeInterfaceGenome()
 {
     using ai::neat::Genome;
@@ -4357,12 +4081,9 @@ ai::Observation makeObservation(int index, float value)
 
 } // namespace genome_crossover_verify
 
-// One-shot, deterministic sanity check of ai::neat::GenomeCrossover, covering
-// deterministic NEAT crossover end to end. Independent of
-// Car/Track/AI/keyboard/render timing. Runs once at startup. No
-// compatibility distance, species, population, selection, reproduction,
-// generation, or training logic is exercised here -- only crossover, per
-// Stage 10's scope.
+// Deterministic check of ai::neat::GenomeCrossover, end to end. No
+// compatibility distance/species/population/reproduction logic here --
+// only crossover.
 void verifyGenomeCrossover()
 {
     using namespace genome_crossover_verify;
@@ -4413,9 +4134,8 @@ void verifyGenomeCrossover()
                "a non-finite fitnessB must be rejected");
     }
 
-    // 4: empty (interface-only) compatible parents produce a valid,
-    // interface-appropriate child -- all mandatory nodes, no connections,
-    // still buildPhenotype()-able (a fully disconnected network is valid).
+    // 4: empty (interface-only) parents produce a valid child -- all
+    // mandatory nodes, no connections, still buildPhenotype()-able.
     {
         Genome a = makeInterfaceGenome();
         Genome b = makeInterfaceGenome();
@@ -4501,10 +4221,9 @@ void verifyGenomeCrossover()
                "a matching innovation with conflicting endpoints between parents must be rejected");
     }
 
-    // 9: a matching gene enabled in both parents remains enabled --
-    // deliberately using probability 1.0 (which would force *disabled* if
-    // the both-enabled shortcut were broken and it fell through to the
-    // probability branch).
+    // 9: a matching gene enabled in both parents stays enabled -- uses
+    // probability 1.0, which would force disabled if the both-enabled
+    // shortcut were broken.
     {
         Genome parentA = makeInterfaceGenome();
         parentA.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
@@ -4633,10 +4352,8 @@ void verifyGenomeCrossover()
         assert(sawA && sawB && "equal-fitness non-matching genes from both parents must each be inheritable");
     }
 
-    // 18: an equal-fitness candidate that would create a duplicate directed
-    // connection is skipped rather than causing an invalid child -- two
-    // non-matching genes from different parents target the exact same
-    // (source, target) pair.
+    // 18: an equal-fitness candidate that would duplicate a directed
+    // connection is skipped rather than producing an invalid child.
     {
         Genome parentA = makeInterfaceGenome();
         parentA.addNode(NodeGene{50, NodeType::Hidden});
@@ -5031,24 +4748,11 @@ void verifyGenomeCrossover()
         assert(sawVariation && "repeated calls from the same GenomeCrossover instance must advance its RNG state");
     }
 
-    // 39: no InnovationTracker state is involved -- GenomeCrossover.h/.cpp
-    // never include or reference InnovationTracker anywhere, and
-    // crossover()'s signature takes no tracker parameter, so no node ID or
-    // innovation number handed to it can ever be consulted or advanced by
-    // this stage.
-
-    // 40: no mutation is performed during crossover -- reinforced by 35
-    // above (both parents provably unchanged); GenomeMutator is never
-    // referenced by GenomeCrossover.h/.cpp.
-
-    // 41: no population/species logic exists -- crossover() takes exactly
-    // two parent Genomes and two fitness floats, nothing resembling a
-    // population, species, or selection concept exists anywhere in this
-    // stage's files.
-
-    // 42: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function
-    // unchanged.
+    // 39: no InnovationTracker state involved -- crossover()'s signature
+    // takes no tracker parameter.
+    // 40: no mutation is performed (reinforced by 35 -- both parents unchanged).
+    // 41: no population/species logic -- crossover() takes only two Genomes and two fitness floats.
+    // 42: all previous verification suites still pass.
 
     TraceLog(LOG_INFO, "Genome crossover verification: all deterministic checks passed");
 }
@@ -5070,10 +4774,8 @@ bool throwsInvalidArgument(Callable&& callable)
     return false;
 }
 
-// A genome with nodeCount nodes (IDs 0..nodeCount-1, alternating
-// Input/Output -- NodeType is irrelevant to compatibility distance, this
-// just keeps every fixture trivially constructible) and no connections.
-// Callers add whatever connections they need.
+// nodeCount nodes (IDs 0..nodeCount-1, alternating Input/Output -- type is
+// irrelevant to compatibility distance), no connections.
 ai::neat::Genome makeNodeGenome(int nodeCount)
 {
     using ai::neat::Genome;
@@ -5088,13 +4790,9 @@ ai::neat::Genome makeNodeGenome(int nodeCount)
     return genome;
 }
 
-// A genome with connectionCount connections 0->1, 1->2, ..., innovation
-// numbers 0..connectionCount-1 in order, weight 0, all enabled. Two chain
-// genomes built with the same node-index scheme necessarily agree on
-// source/target/weight for every innovation number they both contain
-// (both start counting from node 0), which is what makes them useful for
-// the normalization tests below -- their overlapping prefix is always a
-// clean set of matching genes with zero weight difference.
+// connectionCount connections 0->1, 1->2, ... with innovations 0..N-1,
+// weight 0. Two chain genomes always agree on any overlapping prefix
+// (same node-index scheme), giving clean matching genes for normalization tests.
 ai::neat::Genome makeChainGenome(int connectionCount)
 {
     using ai::neat::ConnectionGene;
@@ -5116,12 +4814,9 @@ ai::neat::Genome makeChainGenome(int connectionCount)
 
 } // namespace compatibility_verify
 
-// One-shot, deterministic sanity check of ai::neat::compatibilityDistance()
-// / compatibilityBreakdown(), covering the NEAT compatibility-distance
-// calculation end to end. Independent of Car/Track/AI/keyboard/render
-// timing. Runs once at startup. No Species, speciation, population,
-// selection, reproduction, generation, or training logic is exercised here
-// -- only distance calculation, per Stage 11's scope.
+// Deterministic check of ai::neat::compatibilityDistance()/
+// compatibilityBreakdown(), end to end. No species/population/reproduction
+// logic here -- only distance calculation.
 void verifyCompatibilityDistance()
 {
     using namespace compatibility_verify;
@@ -5261,9 +4956,7 @@ void verifyCompatibilityDistance()
                "W must equal the mean of the individual absolute weight differences");
     }
 
-    // 12: matching genes align by innovation number, independent of vector
-    // order -- and independent of which parent's weight happens to be
-    // larger, unlike a (broken) index-based pairing would produce.
+    // 12: matching genes align by innovation number, independent of vector order.
     {
         Genome a = makeNodeGenome(4);
         a.addConnection(ConnectionGene{2, 3, 0.9f, true, 5}); // innovation 5 stored first
@@ -5276,11 +4969,8 @@ void verifyCompatibilityDistance()
         CompatibilityConfig config;
         const CompatibilityBreakdown result = compatibilityBreakdown(a, b, config);
         assert(result.matching == 2 && "both connections must be matched, one per innovation number");
-        // Correct (innovation-aligned) pairing: |0.1-0.15|=0.05, |0.9-0.5|=0.4 -> mean 0.225.
-        // A broken index-aligned pairing would instead pair A[0](innov5,0.9)
-        // with B[0](innov2,0.15) and A[1](innov2,0.1) with B[1](innov5,0.5),
-        // giving |0.9-0.15|=0.75 and |0.1-0.5|=0.4 -> mean 0.575 -- a
-        // clearly different, wrong result this assertion would catch.
+        // Innovation-aligned: |0.1-0.15|=0.05, |0.9-0.5|=0.4 -> mean 0.225.
+        // A broken index-aligned pairing would instead give mean 0.575.
         assert(std::fabs(result.averageWeightDifference - 0.225f) < kEps &&
                "matching must align by innovation number, not vector position");
     }
@@ -5328,10 +5018,7 @@ void verifyCompatibilityDistance()
                "genome B with duplicate connection innovation numbers must be rejected");
     }
 
-    // 16 & 17: an A-only innovation at/below B's max is disjoint; an A-only
-    // innovation above B's max is excess. Genome B's own single non-matching
-    // gene (innovation 15) is, as a side effect, also disjoint relative to
-    // A's max (20) -- accounted for in the expected counts below.
+    // 16 & 17: an A-only innovation at/below B's max is disjoint; above it, excess.
     {
         Genome a = makeNodeGenome(12);
         a.addConnection(ConnectionGene{0, 1, 0.1f, true, 1});  // matching
@@ -5440,11 +5127,9 @@ void verifyCompatibilityDistance()
         assert(std::fabs(result.distance - 0.6f) < kEps && "distance must divide by N=25 here"); // 15/25 = 0.6
     }
 
-    // 25, 26, 27 & 28: custom coefficients affect the result correctly, and
-    // setting any one coefficient to zero removes exactly its own
-    // contribution -- using one shared fixture with known E=1, D=2, W=0.25
-    // and a small genome pair (N=1), so every term's contribution is
-    // directly visible in the total.
+    // 25, 26, 27 & 28: custom coefficients affect the result, and setting
+    // any one to zero removes exactly its own contribution -- one fixture
+    // with known E=1, D=2, W=0.25, N=1.
     {
         Genome a = makeNodeGenome(12);
         a.addConnection(ConnectionGene{0, 1, 0.2f, true, 0}); // matching, weight diff 0.5
@@ -5500,9 +5185,8 @@ void verifyCompatibilityDistance()
                "with no matching genes at all, W must be exactly 0");
     }
 
-    // 30: one empty genome vs. a non-empty genome classifies every gene of
-    // the non-empty genome as excess (the empty genome's "max innovation"
-    // is below every non-negative innovation number).
+    // 30: an empty genome vs. a non-empty one classifies every gene of the
+    // non-empty genome as excess.
     {
         Genome a;
         Genome b = makeNodeGenome(4);
@@ -5578,10 +5262,8 @@ void verifyCompatibilityDistance()
         assert(std::fabs(canonical - shuffled) < kEps && "insertion order must not affect the computed distance");
     }
 
-    // 34: node-only differences do not affect the connection compatibility
-    // distance -- extra, unreferenced Hidden nodes differ between the two
-    // comparisons below, but the connections are identical, so the
-    // distance must be identical too.
+    // 34: node-only differences (extra unreferenced Hidden nodes) don't
+    // affect the connection-based distance.
     {
         Genome baselineA = makeNodeGenome(2);
         baselineA.addConnection(ConnectionGene{0, 1, 0.4f, true, 0});
@@ -5656,13 +5338,8 @@ void verifyCompatibilityDistance()
         }
     }
 
-    // 37: no InnovationTracker state is involved -- CompatibilityDistance.h/
-    // .cpp never include or reference InnovationTracker anywhere, and
-    // compatibilityDistance()'s signature takes no tracker parameter.
-
-    // 38: no RNG state is involved -- CompatibilityDistance.cpp contains no
-    // std::mt19937 or any other random generator; the calculation is a
-    // pure function of its three arguments.
+    // 37: no InnovationTracker state involved -- compatibilityDistance()'s signature takes no tracker.
+    // 38: no RNG state involved -- a pure function of its three arguments.
 
     // 39: repeated calls with identical inputs produce an identical result.
     {
@@ -5679,9 +5356,7 @@ void verifyCompatibilityDistance()
         assert(first == second && second == third && "repeated calls with identical inputs must produce identical results");
     }
 
-    // 40: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function
-    // unchanged.
+    // 40: all previous verification suites still pass.
 
     TraceLog(LOG_INFO, "Compatibility distance verification: all deterministic checks passed");
 }
@@ -5689,12 +5364,10 @@ void verifyCompatibilityDistance()
 namespace speciation_verify
 {
 
-// A 2-node genome with a single connection 0->1, innovation 0, and the
-// given weight. Two genomes built this way always share innovation 0 as a
-// matching gene with no disjoint/excess genes at all, so with the default
-// CompatibilityConfig (c3 = 0.4, small-genome N = 1) their compatibility
-// distance is exactly 0.4 * |weightA - weightB| -- simple, predictable
-// arithmetic for driving Speciator's threshold behavior in these tests.
+// A 2-node genome with connection 0->1 (innovation 0, given weight). Two
+// such genomes always match with no disjoint/excess, so distance =
+// 0.4 * |weightA - weightB| with the default config -- predictable
+// arithmetic for driving Speciator's threshold.
 ai::neat::Genome makeSimpleGenome(float weight)
 {
     using namespace compatibility_verify;
@@ -5708,23 +5381,13 @@ ai::neat::Genome makeSimpleGenome(float weight)
 
 } // namespace speciation_verify
 
-// One-shot, deterministic sanity check of ai::neat::Speciator /
-// ai::neat::Species, covering deterministic species-membership assignment
-// end to end. Independent of Car/Track/AI/keyboard/render timing. Runs
-// once at startup. No Population, Individual/Agent wrapper, fitness
-// storage, adjusted fitness, fitness sharing, champion tracking, parent
-// selection, reproduction, elitism, mutation orchestration, or crossover
-// orchestration is exercised here -- only species assignment, per Stage
-// 12's original scope. As of Stage 17, Speciator's persistent
-// cross-generation identity/representative-reselection/fitness-history/
-// stagnation behavior is dedicated its own suite,
-// verifyPersistentSpeciesAndStagnation() below; the single test in this
-// function that directly asserted the OLD (pre-Stage-17, non-persistent)
-// cross-call behavior -- originally items 28 & 29 -- has been updated
-// in place to assert the new, intentional persistent behavior instead
-// (search "28 & 29" below). Every other test here only ever calls
-// speciate() once per Speciator instance, so persistence never changes
-// its outcome, and remains unmodified.
+// Deterministic check of ai::neat::Speciator/Species species-membership
+// assignment, end to end. No Population/fitness/reproduction/mutation
+// involved -- only species assignment. Persistent cross-generation
+// identity/stagnation behavior has its own suite,
+// verifyPersistentSpeciesAndStagnation() below (items 28 & 29 here assert
+// the persistent-identity behavior specifically; every other test calls
+// speciate() only once per Speciator, so persistence doesn't affect them).
 void verifySpeciation()
 {
     using namespace compatibility_verify;
@@ -5907,11 +5570,9 @@ void verifySpeciation()
     // later species is a strictly closer match; nearest-species search is
     // never used.
     {
-        // rep0 = 0.0, rep1 = 10.0 (dist to rep0 = 4.0 > 3.0 -> founds species1).
-        // g2 = 7.0: dist to rep0 = 2.8 <= 3.0 (qualifies for species0);
-        //           dist to rep1 = 1.2 <= 3.0 (qualifies for species1, and
-        //           is the objectively closer match). First-match must
-        //           still place it in species0.
+        // rep0=0.0, rep1=10.0 (founds species1). g2=7.0 qualifies for BOTH
+        // (dist to rep0=2.8, to rep1=1.2, the closer match) -- first-match
+        // must still place it in species0.
         std::vector<Genome> genomes = {makeSimpleGenome(0.0f), makeSimpleGenome(10.0f), makeSimpleGenome(7.0f)};
         Speciator speciator;
         CompatibilityConfig compatConfig;
@@ -5939,9 +5600,8 @@ void verifySpeciation()
         SpeciationConfig speciationConfig;
         speciationConfig.compatibilityThreshold = 1.5f;
 
-        // Order [A, B, C]: species0 founded by A. B joins species0
-        // (dist(A,B)=1.2). C compared only against species0's rep, still A
-        // (dist(A,C)=2.2 > 1.5) -> founds species1.
+        // [A,B,C]: species0 founded by A; B joins (dist(A,B)=1.2); C
+        // compared against rep A (dist=2.2 > 1.5) -> founds species1.
         {
             std::vector<Genome> genomes = {makeSimpleGenome(weightA), makeSimpleGenome(weightB), makeSimpleGenome(weightC)};
             Speciator speciator;
@@ -5950,17 +5610,15 @@ void verifySpeciation()
                    "order [A,B,C] must split C into its own species");
         }
 
-        // Order [B, A, C]: species0 founded by B. A joins species0
-        // (dist(B,A)=1.2, symmetric). C compared against species0's rep,
-        // now B (dist(B,C)=1.0 <= 1.5) -> joins species0 too.
+        // [B,A,C]: species0 founded by B; A joins (symmetric); C compared
+        // against rep B (dist=1.0 <= 1.5) -> also joins.
         {
             std::vector<Genome> genomes = {makeSimpleGenome(weightB), makeSimpleGenome(weightA), makeSimpleGenome(weightC)};
             Speciator speciator;
             const std::vector<Species> species = speciator.speciate(genomes, compatConfig, speciationConfig);
             assert(species.size() == 1 && species[0].size() == 3 &&
-                   "order [B,A,C] must group all three genomes into a single species -- a different result from "
-                   "[A,B,C] for the exact same underlying genomes, purely because a different genome founded the "
-                   "first species and fixed its representative");
+                   "order [B,A,C] must group all three into one species -- a different result from [A,B,C] for the "
+                   "same genomes, purely because a different genome founded the first species");
         }
     }
 
@@ -5984,10 +5642,8 @@ void verifySpeciation()
         }
     }
 
-    // 20: no RNG state exists anywhere in Speciator or Species -- neither
-    // class declares a std::mt19937 (or any other generator) member, and
-    // Speciator's constructor takes no seed. Determinism above (19) is a
-    // direct consequence, not a coincidence.
+    // 20: no RNG state anywhere in Speciator/Species -- Speciator's
+    // constructor takes no seed; determinism above (19) follows directly.
 
     // 21: input genomes are never modified by speciate().
     {
@@ -6029,8 +5685,7 @@ void verifySpeciation()
     }
 
     // 22 & 23: the representative stays fixed at the founding genome's copy
-    // -- a later, compatible member joining the species never overwrites
-    // or blends into it.
+    // -- a later compatible member never overwrites or blends into it.
     {
         std::vector<Genome> genomes = {makeSimpleGenome(0.0f), makeSimpleGenome(0.1f)};
         Speciator speciator;
@@ -6094,15 +5749,10 @@ void verifySpeciation()
                "a very large threshold must group all genomes into a single species");
     }
 
-    // 28 & 29 (updated for Stage 17 persistence -- see this function's own
-    // doc comment): SpeciesIds keep increasing monotonically across
-    // separate speciate() calls on the same Speciator, and an extinct id is
-    // never reused -- but, as of Stage 17, a genome that remains compatible
-    // with an existing persistent species' representative now rejoins that
-    // species' SAME SpeciesId, rather than unconditionally founding a new
-    // one every call (that was the pre-Stage-17 behavior this test used to
-    // assert; see verifyPersistentSpeciesAndStagnation() for the dedicated
-    // persistence suite).
+    // 28 & 29: SpeciesIds increase monotonically across speciate() calls on
+    // the same Speciator, extinct ids are never reused, and a genome
+    // compatible with a persistent species' representative rejoins that
+    // SAME SpeciesId rather than founding a new one.
     {
         Speciator speciator;
         CompatibilityConfig compatConfig;
@@ -6113,18 +5763,14 @@ void verifySpeciation()
         assert(firstSpecies.size() == 3 && firstSpecies[0].getId() == 0 && firstSpecies[1].getId() == 1 &&
                firstSpecies[2].getId() == 2 && "the first call must allocate SpeciesIds 0, 1, 2");
 
-        // weight 0.0 is still compatible with species 0's representative
-        // (still 0.0) and rejoins SpeciesId 0; weight 30.0 is compatible
-        // with none of the three old representatives and founds a new
-        // species with the next monotonically increasing id (3). Species 1
-        // and 2 go extinct this pass (nothing in secondBatch matched
-        // them) -- their ids are never reused.
+        // weight 0.0 rejoins SpeciesId 0 (still compatible with its rep);
+        // weight 30.0 matches none of the old reps, founds id 3. Species 1
+        // and 2 go extinct this pass -- their ids are never reused.
         std::vector<Genome> secondBatch = {makeSimpleGenome(0.0f), makeSimpleGenome(30.0f)};
         const std::vector<Species> secondSpecies = speciator.speciate(secondBatch, compatConfig, speciationConfig);
         assert(secondSpecies.size() == 2 && secondSpecies[0].getId() == 0 && secondSpecies[1].getId() == 3 &&
                "a genome compatible with a persistent species must rejoin its existing SpeciesId, while a "
-               "genuinely new species still receives the next monotonically increasing id -- extinct ids 1 and 2 "
-               "are never reused"); // 28 & 29
+               "genuinely new species still receives the next monotonically increasing id"); // 28 & 29
     }
 
     // 30: an empty call sandwiched between non-empty calls does not
@@ -6184,9 +5830,8 @@ void verifySpeciation()
     }
 
     // 34: duplicate connection innovation numbers inside a genome
-    // propagate as a rejection -- every genome is now validated
-    // unconditionally (see the correction block below), so this is caught
-    // whether or not the genome is ever compared against an existing
+    // propagate as a rejection -- every genome is validated
+    // unconditionally, whether or not it's ever compared against a
     // representative.
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{1, NodeType::Input},
@@ -6203,19 +5848,13 @@ void verifySpeciation()
                "a genome with duplicate connection innovation numbers must cause speciate() to throw once compared");
     }
 
-    // Stage 12 correction: every genome is now validated -- via
-    // genome.validate() plus a self compatibilityDistance() check that
-    // reuses the existing innovation-uniqueness logic -- before it can
-    // either join an existing species or found a new one. Previously, a
-    // genome that never got compared against an existing representative
-    // (specifically: the very first genome processed, when no species yet
-    // exist to compare it against) could slip through completely
-    // unvalidated. The following checks prove the fix.
+    // Every genome is validated (genome.validate() plus a self
+    // compatibilityDistance() innovation-uniqueness check) before it can
+    // join or found a species -- including the very first genome
+    // processed, which has no existing representative to compare against.
 
-    // Correction 1: a single (lone) structurally invalid genome is
-    // rejected, even though -- before the fix -- it would simply have
-    // founded species 0 with no comparison, and therefore no validation,
-    // ever taking place.
+    // A single (lone) structurally invalid genome is rejected even as the
+    // founding genome, with no comparison to trigger validation otherwise.
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}};
         std::vector<ConnectionGene> connections = {ConnectionGene{0, 99, 0.1f, true, 0}}; // target node 99 does not exist
@@ -6230,8 +5869,7 @@ void verifySpeciation()
                "lone founding genome"); // correction 1
     }
 
-    // Correction 2: a single (lone) genome with duplicate connection
-    // innovation numbers is rejected the same way.
+    // A single (lone) genome with duplicate connection innovation numbers is rejected the same way.
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}, NodeGene{1, NodeType::Input},
                                         NodeGene{2, NodeType::Output}, NodeGene{3, NodeType::Output}};
@@ -6248,9 +5886,8 @@ void verifySpeciation()
                "founding genome"); // correction 2
     }
 
-    // Correction 3: a rejected invalid first genome must not consume a
-    // SpeciesId -- a subsequent, valid call on the same Speciator must
-    // still start at SpeciesId 0.
+    // A rejected invalid first genome must not consume a SpeciesId -- a
+    // subsequent valid call must still start at SpeciesId 0.
     {
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}};
         std::vector<ConnectionGene> connections = {ConnectionGene{0, 99, 0.1f, true, 0}};
@@ -6273,11 +5910,8 @@ void verifySpeciation()
                "a rejected invalid first genome must not have consumed a SpeciesId"); // correction 3
     }
 
-    // Correction 4: an invalid *later* genome (one that would be compared
-    // against an already-existing species) still causes speciate() to
-    // throw -- the exception aborts the whole call before it returns, so
-    // there is no partially-built species vector for a caller to ever
-    // observe; nothing is left dangling or half-updated.
+    // An invalid LATER genome still causes speciate() to throw -- the
+    // exception aborts before returning, so no partial species vector is ever observed.
     {
         Genome valid = makeSimpleGenome(0.0f);
         std::vector<NodeGene> nodes = {NodeGene{0, NodeType::Input}};
@@ -6292,8 +5926,7 @@ void verifySpeciation()
                "an invalid later genome must still cause speciate() to throw, with no partial result returned"); // correction 4
     }
 
-    // Correction 5: a valid lone genome still creates exactly one species,
-    // normally, after the fix.
+    // A valid lone genome still creates exactly one species, normally.
     {
         std::vector<Genome> genomes = {makeSimpleGenome(0.5f)};
         Speciator speciator;
@@ -6304,46 +5937,21 @@ void verifySpeciation()
                "a valid lone genome must still create exactly one species"); // correction 5
     }
 
-    // Correction 6: all previous Stage 12 verification (items 1-42 above)
-    // still passes -- every earlier assertion in this same function ran
-    // unmodified before reaching this point.
-
-    // 36: Species holds no fitness data of any kind -- its only fields are
-    // id, representative, and memberIndices (see Species.h); there is no
-    // fitness, adjustedFitness, championIndex, or stagnation counter to
-    // verify, by construction.
-
-    // 37: no genome is ever mutated by speciate() -- reinforced by 21
-    // (input genomes unchanged) and 8/22/23 (representatives are
-    // independent, stable copies) above.
-
-    // 38: no crossover occurs -- GenomeCrossover is never included or
-    // referenced anywhere in Species.h/.cpp or Speciator.h/.cpp.
-
-    // 39: no mutation occurs -- GenomeMutator is never included or
-    // referenced anywhere in Species.h/.cpp or Speciator.h/.cpp.
-
-    // 40: no population/reproduction behavior occurs -- no Population,
-    // Individual/Agent, selection, or reproduction concept exists anywhere
-    // in this stage's files; Speciator only assigns membership.
-
-    // 41: the normal driving loop is unchanged -- Speciator/Species are
-    // exercised only from this verify function, never from main()'s
-    // simulation loop or createDemonstrationGenome().
-
-    // 42: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function
-    // unchanged.
+    // All earlier assertions in this function ran unmodified before reaching this point.
+    // 36: Species holds no fitness data -- only id, representative, memberIndices.
+    // 37: no genome is ever mutated by speciate() (reinforced by 21, 8/22/23 above).
+    // 38: no crossover occurs -- GenomeCrossover is never referenced by Species/Speciator.
+    // 39: no mutation occurs -- GenomeMutator is never referenced by Species/Speciator.
+    // 40: no population/reproduction behavior -- Speciator only assigns membership.
+    // 41: Speciator/Species are exercised only from this function, never from main()'s loop.
+    // 42: all previous verification suites still pass.
 
     TraceLog(LOG_INFO, "Speciation verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of ai::AIController, independent of
-// keyboard/render timing. Runs once at startup. Exercises the full
-// Car -> Observation -> NeuralNetwork -> AIController -> CarInput loop using
-// small hand-built genomes/networks, not the demonstration genome (so this
-// verification stays independent of createDemonstrationGenome()'s specific
-// weights).
+// Deterministic check of the full Car -> Observation -> NeuralNetwork ->
+// AIController -> CarInput loop, using small hand-built genomes (not
+// createDemonstrationGenome(), so this stays independent of its weights).
 void verifyAIController(const simulation::Track& track)
 {
     using ai::AIController;
@@ -6353,10 +5961,8 @@ void verifyAIController(const simulation::Track& track)
     using ai::neat::NodeType;
     constexpr float kEps = 1e-4f;
 
-    // Genome with 9 Input + 1 Bias + 2 Output nodes (IDs matching
-    // createDemonstrationGenome()'s layout) and no connections, so every
-    // network output is deterministically 0 (tanh of an empty sum) unless a
-    // test adds its own connections on top.
+    // 9 Input + 1 Bias + 2 Output, no connections -- every output is
+    // deterministically 0 unless a test adds its own connections.
     auto makeDisconnectedGenome = []()
     {
         Genome genome;
@@ -6381,11 +5987,9 @@ void verifyAIController(const simulation::Track& track)
                "a disconnected network must map to zero steering and neutral (0.5) throttle");
     }
 
-    // 2 & 3: output 0 drives steering, output 1 drives throttle. Bias (always
-    // exactly 1.0, independent of any sensor/car geometry) connects only to
-    // the steering output, so this test's outcome does not depend on the
-    // car's spawn-time sensor readings: a positive weight there must move
-    // steering but leave throttle at its neutral 0.5.
+    // 2 & 3: output 0 drives steering, output 1 drives throttle. Bias
+    // (always 1.0) connects only to steering, so a positive weight there
+    // must move steering but leave throttle at its neutral 0.5.
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{9, 100, 1.0f, true, 0});
@@ -6399,9 +6003,7 @@ void verifyAIController(const simulation::Track& track)
         assert(std::fabs(input.throttle - 0.5f) < kEps && "output index 1 (throttle) must be unaffected");
     }
 
-    // 4, 5 & 6: raw throttle 0 maps to 0.5; negative raw throttle maps below
-    // 0.5; positive raw throttle maps above 0.5. Bias -> throttle with a
-    // known weight makes the raw throttle output a known, non-zero value.
+    // 4, 5 & 6: raw throttle 0 maps to 0.5; negative maps below 0.5; positive maps above 0.5.
     {
         Genome zeroGenome = makeDisconnectedGenome(); // no Bias->throttle connection: raw throttle stays 0
         AIController zeroController(ai::neat::buildPhenotype(zeroGenome));
@@ -6428,9 +6030,8 @@ void verifyAIController(const simulation::Track& track)
         assert(positiveInput.throttle > 0.5f + kEps && "positive raw throttle must map above 0.5");
     }
 
-    // 7 & 8: mapped steering always stays within [-1, 1] and mapped throttle
-    // always stays within [0, 1], even when driven by saturating weights and
-    // an actively steering/accelerating car (varied Observation values).
+    // 7 & 8: mapped steering stays within [-1,1], throttle within [0,1],
+    // even under saturating weights and an actively driving car.
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{0, 100, 10.0f, true, 0});
@@ -6452,10 +6053,8 @@ void verifyAIController(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // 9: the Observation the controller evaluates against is actually built
-    // from the provided Car -- a network wired straight from sensor 2
-    // (center, ID 2) to steering must react to that specific Car's own
-    // center-sensor reading.
+    // 9: the Observation is actually built from the provided Car -- a
+    // network wired from sensor 2 (center) to steering must react to it.
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{2, 100, 1.0f, true, 0});
@@ -6507,9 +6106,7 @@ void verifyAIController(const simulation::Track& track)
         assert(car.getHeading() == headingBefore && "AIController::update must not change the Car's heading");
     }
 
-    // 13: a disabled Genome connection remains behaviorally inactive after
-    // phenotype construction -- disabling the same steering connection used
-    // in test 2 must leave steering at its neutral 0.
+    // 13: a disabled connection stays inactive after phenotype construction.
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{0, 100, 1.0f, false, 0});
@@ -6565,12 +6162,9 @@ Vector2 positionAtLapPosition(const simulation::Track& track, float lapPos)
 
 } // namespace track_progress_verify
 
-// One-shot, deterministic sanity check of simulation::TrackProgress,
-// independent of keyboard/render timing. Runs once at startup. TrackProgress
-// never controls the Car -- only Car::reset() (to place the car at precise,
-// hand-computed positions) and the Track's own sampled centerline/arc-length
-// data are used here, plus one short real-driving check for direction
-// sanity.
+// Deterministic check of simulation::TrackProgress. Mostly drives Car::reset()
+// to precise hand-computed positions rather than real driving physics,
+// plus one short real-driving check for direction sanity.
 void verifyTrackProgress(const simulation::Track& track)
 {
     using track_progress_verify::positionAtLapPosition;
@@ -6592,9 +6186,8 @@ void verifyTrackProgress(const simulation::Track& track)
         assert(std::fabs(progress.getLapPosition() - expectedLapPosition) < kEps &&
                "reset must compute lap position from the car's current spawn position");
 
-        // Expected checkpoint after reset is the first checkpoint strictly
-        // ahead of the car, in order -- not unconditionally 0, since the
-        // car may spawn anywhere around the fixed checkpoint ring.
+        // Expected checkpoint is the first strictly ahead of the car, not
+        // unconditionally 0 -- the car may spawn anywhere on the ring.
         const int expectedCheckpointIndex =
             (static_cast<int>(std::floor(expectedLapPosition * simulation::TrackProgress::kCheckpointCount)) + 1) %
             simulation::TrackProgress::kCheckpointCount;
@@ -6621,9 +6214,8 @@ void verifyTrackProgress(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // 3: progress increases in the intended forward direction -- driven
-    // with real Car physics (throttle only, no steering) from the actual
-    // spawn pose, not with synthetic positions.
+    // 3: progress increases forward -- driven with real Car physics
+    // (throttle only) from spawn, not synthetic positions.
     {
         simulation::TrackProgress progress(track);
         car.reset(kSpawnPosition, kSpawnHeading);
@@ -6698,14 +6290,11 @@ void verifyTrackProgress(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // 7, 8 & review-requirement 2/3/6: checkpoints are ordered-traversal
-    // state computed independently from raw position deltas (never from
-    // getBestProgress()) -- they advance strictly in order, several can be
-    // credited within one valid forward update, and a lap is counted
-    // exactly once a full ordered cycle of kCheckpointCount checkpoints has
-    // been awarded since reset. Reset at a position that does NOT coincide
-    // with a checkpoint boundary (0.03), so completing one lap requires the
-    // full kCheckpointCount checkpoints, not one fewer.
+    // 7 & 8: checkpoints are ordered-traversal state from raw position
+    // deltas (never getBestProgress()) -- advance strictly in order,
+    // several can be credited per update, and a lap needs the full
+    // kCheckpointCount. Reset off a checkpoint boundary (0.03) so
+    // completing a lap needs the full count, not one fewer.
     {
         simulation::TrackProgress progress(track);
         car.reset(positionAtLapPosition(track, 0.03f), kSpawnHeading);
@@ -6713,10 +6302,9 @@ void verifyTrackProgress(const simulation::Track& track)
         assert(progress.getExpectedCheckpoint() == 1 && progress.getTotalCheckpointsPassed() == 0 &&
                "reset at lap position 0.03 must expect checkpoint 1 next");
 
-        // Six forward steps of 0.15 laps each starting from 0.03, each
-        // spanning one or more checkpoint boundaries -- exact expected
-        // (total passed, next expected) after each step, worked out from
-        // the fixed checkpoint positions i/16.
+        // Six forward steps of ~0.15 laps each, each spanning one or more
+        // checkpoint boundaries -- expected (total passed, next expected)
+        // worked out from the fixed checkpoint positions i/16.
         struct Step
         {
             float targetLapPosition;
@@ -6739,39 +6327,24 @@ void verifyTrackProgress(const simulation::Track& track)
                    progress.getExpectedCheckpoint() == step.expectedNextCheckpoint &&
                    "checkpoints must advance strictly in order by exactly the boundaries actually crossed");
         }
-        assert(progress.getLapCount() == 0 &&
-               "14 of 16 checkpoints passed must not yet complete a lap (review req. 6, negative case)");
+        assert(progress.getLapCount() == 0 && "14 of 16 checkpoints passed must not yet complete a lap");
 
-        // Forward seam crossing 0.93 -> 0.08 (delta corrects to +0.15) is
-        // exactly the update that awards the final two checkpoints (15 and
-        // the wrap to 0) -- the lap must complete here, in the same update
-        // that both validates the last checkpoints AND crosses the seam
-        // (review req. 5: seam crossing alone is not what completes it).
+        // Forward seam crossing 0.93 -> 0.08 awards the final two
+        // checkpoints and completes the lap in the same update -- seam
+        // crossing alone is not what completes it.
         car.reset(positionAtLapPosition(track, 0.08f), kSpawnHeading);
         progress.update(car);
         assert(progress.getTotalCheckpointsPassed() == 17 && progress.getExpectedCheckpoint() == 2 &&
                progress.getLapCount() == 1 &&
                "a full ordered traversal of all checkpoints must complete the lap exactly once, at the seam crossing that finishes it");
 
-        // Review requirement 1: jumping to a later angular position without
-        // crossing the intervening checkpoints in order (an implausible,
-        // teleport-sized delta) must not award anything, even though the
-        // raw angle itself does move forward.
-        //
-        // Stage 19 note: the jump target (0.65, not the Stage 18 test
-        // track's 0.43) was chosen -- and verified offline against the
-        // extreme track's actual geometry -- specifically so that
-        // TrackProgress's local search window (anchored at 0.08's segment)
-        // clearly cannot reach it and must fall back to global recovery
-        // (offline-verified local-window distance ~442px, far past
-        // kLocalProjectionRecoveryDistance's 250px). 0.08 -> 0.43 (the
-        // Stage 18 value) no longer reliably exercises recovery on this
-        // track's much more convoluted route: that specific pair happens to
-        // land within ~107px of the local window's edge, which is close
-        // enough to a legitimate off-center in-corridor reading that it is
-        // not a safe recovery-trigger test case here -- see
-        // TrackProgress.h's kLocalProjectionRecoveryDistance comment for
-        // why 250px is still the right general threshold regardless.
+        // Jumping to a later angular position without crossing the
+        // intervening checkpoints in order (an implausible, teleport-sized
+        // delta) must not award anything, even though the raw angle moves
+        // forward. Jump target 0.65 is chosen (verified offline against this
+        // track's geometry) so the local search window from 0.08 clearly
+        // can't reach it (~442px, past kLocalProjectionRecoveryDistance's
+        // 250px) and must fall back to global recovery.
         const int totalBeforeJump = progress.getTotalCheckpointsPassed();
         const int expectedBeforeJump = progress.getExpectedCheckpoint();
         const int lapsBeforeJump = progress.getLapCount();
@@ -6793,9 +6366,8 @@ void verifyTrackProgress(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // Review requirement 7: reset restores expected checkpoint, checkpoint
-    // count and lap count correctly for whatever position it is given, not
-    // just back to a fixed baseline.
+    // reset() restores expected checkpoint/counts correctly for whatever
+    // position it's given, not just a fixed baseline.
     {
         simulation::TrackProgress progress(track);
         car.reset(positionAtLapPosition(track, 0.55f), kSpawnHeading);
@@ -6871,10 +6443,8 @@ void verifyTrackProgress(const simulation::Track& track)
                progress.getTotalCheckpointsPassed() == 0 && "reset must clear all previously accumulated state");
     }
 
-    // 14: TrackProgress derives lap position from its own injected Track,
-    // not a second hardcoded track shape -- a differently shaped Track
-    // (control points shifted) yields a different lap position for the
-    // exact same world position.
+    // 14: TrackProgress derives lap position from its own injected Track --
+    // a differently shaped Track yields a different lap position for the same world point.
     {
         simulation::TrackDefinition otherDef = track.getDefinition();
         for (Vector2& point : otherDef.controlPoints)
@@ -6896,9 +6466,7 @@ void verifyTrackProgress(const simulation::Track& track)
     }
 
     // 15: invalid TrackDefinitions are rejected by Track's own constructor
-    // (see verifyTrack) before a TrackProgress could ever be built from
-    // them -- TrackProgress itself performs no redundant validation, since
-    // it only ever receives an already-validated Track by reference.
+    // (see verifyTrack) -- TrackProgress performs no redundant validation.
 
     TraceLog(LOG_INFO, "Track progress verification: all deterministic checks passed");
 }
@@ -6906,21 +6474,16 @@ void verifyTrackProgress(const simulation::Track& track)
 namespace image_track_verify
 {
 
-// A tiny (8x8) closed-loop centerline, entirely inside fixtures/mask_a.png
-// and fixtures/mask_b.png's shared white region (each fixture's black
-// square sits in an opposite corner -- see
-// assets/tracks/test/generate_test_track_assets.py). samplesPerSegment = 2
-// keeps this centerline's 8 samples all within roughly [2.75, 5.25] in both
-// axes (verified numerically while designing this suite), comfortably clear
-// of both fixtures' black corners.
+// A tiny (8x8) closed-loop centerline entirely inside fixtures/mask_a.png
+// and mask_b.png's shared white region (each fixture's black square sits
+// in an opposite corner). samplesPerSegment=2 keeps all 8 samples clear of both corners.
 std::vector<Vector2> tinyLoopControlPoints()
 {
     return {Vector2{3.0f, 3.0f}, Vector2{5.0f, 3.0f}, Vector2{5.0f, 5.0f}, Vector2{3.0f, 5.0f}};
 }
 
-// A closed loop whose first control point -- and therefore, at the default
-// spawnDistanceAlongTrack = 0.0f, the exact spawn position -- sits at
-// (1,1), inside fixtures/mask_a.png's black (non-drivable) corner.
+// First control point (= spawn position, at the default
+// spawnDistanceAlongTrack) sits at (1,1), inside mask_a.png's black corner.
 std::vector<Vector2> spawnInNonDrivableCornerControlPoints()
 {
     return {Vector2{1.0f, 1.0f}, Vector2{5.0f, 1.0f}, Vector2{5.0f, 5.0f}, Vector2{1.0f, 5.0f}};
@@ -6940,12 +6503,9 @@ simulation::TrackDefinition makeTinyFixtureDefinition(const std::string& visualI
     return def;
 }
 
-// Steps outward from centerline sample `sampleIndex` along its local
-// perpendicular direction, in both directions, until leaving the drivable
-// mask, and returns the sum of both distances -- i.e. the drivable band's
-// total width at that point, measured purely through Track::isDrivable()
-// (the same O(1) query Car's sensors use), never by inspecting Track/mask
-// internals directly.
+// Steps outward from centerline sample sampleIndex, perpendicular, both
+// directions, until leaving the mask -- sum of both distances is the
+// drivable band's width there, measured purely via Track::isDrivable().
 float measureRoadWidthAt(const simulation::Track& track, std::size_t sampleIndex)
 {
     const std::vector<Vector2>& centerline = track.getCenterlineSamples();
@@ -6958,7 +6518,7 @@ float measureRoadWidthAt(const simulation::Track& track, std::size_t sampleIndex
     const float len = std::sqrt(dx * dx + dy * dy);
     const Vector2 perp = {-dy / len, dx / len};
 
-    constexpr float kMaxScan = 300.0f; // px, comfortably beyond any Stage 18 track's widest band
+    constexpr float kMaxScan = 300.0f; // px, comfortably beyond any active track's widest band
     constexpr float kStep = 1.0f;
 
     float positiveExtent = 0.0f;
@@ -6990,19 +6550,12 @@ float measureRoadWidthAt(const simulation::Track& track, std::size_t sampleIndex
 
 } // namespace image_track_verify
 
-// Stage 18/19 dedicated verification suite: the image-based track system --
-// asset loading/validation, mask thresholding, the three layers' mutual
-// independence, and TrackProgress's local-projection-tracking/global-
-// recovery behavior. `track` is the real track main() runs the population
-// on -- as of Stage 19, the user-authored extreme track (see
-// createExtremeTrackDefinition()) -- so the checks below that need to probe
-// real track geometry (varying width, local-search wraparound/exclusion,
-// recovery) are written generically against whatever `track` actually is,
-// never against hardcoded Stage-18-test-track assumptions. A handful of
-// tiny throwaway Tracks built from assets/tracks/test/fixtures/ (still
-// shipped for exactly this purpose, never used for normal training)
-// exercise asset validation and layer independence directly, the same way
-// verifyTrack() uses throwaway Tracks for TrackDefinition validation.
+// Image-based track system: asset loading/validation, mask thresholding,
+// the three layers' mutual independence, and TrackProgress's local-
+// tracking/global-recovery behavior. Geometry-probing checks are written
+// generically against whatever `track` (the real active track) actually
+// is; asset validation/layer independence use tiny throwaway Tracks from
+// assets/tracks/test/fixtures/.
 void verifyImageBasedTrackSystem(const simulation::Track& track)
 {
     using track_verify::throwsInvalidArgument;
@@ -7040,12 +6593,10 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "a mask image with mismatched dimensions must be rejected");
     }
 
-    // 5 & 6: mask pixel threshold produces the correct drivable/non-drivable
-    // result end to end (real LoadImage + threshold + isDrivable(), not a
-    // reach into Track internals) -- fixtures/mask_a.png is white/drivable
-    // everywhere except a black/non-drivable 2x2 corner. The same call also
-    // demonstrates the CPU mask is sized to THIS definition's 8x8
-    // simWidth/simHeight, not the main 1200x700 track's.
+    // 5 & 6: mask pixel threshold produces correct drivable/non-drivable
+    // results end to end (mask_a.png is white everywhere except a black
+    // 2x2 corner); also confirms the CPU mask is sized to this definition's
+    // 8x8, not the main track's 1200x700.
     {
         simulation::TrackDefinition def = makeTinyFixtureDefinition(visualA, maskA);
         simulation::Track fixtureTrack(def);
@@ -7055,14 +6606,11 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
         assert(!fixtureTrack.isDrivable(8, 8) && "coordinates at/beyond the fixture's own 8x8 bounds must be non-drivable");
     }
 
-    // 7: isDrivable() is a direct m_mask[] index (see Track::isDrivable()),
-    // an O(1) array access with no search or scan of any kind -- guaranteed
-    // by that implementation itself, not something a runtime timing
-    // assertion could meaningfully strengthen here.
+    // 7: isDrivable() is a direct m_mask[] index -- O(1), guaranteed by the
+    // implementation itself.
 
-    // 11 & 29: changing the mask image alone -- same centerline, same
-    // visual image -- changes collision, proving collision is read from the
-    // mask, not derived from (or coupled to) the centerline.
+    // 11 & 29: changing only the mask image (same centerline/visual)
+    // changes collision, proving collision is read from the mask, not the centerline.
     {
         simulation::Track withMaskA(makeTinyFixtureDefinition(visualA, maskA));
         simulation::Track withMaskB(makeTinyFixtureDefinition(visualA, maskB));
@@ -7074,11 +6622,9 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "the two tracks' centerlines must be identical -- only the mask asset differs");
     }
 
-    // 27, 28 & 30: changing the visual image alone -- same centerline, same
-    // mask -- never changes isDrivable() anywhere, and TrackProgress (which
-    // only ever reads the centerline via Track::projectOntoCenterline())
-    // reports identical lap positions regardless of which visual asset the
-    // underlying Track has.
+    // 27, 28 & 30: changing only the visual image never changes
+    // isDrivable(), and TrackProgress reports identical lap positions
+    // regardless of the visual asset.
     {
         simulation::Track withVisualA(makeTinyFixtureDefinition(visualA, maskA));
         simulation::Track withVisualB(makeTinyFixtureDefinition(visualB, maskA));
@@ -7102,10 +6648,8 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "TrackProgress must not depend on which visual image its Track has");
     }
 
-    // 14 (negative case): a TrackDefinition whose computed spawn position
-    // (centerline sample 0, at the default spawnDistanceAlongTrack) lands on
-    // a non-drivable mask pixel must be rejected clearly, not silently
-    // accepted.
+    // 14 (negative case): a computed spawn position landing on a
+    // non-drivable mask pixel must be rejected.
     {
         simulation::TrackDefinition def = makeTinyFixtureDefinition(visualA, maskA);
         def.controlPoints = image_track_verify::spawnInNonDrivableCornerControlPoints();
@@ -7113,31 +6657,17 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "a spawn position outside the drivable mask must be rejected");
     }
 
-    // A known-non-drivable interior point for the active track (see the
-    // comment in verifyTrack() for why this moved out of that generic
-    // function). (948, 192) was found offline by taking the mask's
-    // connected black regions, isolating the one fully enclosed by the
-    // drivable loop (i.e. not the outer background), and locating its
-    // deepest point (maximum distance to the nearest drivable pixel: 55px
-    // here) -- a robust interior point, not a boundary/anti-aliasing edge
-    // case.
+    // A known-non-drivable interior point for the active track: (948, 192)
+    // is the deepest point (55px from the nearest drivable pixel) of the
+    // mask's enclosed black region -- a robust interior point, not an edge case.
     {
         assert(!track.isDrivable(948, 192) &&
                "a known-deep-interior point of the extreme track's enclosed black region must be non-drivable");
     }
 
-    // 12: the real extreme track's mask contains genuinely varying road
-    // width along its length -- not one global constant -- measured purely
-    // through isDrivable() at a sample from its widest reliably-measurable
-    // straight (the long top straight, ~129px wide) and one from its
-    // narrowest (the short straight at the top of the middle S-connector,
-    // ~100px wide). Both indices were chosen by direct measurement against
-    // track_mask.png on straight stretches specifically, since
-    // measureRoadWidthAt()'s perpendicular scan reads inflated widths on
-    // curved stretches (the scan direction stops being perpendicular to the
-    // actual corridor there) -- see createExtremeTrackDefinition() for
-    // which control-point segments these fall in (segment 1 and segment 28
-    // respectively, at samplesPerSegment = 20).
+    // 12: the mask's road width genuinely varies along the route -- not one
+    // constant. Both sample indices are measured on straight stretches
+    // (measureRoadWidthAt()'s perpendicular scan inflates width on curves).
     {
         constexpr std::size_t wideSample = 20;   // mid top straight (P1->P2)
         constexpr std::size_t narrowSample = 571; // mid short S-connector straight (P28->P29)
@@ -7157,9 +6687,8 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
         const std::vector<Vector2>& centerline = track.getCenterlineSamples();
         const std::size_t sampleCount = centerline.size();
 
-        // Near the start of the loop: previousSegmentIndex = 2, query a
-        // point close to the seam from the far side (index sampleCount-8) --
-        // only reachable if the window wraps correctly past index 0.
+        // previousSegmentIndex=2, query a point near the seam from the far
+        // side -- only reachable if the window wraps past index 0.
         const std::size_t nearSeamIndex = sampleCount - 8;
         const simulation::TrackProjection wrapped =
             track.projectOntoCenterlineLocal(centerline[nearSeamIndex], 2, simulation::TrackProgress::kLocalSearchRadius);
@@ -7174,16 +6703,14 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "local search must wrap correctly in both directions across the seam");
     }
 
-    // 21: a position that sits exactly on a *logically distant* segment
-    // (outside the local search window) is not found by local search, even
-    // though it is a perfect (zero-distance) match globally -- proving
-    // physically-nearby-looking-but-index-distant sections are structurally
-    // excluded, not merely deprioritized.
+    // 21: a position exactly on a logically distant segment (outside the
+    // local window) is not found by local search even at zero true
+    // distance -- proving distant sections are structurally excluded, not
+    // just deprioritized.
     {
         const std::vector<Vector2>& centerline = track.getCenterlineSamples();
-        // Exactly opposite the loop from kPreviousIndex -- the largest
-        // possible index gap on any track, so it is guaranteed outside the
-        // local window regardless of kLocalSearchRadius's exact value.
+        // Exactly opposite the loop -- the largest possible index gap, so
+        // guaranteed outside the window regardless of kLocalSearchRadius.
         const std::size_t kFarIndex = centerline.size() / 2;
         constexpr std::size_t kPreviousIndex = 0;
 
@@ -7195,22 +6722,16 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
         assert(localResult.distanceFromCenterline > 10.0f &&
                "local search's in-window result must be measurably farther than the excluded true match");
 
-        // Tie-break note: querying exactly at sample kFarIndex makes both
-        // segment kFarIndex-1 (ending there, t=1) and segment kFarIndex
-        // (starting there, t=0) equally close -- projectOntoCenterline()
-        // scans in ascending index order and only a strictly smaller
-        // distance replaces the current best (see Track::considerSegment()),
-        // so segment kFarIndex-1 wins, exactly as verifyTrack()'s own
-        // tie-break check documents.
+        // Tie-break: segments kFarIndex-1 and kFarIndex are equally close;
+        // ascending-order scan with strict '<' picks kFarIndex-1 (see verifyTrack()).
         const simulation::TrackProjection globalResult = track.projectOntoCenterline(centerline[kFarIndex]);
         assert(globalResult.segmentIndex == kFarIndex - 1 && globalResult.distanceFromCenterline < 1.0f &&
                "a full global scan, for contrast, must find the exact match local search deliberately excluded");
     }
 
-    // 22, 23 & 24: global recovery re-anchors tracking when local projection
-    // clearly fails (car far outside the local window), without awarding
-    // implausible progress -- and reset() re-anchors tracking correctly
-    // afterward.
+    // 22, 23 & 24: global recovery re-anchors tracking when local
+    // projection clearly fails, without awarding implausible progress --
+    // and reset() re-anchors correctly afterward.
     {
         simulation::Car car(makeCarParams(), track);
         simulation::TrackProgress progress(track);
@@ -7220,15 +6741,9 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
         assert(progress.getTrackedSegmentIndex() == track.projectOntoCenterline(kSpawnPosition).segmentIndex &&
                "reset must anchor the tracked segment to a full global projection of the reset position");
 
-        // Jump the car far away (well beyond kLocalSearchRadius in index
-        // terms) to a distant, still-drivable point on the track -- local
-        // tracking cannot reach it, so this must trigger recovery. 0.6 of a
-        // lap was chosen (and verified offline against the extreme track's
-        // actual geometry) to land far enough from spawn's local window
-        // that the window's best in-window match is ~330px away, safely
-        // past kLocalProjectionRecoveryDistance (250px) -- not every
-        // fraction does this reliably on this track's particular shape, so
-        // this exact value is deliberate, not arbitrary.
+        // Jump far away (beyond kLocalSearchRadius) to trigger recovery.
+        // 0.6 of a lap is verified offline to land ~330px from spawn's
+        // local window, safely past kLocalProjectionRecoveryDistance (250px).
         const Vector2 distantPoint = track_progress_verify::positionAtLapPosition(track, 0.6f);
         car.reset(distantPoint, kSpawnHeading);
         progress.update(car);
@@ -7240,9 +6755,8 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "recovery must not award progress or checkpoints for an implausible jump -- the plausibility "
                "gate still applies to whatever position recovery reports");
 
-        // A small, ordinary step from here on must now be tracked normally
-        // (locally) and DOES register as progress -- recovery re-anchors
-        // tracking for subsequent frames, it does not leave it stuck.
+        // A small ordinary step now DOES register as progress -- recovery
+        // re-anchors tracking, it doesn't leave it stuck.
         const Vector2 nearbyPoint = track_progress_verify::positionAtLapPosition(track, 0.605f);
         car.reset(nearbyPoint, kSpawnHeading);
         progress.update(car);
@@ -7257,20 +6771,13 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
                "reset must discard any previously tracked segment and re-anchor from scratch");
     }
 
-    // Stage 19.1 regression case: a constructed close-but-topologically-
-    // distant scenario on the extreme track's actual tight top-left corner
-    // (a near-hairpin -- see createExtremeTrackDefinition()'s P2-P6),
-    // reproducing the exact bug this stage fixed. Section A is the
-    // centerline's entry into the hairpin (around sample index 42); section
-    // B is a stretch further into the hairpin (~index 89) that curves back
-    // close enough to A's entry to be geometrically nearer than A itself at
-    // certain positions -- while being a real ~47-sample jump away, more
-    // than any single simulated frame could plausibly cover. (153.5, 136.5)
-    // is one such position, taken directly from a live population run's
-    // debug log before this fix (see kLocalContinuityWeight's comment):
-    // under pure nearest-distance selection it was geometrically closer to
-    // section B (~34.8px) than to section A's own continuation
-    // (~36-40px+) by only a few pixels, so local tracking snapped forward
+    // Regression case for the extreme track's tight top-left hairpin
+    // (createExtremeTrackDefinition()'s P2-P6). Section A (~index 42) is
+    // the hairpin's entry; section B (~index 89) curves back close enough
+    // to be geometrically nearer at some positions despite being a real
+    // ~47-sample jump away. (153.5, 136.5), from a live debug log, is one
+    // such position: under pure nearest-distance selection it was ~34.8px
+    // from B vs. ~36-40px from A's continuation, snapping tracking forward
     // to B. With continuity-aware scoring, tracking must stay on A.
     {
         const std::vector<Vector2>& centerline = track.getCenterlineSamples();
@@ -7281,14 +6788,9 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
         simulation::Car car(makeCarParams(), track);
         simulation::TrackProgress progress(track);
 
-        // Anchor tracking on section A via an exact centerline point (a
-        // real reset(), not a raw Track:: call, so this exercises
-        // TrackProgress's actual production code path end to end).
-        // Tie-break note: querying exactly at sample kSectionA makes both
-        // segment kSectionA-1 (ending there) and kSectionA (starting there)
-        // equally close -- the global scan's ascending-order, strict-'<'
-        // tie-break picks kSectionA-1 (see verifyTrack()'s own tie-break
-        // check), so that is the segment reset() actually anchors on.
+        // Anchor tracking on section A via a real reset() (exercises the
+        // actual production path). Tie-break: kSectionA-1 and kSectionA are
+        // equally close; the ascending-order scan picks kSectionA-1.
         car.reset(centerline[kSectionA], kSpawnHeading);
         progress.reset(car);
         assert(progress.getTrackedSegmentIndex() == kSectionA - 1 &&
@@ -7351,13 +6853,9 @@ void verifyImageBasedTrackSystem(const simulation::Track& track)
     TraceLog(LOG_INFO, "Image-based track system verification: all deterministic checks passed");
 }
 
-// One-shot, deterministic sanity check of ai::FitnessEvaluator (Fitness v2,
-// Stage 15A), independent of keyboard/render timing. Runs once at startup.
-// FitnessEvaluator reads only simulation::Car::isAlive() and
-// simulation::TrackProgress's getters -- no Genome or NeuralNetwork is
-// touched here. Its update() signature has no mode parameter at all, so
-// manual and AI control paths need no separate fitness logic -- both simply
-// call the same update() with whatever Car state resulted from that frame.
+// Deterministic check of ai::FitnessEvaluator. Reads only Car::isAlive()
+// and TrackProgress's getters -- no Genome/NeuralNetwork here. update() has
+// no mode parameter, so manual and AI control share the same call.
 void verifyFitnessEvaluator(const simulation::Track& track)
 {
     using track_progress_verify::positionAtLapPosition;
@@ -7378,12 +6876,9 @@ void verifyFitnessEvaluator(const simulation::Track& track)
                "reset must clear every fitness component"); // 27
     }
 
-    // 2, 3 & 40: there is no positive reward merely from elapsed survival
-    // time, and no-progress waiting does not increase fitness -- with the
-    // car stationary at spawn (zero progress throughout), fitness must stay
-    // exactly zero for as long as the car sits there (well under the
-    // no-progress timeout), never creeping upward the way Fitness v1's
-    // elapsedTime * kSurvivalRewardPerSecond term did.
+    // 2, 3 & 40: no positive reward from elapsed survival time alone -- with
+    // the car stationary at spawn, fitness must stay exactly zero the whole
+    // time it sits there (well under the no-progress timeout).
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7391,21 +6886,18 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        for (int i = 0; i < 240 && !evaluator.isEvaluationFinished(); ++i) // 4s of no movement, under the 5s timeout
+        for (int i = 0; i < 150 && !evaluator.isEvaluationFinished(); ++i) // 2.5s of no movement, under the 3s timeout
         {
             progress.update(car);
             evaluator.update(car, progress, kSimulationDt);
             assert(evaluator.getFitness() == 0.0f &&
                    "standing still at zero progress must never earn positive fitness from elapsed time alone");
         }
-        assert(!evaluator.isEvaluationFinished() && "4 seconds of no movement must stay under the no-progress timeout");
+        assert(!evaluator.isEvaluationFinished() && "2.5 seconds of no movement must stay under the no-progress timeout");
     }
 
-    // 14: waiting cannot improve progress-rate reward -- once some progress
-    // has been made, standing still afterward must never increase
-    // progressRateReward (it can only shrink as elapsedTime grows with
-    // bestProgress held fixed), and therefore never increase total fitness
-    // either.
+    // 14: once some progress has been made, standing still afterward must
+    // never increase progressRateReward or total fitness.
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7452,10 +6944,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(evaluator.getFitness() > fitnessBefore && "forward progress must increase total fitness");
     }
 
-    // 13: backward movement must not increase the progress-derived part of
-    // fitness (best progress, checkpoints, laps) -- unaffected by Fitness
-    // v2, TrackProgress's own anti-exploit best-progress tracking already
-    // guarantees this; re-verified here against the base fitness term.
+    // 13: backward movement must not increase base progress fitness.
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7522,8 +7011,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     }
 
     // 7 & 8: the same progress reached in less time gives strictly higher
-    // total fitness than the same progress reached in more time -- Car A
-    // (5s) must beat Car B (10s) at the identical 0.5-lap progress point.
+    // fitness -- Car A (5s) must beat Car B (10s) at the same 0.5-lap point.
     {
         auto reachProgressInTime = [&](float targetProgress, float totalTime) -> float
         {
@@ -7534,12 +7022,9 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             ai::FitnessEvaluator evaluator;
             evaluator.reset();
 
-            // Advance in small increments -- each well within
-            // TrackProgress's plausibility gate -- so bestProgress
-            // legitimately reaches targetProgress (a direct one-shot jump
-            // of more than ~0.2 laps would be rejected as implausible and
-            // never register). No evaluator time is spent on these interim
-            // steps.
+            // Small increments, each within TrackProgress's plausibility gate,
+            // so bestProgress legitimately reaches targetProgress (a direct
+            // jump of more than ~0.2 laps would be rejected as implausible).
             constexpr float kStep = 0.15f;
             float p = 0.0f;
             while (p + kStep < targetProgress)
@@ -7551,10 +7036,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             localCar.reset(positionAtLapPosition(track, targetProgress), kSpawnHeading);
             localProgress.update(localCar);
 
-            // Only now spend the desired total elapsed time reaching this
-            // point -- a single update() call is enough since
-            // FitnessEvaluator reads TrackProgress's *current* state, not
-            // an integral over time.
+            // FitnessEvaluator reads TrackProgress's current state, not an
+            // integral over time, so one update() with totalTime suffices.
             evaluator.update(localCar, localProgress, totalTime);
             return evaluator.getFitness();
         };
@@ -7565,10 +7048,10 @@ void verifyFitnessEvaluator(const simulation::Track& track)
                "the same progress reached in less time must give higher fitness (Car A/5s must beat Car B/10s)");
     }
 
-    // 9: substantially greater progress still beats a much faster car that
-    // only reached a small fraction of the track -- Car C (0.8 laps in 10s)
-    // must beat Car D (0.2 laps in a mere 2s), because kProgressRateScale is
-    // deliberately small relative to kProgressPointsPerLap.
+    // 9: substantially greater progress beats a much faster but far less
+    // advanced car -- Car C (0.8 laps in 10s) must beat Car D (0.2 laps in
+    // 2s), since kProgressRateScale is deliberately small relative to
+    // kProgressPointsPerLap.
     {
         auto reachProgressInTime = [&](float targetProgress, float totalTime) -> float
         {
@@ -7579,8 +7062,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             ai::FitnessEvaluator evaluator;
             evaluator.reset();
 
-            // See the identical stepping approach and rationale in the
-            // previous test block.
+            // Same stepping approach as the previous test block.
             constexpr float kStep = 0.15f;
             float p = 0.0f;
             while (p + kStep < targetProgress)
@@ -7602,9 +7084,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     }
 
     // 10 & 11: progressRate matches bestProgress / max(elapsedTime,
-    // smallTimeEpsilon) exactly, and stays finite (and correctly computed)
-    // even at elapsedTime == 0 (using the documented smallTimeEpsilon =
-    // 0.1f floor).
+    // smallTimeEpsilon) exactly, and stays finite even at elapsedTime == 0
+    // (smallTimeEpsilon = 0.1f floor).
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7636,10 +7117,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     }
 
     // 12: progressRate never uses the Car's instantaneous speed -- driven
-    // here with real Car physics (nonzero, varying velocity throughout,
-    // unlike the synthetic teleports above) and cross-checked against the
-    // exact bestProgress/elapsedTime formula; if velocity fed into the
-    // formula anywhere, this exact match would not hold.
+    // with real Car physics (nonzero, varying velocity) and cross-checked
+    // against the exact bestProgress/elapsedTime formula.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7664,10 +7143,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     }
 
     // 15, 16, 17 & 18: lap timing -- the first completed lap records a lap
-    // time (matching elapsedTime, since the first lap starts at time 0); a
-    // second, slower lap records a new last-lap time but does not worsen
-    // the recorded best lap time; a third, faster lap then does become the
-    // new best.
+    // time matching elapsedTime; a slower second lap updates last-lap time
+    // without worsening best; a faster third lap becomes the new best.
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7678,19 +7155,13 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(!evaluator.hasCompletedLap() && evaluator.getBestLapTime() == 0.0f && evaluator.getLastLapTime() == 0.0f &&
                "no completed lap yet must read as the documented zero sentinel"); // 20 (setup half)
 
-        // Advances progress forward by slightly more than one full lap's
-        // worth of arc length, in small increments each well within
-        // TrackProgress's plausibility gate (a direct one-shot jump of a
-        // full lap would be rejected as implausible), then spends exactly
-        // lapTime seconds of evaluator time on the whole attempt via a
-        // single update() call at the end -- so the recorded lap time comes
-        // out to exactly lapTime. The slight (2%) overshoot past exactly
-        // 1.0 lap deliberately avoids landing the final sample ambiguously
-        // right at the seam itself, where float rounding inside
-        // Track::getPointAtDistance() could put it on either side and miss
-        // wrapping past the final checkpoint by a hair -- 2% of a lap is
-        // still far short of the next checkpoint (1/16 = 6.25% of a lap
-        // apart), so it cannot spuriously cross an extra one.
+        // Advances progress just over one lap in small increments (within
+        // TrackProgress's plausibility gate), then spends lapTime seconds
+        // via one update() call so the recorded lap time is exactly lapTime.
+        // The 2% overshoot past the seam avoids landing the final sample
+        // ambiguously at the exact wrap point (float rounding in
+        // Track::getPointAtDistance() could miss the wrap by a hair) while
+        // staying well short of the next checkpoint (6.25% of a lap apart).
         float cumulativeP = 0.0f;
         auto driveOneLap = [&](float lapTime)
         {
@@ -7709,10 +7180,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             evaluator.update(car, progress, lapTime);
         };
 
-        // First lap: 3s total. (Kept well under FitnessEvaluator's
-        // kMaxEvaluationTime -- 30.0f as of the last generation-duration
-        // change -- since all three laps' times accumulate in one
-        // evaluator and must finish before TimeLimit ends the evaluation.)
+        // First lap: 3s total (all three laps' times must sum to well under
+        // FitnessEvaluator's kMaxEvaluationTime before TimeLimit triggers).
         driveOneLap(3.0f);
         assert(progress.getLapCount() == 1 && "the first full lap must complete exactly one lap");
         assert(evaluator.hasCompletedLap() && "completing a lap must set hasCompletedLap()"); // 15 (part 1)
@@ -7756,10 +7225,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             assert(evaluator.getLapSpeedBonus() == 0.0f && "there must be no lap-speed bonus before any lap is completed"); // 20
 
             // Drive one full lap via small increments (see driveOneLap
-            // above for why: a direct one-shot jump of a full lap would be
-            // rejected by TrackProgress's plausibility gate), spending
-            // lapTime seconds of evaluator time on the whole attempt via a
-            // single update() call at the end.
+            // above), spending lapTime seconds via one update() call.
             constexpr float kStep = 0.15f;
             float remaining = 1.02f; // slight overshoot past the seam -- see driveOneLap's comment above
             float p = 0.0f;
@@ -7831,11 +7297,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        // Pre-existing bug fix (unrelated to Stage 20 physics): this loop
-        // bound and the elapsed-time threshold below were left at 16/15.0f
-        // from before FitnessEvaluator's kMaxEvaluationTime was raised to
-        // its current 30.0f (see FitnessEvaluator.cpp) -- both now match
-        // that constant, with the loop bound comfortably above it.
+        // Loop bound and the elapsed-time threshold below match
+        // FitnessEvaluator's kMaxEvaluationTime (30.0f).
         float p = 0.0f;
         for (int second = 0; second < 32 && !evaluator.isEvaluationFinished(); ++second)
         {
@@ -7885,9 +7348,11 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // Meaningful progress resets the no-progress timer (unchanged from
-    // Fitness v1 -- this is TrackProgress-adjacent timer bookkeeping inside
-    // FitnessEvaluator, not part of the v2 scoring formula itself).
+    // Meaningful progress resets the no-progress timer. Both hold periods
+    // below stay under kNoProgressTimeout (3.0s) and their total stays
+    // under kInitialProgressDeadline (5.0s), so this isolates the timer-reset
+    // mechanism from the separate initial-progress deadline tested in
+    // verifyEarlyTermination() below.
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -7895,22 +7360,22 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        // Stand still for 3 seconds (under the 5s timeout).
-        for (int i = 0; i < 180; ++i)
+        // Stand still for 2 seconds (under the 3s timeout).
+        for (int i = 0; i < 120; ++i)
         {
             progress.update(car);
             evaluator.update(car, progress, kSimulationDt);
         }
-        assert(!evaluator.isEvaluationFinished() && "3 seconds of no movement must stay under the timeout");
+        assert(!evaluator.isEvaluationFinished() && "2 seconds of no movement must stay under the timeout");
 
         // A meaningful forward nudge must reset the no-progress timer.
         car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
         progress.update(car);
         evaluator.update(car, progress, kSimulationDt);
 
-        // A further 4 seconds of standing still (< 5s since the nudge)
-        // must still not finish the evaluation, proving the timer reset.
-        for (int i = 0; i < 240; ++i)
+        // A further 2 seconds of standing still (< 3s since the nudge) must
+        // still not finish the evaluation, proving the timer reset.
+        for (int i = 0; i < 120; ++i)
         {
             progress.update(car);
             evaluator.update(car, progress, kSimulationDt);
@@ -7929,9 +7394,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        // Drive one full lap via small increments (a direct one-shot jump
-        // of a full lap would be rejected by TrackProgress's plausibility
-        // gate -- see driveOneLap's comment earlier in this function).
+        // Drive one full lap via small increments (see driveOneLap's
+        // comment earlier in this function).
         {
             constexpr float kStep = 0.15f;
             float remaining = 1.02f; // slight overshoot past the seam -- see driveOneLap's comment earlier
@@ -8057,6 +7521,206 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     TraceLog(LOG_INFO, "Fitness evaluator verification: all deterministic checks passed");
 }
 
+// Checks the two early-termination rules layered onto FitnessEvaluator (see
+// its "Early termination" class-comment section) -- kNoProgressTimeout/
+// kProgressImprovementEpsilon (rule A) and kInitialProgressDeadline/
+// kMinimumInitialProgress (rule B). Does not re-test the fitness formula
+// itself (covered by verifyFitnessEvaluator() above) -- only the early-exit
+// conditions, driven via TrackProgress's positionAtLapPosition rather than
+// raw world coordinates or Car velocity.
+void verifyEarlyTermination(const simulation::Track& track)
+{
+    using track_progress_verify::positionAtLapPosition;
+
+    // 1: real forward progress arriving every ~1s (well under
+    // kNoProgressTimeout) keeps resetting the no-progress timer indefinitely,
+    // proven over 10s straight.
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        float p = 0.0f;
+        for (int second = 0; second < 10; ++second) // 10s total, comfortably under kMaxEvaluationTime (30s)
+        {
+            p += 0.02f; // >> kProgressImprovementEpsilon (0.001) every step
+            car.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, 1.0f);
+            assert(!evaluator.isEvaluationFinished() &&
+                   "a car making meaningful forward progress every second must never hit the no-progress timeout"); // 1
+        }
+    }
+
+    // 2: driving without improving bestProgress terminates with NoProgress
+    // at ~3.0s (kNoProgressTimeout). Starts from a nonzero bestProgress
+    // (0.2 laps) to prove this tracks the rate of NEW progress, not just
+    // whether any progress ever happened.
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.2f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+        evaluator.update(car, progress, kSimulationDt); // registers the starting bestProgress (0.2)
+
+        for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
+        {
+            progress.update(car); // car does not move -- position held fixed
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
+               "holding still without new progress must terminate with NoProgress"); // 2
+        assert(std::fabs(evaluator.getElapsedTime() - 3.0f) < 0.1f &&
+               "the no-progress timeout must trip at ~3.0 seconds (kNoProgressTimeout), not earlier or much later"); // 2 (continued)
+    }
+
+    // 3: only new forward progress beyond the existing high-water mark may
+    // reset the timer -- 2s of backward/revisit moves (never exceeding the
+    // 0.3-lap high-water mark) must not delay the original 3s mark.
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.3f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+        evaluator.update(car, progress, kSimulationDt); // registers the starting bestProgress (0.3)
+
+        for (int i = 0; i < 120 && !evaluator.isEvaluationFinished(); ++i) // 2s of backward/revisited movement
+        {
+            const float p = (i % 2 == 0) ? 0.1f : 0.25f; // both < 0.3 -- backward, or already-covered ground
+            car.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(!evaluator.isEvaluationFinished() &&
+               "2 seconds of backward/revisited movement must not have reset the no-progress timer"); // 3
+
+        for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i) // finish it out from here, no more movement
+        {
+            progress.update(car);
+            evaluator.update(car, progress, kSimulationDt);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
+               std::fabs(evaluator.getElapsedTime() - 3.0f) < 0.1f &&
+               "the timer must still trip at the ORIGINAL ~3-second mark -- backward/revisited movement must not "
+               "have delayed it even slightly"); // 3 (continued)
+    }
+
+    // 4: a car that crawls forward just fast enough to keep resetting rule
+    // A's timer, but is still effectively stuck near spawn, must terminate
+    // with InsufficientInitialProgress at exactly 5.0s (kInitialProgressDeadline).
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        float p = 0.0f;
+        int secondsRun = 0;
+        for (; secondsRun < 10 && !evaluator.isEvaluationFinished(); ++secondsRun)
+        {
+            p += 0.002f; // meaningful (> kProgressImprovementEpsilon) but far too slow to reach 0.04 laps by 5s
+            car.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, 1.0f);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::InsufficientInitialProgress &&
+               "a car that never reaches the minimum initial progress must terminate with InsufficientInitialProgress"); // 4
+        assert(secondsRun == 5 && "the initial-progress deadline must trip at exactly 5 seconds (kInitialProgressDeadline)"); // 4 (continued)
+        assert(progress.getBestProgress() < 0.04f &&
+               "the terminated car's bestProgress must genuinely be below kMinimumInitialProgress"); // 4 (continued)
+    }
+
+    // 5: a normally progressing car clears the 5-second check comfortably
+    // and is NOT terminated by either rule.
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        float p = 0.0f;
+        for (int second = 0; second < 6; ++second)
+        {
+            p += 0.03f; // reaches 0.09 laps by 3s -- comfortably above kMinimumInitialProgress (0.04) before 5s
+            car.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, 1.0f);
+            assert(!evaluator.isEvaluationFinished() &&
+                   "a normally progressing car must not be terminated by either early-termination rule"); // 5
+        }
+        assert(progress.getBestProgress() >= 0.04f && "setup: this scenario must actually clear kMinimumInitialProgress");
+    }
+
+    // 6: a car that keeps making steady progress the whole time can still
+    // legitimately run all the way to the existing 30-second maximum --
+    // neither new rule can cut it short as long as progress keeps coming.
+    {
+        simulation::Car car(makeCarParams(), track);
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        float p = 0.0f;
+        for (int second = 0; second < 32 && !evaluator.isEvaluationFinished(); ++second)
+        {
+            p += 0.01f;
+            car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
+            progress.update(car);
+            evaluator.update(car, progress, 1.0f);
+        }
+        assert(evaluator.isEvaluationFinished() &&
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
+               "a car making steady progress the whole time must still be able to reach the 30s TimeLimit, "
+               "unaffected by either Stage 21.1 rule"); // 6
+    }
+
+    // 7: neither rule reads world coordinates or raw Car speed -- only
+    // TrackProgress::getBestProgress(), which always starts at 0.0 right
+    // after reset(). Two "hold still" runs at wildly different track
+    // positions must therefore terminate identically.
+    {
+        auto holdStillFinishReason = [&](float lapPos) -> ai::EvaluationFinishReason
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, lapPos), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator localEvaluator;
+            localEvaluator.reset();
+            for (int i = 0; i < 400 && !localEvaluator.isEvaluationFinished(); ++i)
+            {
+                localProgress.update(localCar);
+                localEvaluator.update(localCar, localProgress, kSimulationDt);
+            }
+            return localEvaluator.getFinishReason();
+        };
+
+        const ai::EvaluationFinishReason reasonAtStart = holdStillFinishReason(0.0f);
+        const ai::EvaluationFinishReason reasonMidTrack = holdStillFinishReason(0.55f);
+        assert(reasonAtStart == ai::EvaluationFinishReason::NoProgress && reasonMidTrack == reasonAtStart &&
+               "termination reason must depend only on track progress -- never on which world coordinates the car "
+               "happens to be sitting at"); // 7
+    }
+
+    TraceLog(LOG_INFO, "Early termination verification: all deterministic checks passed");
+}
+
 const char* finishReasonLabel(ai::EvaluationFinishReason reason)
 {
     switch (reason)
@@ -8069,6 +7733,8 @@ const char* finishReasonLabel(ai::EvaluationFinishReason reason)
             return "TimeLimit";
         case ai::EvaluationFinishReason::NoProgress:
             return "NoProgress";
+        case ai::EvaluationFinishReason::InsufficientInitialProgress:
+            return "SlowStart";
     }
     return "-";
 }
@@ -8090,8 +7756,7 @@ Color progressRankColor(float normalizedRank)
 }
 
 // Draws one population member's car body in `color`. Sensor rays and the
-// velocity-vector overlay are drawn only for the single highlighted
-// individual (Stage 13 explicitly avoids rendering sensors for every car).
+// velocity-vector overlay are drawn only for the single highlighted individual.
 void drawIndividualCar(const simulation::Car& car, Color color, bool highlighted)
 {
     const std::array<Vector2, 4> corners = car.getCorners();
@@ -8113,14 +7778,11 @@ void drawIndividualCar(const simulation::Car& car, Color color, bool highlighted
     }
 }
 
-// Stage 19.1: makes the highlighted car's TrackProgress projection state
-// visible -- purely a diagnostic overlay for investigating local-tracking/
-// recovery behavior, never read by any production control/fitness path.
-// Draws (A) a marker at the centerline point TrackProgress currently has
-// this car projected onto, (B) a connecting line from the car's actual
-// position to that point, and (C) a short arrow showing the centerline's
-// forward tangent at that point. Colored magenta throughout so it reads
-// as clearly distinct from the green/orange sensor rays drawn above.
+// Diagnostic overlay for the highlighted car's TrackProgress projection
+// state -- never read by any production control/fitness path. Draws a
+// marker at the projected centerline point, a line to the car's actual
+// position, and an arrow for the centerline's forward tangent there.
+// Colored magenta to stay distinct from the sensor rays drawn above.
 void drawProjectionDebug(const simulation::Car& car, const simulation::TrackProgress& progress)
 {
     if (!car.isAlive())
@@ -8141,17 +7803,12 @@ void drawProjectionDebug(const simulation::Car& car, const simulation::TrackProg
     DrawCircleV(tangentTip, 3.0f, kProjectionColor);
 }
 
-// Stage 19.1: flags and logs a "suspicious" per-frame projection change for
-// the highlighted individual only -- a diagnostic aid for investigating
-// whether TrackProgress's local tracking occasionally snaps to a
-// physically-nearby-but-topologically-distant centerline section (see the
-// "Local projection tracking" class comment in TrackProgress.h). Every
-// individual's own TrackProgress already computes indexDelta/tangents
-// relative to *its own* previous frame regardless of which individual is
-// currently highlighted in the UI, so this function needs no history of
-// its own -- it purely reads this frame's already-computed
-// ProjectionDebugInfo. Never affects fitness, progress, or control: this
-// only calls TraceLog.
+// Flags and logs a "suspicious" per-frame projection change for the
+// highlighted individual -- a diagnostic aid for whether TrackProgress's
+// local tracking snaps to a physically-nearby-but-topologically-distant
+// centerline section (see TrackProgress.h's "Local projection tracking"
+// class comment). Purely reads this frame's already-computed
+// ProjectionDebugInfo; never affects fitness, progress, or control.
 void reportSuspiciousProjectionJump(std::size_t highlightedIndex, const simulation::TrackProgress& progress,
                                      const simulation::Car& car)
 {
@@ -8196,13 +7853,10 @@ void reportSuspiciousProjectionJump(std::size_t highlightedIndex, const simulati
              static_cast<double>(info.tangent.y), info.usedRecovery ? "RECOVERY" : "LOCAL");
 }
 
-// Chooses which single individual gets its sensors/velocity vector
-// rendered this frame: the currently-running individual with the highest
-// best-progress, or -- once every individual has finished -- the
-// highest-fitness individual. Both selection rules break ties by lower
-// index (via strict '>' comparisons only), so the result is a
-// deterministic function of the population's current state alone. A pure
-// query: reads population, mutates nothing.
+// Chooses which individual gets its sensors/velocity vector rendered this
+// frame: the running individual with the highest best-progress, or -- once
+// all have finished -- the highest-fitness individual. Ties break to the
+// lower index. Pure query: reads population, mutates nothing.
 std::size_t selectHighlightedIndividual(const ai::neat::Population& population)
 {
     std::size_t bestActiveIndex = 0;
@@ -8256,12 +7910,9 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
                   static_cast<int>(population.getFinishedCount()));
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
-    // Stage 17: active vs. stagnant species counts, folded onto the same
-    // line as the species total to keep the panel compact -- read straight
-    // from the persistent Species collection (never from
-    // Population::getReproductionStats(), which is empty before the first
-    // generation transition). Purely informational, never mutates
-    // Population state.
+    // Active vs. stagnant species counts, read from the persistent Species
+    // collection (Population::getReproductionStats() is empty before the
+    // first generation transition).
     {
         int activeCount = 0;
         int stagnantCount = 0;
@@ -8285,9 +7936,8 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText("REPRODUCTION: SPECIES-AWARE", x, y, 16, SKYBLUE);
     y += lineHeight * 2;
 
-    // Stage 16: locate which of the current generation's species the
-    // highlighted individual belongs to (by membership, not by rebuilding
-    // any separate lookup), and -- if a generation transition has already
+    // Locate which of the current generation's species the highlighted
+    // individual belongs to, and -- if a generation transition has already
     // happened at least once -- its matching reproduction stats. Both
     // reads are purely informational; neither mutates Population state.
     {
@@ -8312,10 +7962,9 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
             DrawText(line, x, y, 16, LIGHTGRAY);
             y += lineHeight;
 
-            // Stage 17: persistent species history, read straight from the
-            // Species object itself -- valid immediately (age/historical
-            // best all start at their documented "never evaluated" state
-            // for a brand-new species; see Species.h).
+            // Persistent species history, read straight from the Species
+            // object (age/historical best start at their documented
+            // "never evaluated" state for a brand-new species; see Species.h).
             std::snprintf(line, sizeof(line), "Age: %d   Historical best: %.1f", static_cast<int>(highlightedSpecies->getAge()),
                           static_cast<double>(highlightedSpecies->getHistoricalBestFitness()));
             DrawText(line, x, y, 16, LIGHTGRAY);
@@ -8366,8 +8015,8 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
 
-    // FITNESS V2 breakdown (Stage 15A) -- see FitnessEvaluator.h for the
-    // exact formula each of these terms comes from.
+    // Fitness breakdown -- see FitnessEvaluator.h for the exact formula
+    // each of these terms comes from.
     std::snprintf(line, sizeof(line), "Fitness: %.1f", static_cast<double>(best.getFitness()));
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
@@ -8398,10 +8047,9 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight * 2;
 
-    // Stage 19.1: compact TrackProgress projection debug block for the
-    // highlighted individual -- see drawProjectionDebug()/
-    // reportSuspiciousProjectionJump() for the matching world-space overlay
-    // and console diagnostics. Deliberately just 3 lines.
+    // Compact TrackProgress projection debug block for the highlighted
+    // individual -- see drawProjectionDebug()/reportSuspiciousProjectionJump()
+    // for the matching world-space overlay and console diagnostics.
     {
         const simulation::TrackProgress::ProjectionDebugInfo& info = best.getProgress().getLastProjectionDebugInfo();
         DrawText("PROJECTION DEBUG", x, y, 18, YELLOW);
@@ -8442,14 +8090,11 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText("TAB manual control mode", x, y, 16, LIGHTGRAY);
 }
 
-// Stage 20: reads a CarInput straight from the keyboard for the manual
-// physics-verification mode (see main()'s manualMode branch below) --
-// mirrors Stage 2's original keyboard control, just no longer wired to the
-// only Car in the program. Arrow keys and WASD both work so the layout
-// matches whichever the user reaches for. No braking/reverse channel:
-// exactly the same two-channel CarInput (throttle in [0,1], steering in
-// [-1,1]) the AI path uses (see AIController::update()) -- releasing
-// throttle is the only way to slow down, by design (see
+// Reads a CarInput straight from the keyboard for manual physics-
+// verification mode (see main()'s manualMode branch below). Arrow keys and
+// WASD both work. No braking/reverse channel: the same two-channel
+// CarInput (throttle in [0,1], steering in [-1,1]) the AI path uses --
+// releasing throttle is the only way to slow down, by design (see
 // CarParams::engineForce's comment).
 simulation::CarInput readManualCarInput()
 {
@@ -8468,13 +8113,10 @@ simulation::CarInput readManualCarInput()
     return input;
 }
 
-// Stage 20: HUD for manual single-car control mode -- shows the live
-// vehicle-state values (speed/forward/lateral velocity/slip angle) that
-// Observation also reads (see ai::buildObservation), so the effect of the
-// new Box2D tire/steering model (tighter low-speed turns, wider high-speed
-// turns, lateral slip under hard high-speed cornering) is directly visible
-// while driving, without needing to wait for NEAT training. Purely a
-// rendering helper -- reads Car state only, never mutates it.
+// HUD for manual single-car control mode -- shows the live vehicle-state
+// values (speed/forward/lateral velocity/slip angle) that Observation also
+// reads (see ai::buildObservation). Purely a rendering helper -- reads Car
+// state only, never mutates it.
 void drawManualPanel(const simulation::Car& car)
 {
     DrawRectangle(kSimWidth, 0, kPanelWidth, kScreenHeight, Color{30, 30, 30, 255});
@@ -8512,15 +8154,12 @@ void drawManualPanel(const simulation::Car& car)
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight * 2;
 
-    // Stage 20.2/20.3: front/rear single-track tire model telemetry -- lets
-    // the model's behavior (tire slip angles, the Fx/Fy forces each axle
-    // actually applied, the resulting yaw rate, and -- Stage 20.3 -- how
-    // saturated each axle's friction circle is) be watched directly while
-    // driving, not just inferred from how the car moves. Rear grip
-    // utilization is the number to watch for power oversteer: it reaches
-    // 100% exactly when the rear axle's combined drive+lateral force has
-    // hit rearMaxTireForce and any further throttle can only come at the
-    // expense of rear lateral force.
+    // Front/rear tire model telemetry -- tire slip angles, the Fx/Fy forces
+    // each axle applies, yaw rate, and friction-circle saturation. Rear
+    // grip utilization is the number to watch for power oversteer: it
+    // reaches 100% exactly when the rear axle's combined drive+lateral
+    // force has hit rearMaxTireForce and further throttle can only come at
+    // the expense of rear lateral force.
     {
         const simulation::TireDebugInfo& tire = car.getTireDebugInfo();
         DrawText("TIRE MODEL", x, y, 18, YELLOW);
@@ -8645,17 +8284,11 @@ bool connectionsMatch(const std::vector<ConnectionGene>& a, const std::vector<Co
 
 } // namespace population_verify
 
-// One-shot, deterministic sanity check of ai::neat::Population/Individual,
-// covering the first complete generation loop end to end. Independent of
-// rendering/keyboard timing (uses fixed-size kSimulationDt steps, exactly
-// like every other verify*() function). Runs once at startup. This is
-// Stage 13/15's original suite, left intentionally unchanged in scope --
-// species-restricted mating, adjusted fitness, fitness sharing, and
-// offspring allocation (Stage 16) are exercised separately, by
-// verifySpeciesAwareReproduction() below. Persistent species lineage,
-// stagnation, extinction, hall of fame, training history, and save/load
-// logic remain untested anywhere (still out of scope for the whole
-// codebase).
+// Deterministic check of ai::neat::Population/Individual, covering the
+// first complete generation loop end to end, independent of rendering/
+// keyboard timing. Species-restricted mating, adjusted fitness, fitness
+// sharing, and offspring allocation are covered separately by
+// verifySpeciesAwareReproduction() below.
 void verifyPopulation(const simulation::Track& track)
 {
     using namespace population_verify;
@@ -8871,19 +8504,15 @@ void verifyPopulation(const simulation::Track& track)
         }
 
         // Re-snapshot every iteration, immediately before each update()
-        // call: whichever iteration turns out to be the one where
-        // update() internally detects full completion and reproduces, the
-        // snapshot taken just before that exact call captures precisely
-        // the final generation-0 genomes/fitness values Population itself
-        // used -- there is no other way to observe them from outside,
-        // since generation-finish detection and reproduction happen
-        // together inside a single update() call. Also record how many
-        // individuals were *already* finished going into that exact call:
-        // if it is every individual, the snapshot is provably exact (a
-        // finished individual's Genome/fitness cannot change); if it is
-        // fewer, the one or more still-running individuals could gain a
-        // last, possibly checkpoint-sized burst of fitness during that very
-        // call (see the ranking check below for how this is handled).
+        // call, so whichever call turns out to trigger the generation
+        // transition, the snapshot just before it captures the final
+        // generation-0 genomes/fitness (detection and reproduction happen
+        // together inside one update() call, so there's no other way to
+        // observe them). Also track how many individuals were already
+        // finished going into that call -- if all of them, the snapshot is
+        // provably exact; if not, the still-running ones could gain a last
+        // burst of fitness during that call (handled by the ranking check
+        // below).
         std::size_t finishedBeforeTransitionCall = 0;
         for (int step = 0; step < 4000 && population.getGeneration() == 0; ++step)
         {
@@ -8902,17 +8531,11 @@ void verifyPopulation(const simulation::Track& track)
         assert(population.size() == transitionPopConfig.populationSize &&
                "population size must remain constant across a generation transition"); // 18
 
-        // 39: last-generation best fitness must have updated away from its
-        // initial value (0, per a fresh Population -- verified separately
-        // below) to a positive value reflecting the just-finished
-        // generation's real evaluation data. An exact numeric match against
-        // gen0FitnessSnapshot is not attempted: that snapshot is captured
-        // immediately *before* each update() call as a best-effort
-        // approximation (there is no way to observe Population's internal
-        // fitness values at the exact instant reproduce() reads them,
-        // since detection and reproduction happen inside one update() call)
-        // and so can under-count by at most one deltaTime step's worth of
-        // accumulation relative to the true final value.
+        // 39: last-generation best fitness must update to a positive value
+        // reflecting the just-finished generation. No exact numeric match
+        // against gen0FitnessSnapshot is attempted: that snapshot is taken
+        // immediately before each update() call, so it can under-count by
+        // up to one deltaTime step relative to the true final value.
         const float staleObservedBest = *std::max_element(gen0FitnessSnapshot.begin(), gen0FitnessSnapshot.end());
         assert(population.getLastGenerationBestFitness() > 0.0f &&
                population.getLastGenerationBestFitness() >= staleObservedBest - 1.0f &&
@@ -8933,16 +8556,10 @@ void verifyPopulation(const simulation::Track& track)
                       return a < b;
                   });
 
-        // Whether the very last snapshot (taken immediately before the
-        // transition-triggering update() call) is provably exact: true only
-        // if every individual was already finished going into that call, in
-        // which case nothing about their Genome/fitness could still change.
-        // If one or more individuals were still running, that call could
-        // have awarded any of them a final burst of fitness (including a
-        // whole checkpoint's worth, if their forward delta happened to
-        // cross a checkpoint boundary in that exact frame) large enough to
-        // change the ranking -- an inherent limit of what is externally
-        // observable (see the comment above), not a Population/NEAT bug.
+        // The final snapshot is provably exact only if every individual was
+        // already finished going into the transition-triggering call --
+        // otherwise a still-running individual could have gained a final
+        // burst of fitness large enough to change the ranking.
         const bool rankingSnapshotIsExact = (finishedBeforeTransitionCall == gen0GenomesSnapshot.size());
 
         for (std::size_t e = 0; e < transitionPopConfig.eliteCount; ++e)
@@ -8959,12 +8576,10 @@ void verifyPopulation(const simulation::Track& track)
             }
             else
             {
-                // Weaker (but still meaningful) check for the acknowledged
-                // staleness edge case: elite slot e must still be an
-                // unchanged, verbatim copy of *some* generation-0
-                // individual's genome -- ruling out corruption or accidental
-                // mutation of the elite -- even though which specific
-                // individual that was cannot be pinned down from outside.
+                // Weaker check for the staleness edge case: elite slot e
+                // must still be an unchanged copy of *some* generation-0
+                // genome, ruling out corruption even though which specific
+                // individual it was can't be pinned down from outside.
                 const bool matchesSomeGenome =
                     std::any_of(gen0GenomesSnapshot.begin(), gen0GenomesSnapshot.end(), [&](const Genome& candidate)
                                 { return connectionsMatch(actualEliteSlot.connections(), candidate.connections()); });
@@ -9023,12 +8638,9 @@ void verifyPopulation(const simulation::Track& track)
         Population population(base, track, makeCarParams(), kSpawnPosition, kSpawnHeading,
                                popConfig, mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
 
-        // Index 1's fitness vastly exceeds index 0's: across many
-        // independent tournamentSelect() calls (each advancing the
-        // orchestration RNG), index 1 must win at least once whenever it
-        // is actually sampled -- and with 10 independent trials of 2
-        // draws each, the odds of index 1 never once being sampled are
-        // astronomically small (0.25^10), making this a reliable,
+        // Index 1's fitness vastly exceeds index 0's: across 10 independent
+        // trials of 2 draws each, the odds of index 1 never once being
+        // sampled are astronomically small (0.25^10), making this an
         // effectively-deterministic check for this fixed seed.
         const std::vector<float> fitnessValues = {1.0f, 1000.0f};
         bool sawIndex1Win = false;
@@ -9121,13 +8733,10 @@ void verifyPopulation(const simulation::Track& track)
     }
 
     // 29: the next generation is constructed before the old population is
-    // replaced -- a structural guarantee, confirmed indirectly by 19/20
-    // above: Population::reproduce() (see Population.cpp) builds
-    // newGenomes/newIndividuals entirely from m_individuals as it existed
-    // when reproduce() began, and only assigns
-    // `m_individuals = std::move(newIndividuals)` as its final step. If
-    // parent selection instead read a partially-overwritten population,
-    // the elite-exactness check above could not reliably pass.
+    // replaced -- confirmed indirectly by 19/20 above: Population::reproduce()
+    // builds newGenomes/newIndividuals entirely from m_individuals as it
+    // existed when reproduce() began, only assigning
+    // `m_individuals = std::move(newIndividuals)` as its final step.
 
     // 34, 35 & 36: restartGeneration() resets evaluation state without
     // changing the generation number or Genome contents.
@@ -9194,13 +8803,11 @@ void verifyPopulation(const simulation::Track& track)
                "species count must be computed from the current generation's actual Genomes"); // 40
     }
 
-    // 41: as of Stage 16, species membership DOES drive reproduction --
-    // Population::reproduce() (see Population.cpp) speciates the just-
-    // finished generation once and uses that same Species vector for
-    // fitness sharing, offspring allocation, and species-local parent
-    // selection. See verifySpeciesAwareReproduction() below for the
-    // dedicated Stage 16 verification suite; this function (Stage 13/15's
-    // suite) is otherwise left intact and continues to pass unchanged.
+    // 41: species membership drives reproduction -- Population::reproduce()
+    // speciates the just-finished generation once and uses that same
+    // Species vector for fitness sharing, offspring allocation, and
+    // species-local parent selection. See verifySpeciesAwareReproduction()
+    // below for the dedicated suite.
 
     // 42 & 43: fixed seed + configs + same evaluation fitnesses produce
     // deterministic offspring; different seeds can produce different
@@ -9332,17 +8939,13 @@ void verifyPopulation(const simulation::Track& track)
     TraceLog(LOG_INFO, "Population verification: all deterministic checks passed");
 }
 
-// Stage 16 dedicated verification suite: species-aware reproduction.
-// Exercises fitness sharing (adjusted fitness), per-species offspring
-// allocation (both the general proportional case and the zero-total-
-// fitness fallback), species-local parent selection, and the read-only
-// getCurrentSpecies()/getReproductionStats() debug surface. Deliberately
-// does not re-test what Stage 16 left untouched (global elitism's own
-// ranking rule, the crossover/mutation pipeline, shared InnovationTracker
-// usage, isBetterTournamentCandidate()'s tie-break) beyond a light
-// confirmation that those code paths still behave the same way when driven
-// through species-scoped reproduction -- verifyPopulation() above already
-// covers them thoroughly.
+// Checks species-aware reproduction: fitness sharing (adjusted fitness),
+// per-species offspring allocation (both the general proportional case and
+// the zero-total-fitness fallback), species-local parent selection, and
+// the read-only getCurrentSpecies()/getReproductionStats() debug surface.
+// Global elitism, the crossover/mutation pipeline, shared InnovationTracker
+// usage, and isBetterTournamentCandidate()'s tie-break are already covered
+// by verifyPopulation() above.
 void verifySpeciesAwareReproduction(const simulation::Track& track)
 {
     using namespace population_verify;
@@ -9423,11 +9026,9 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
     // through one full generation transition, cross-checked against an
     // independent recomputation of the documented formulas from an exact
     // pre-transition snapshot -- captured with the same re-snapshot-every-
-    // iteration technique verifyPopulation's own items 15-20 use above,
-    // since Population::update() can only ever be observed either before
-    // every individual has finished or after reproduce() has already run
-    // in that same call; there is no external way to observe "every
-    // individual finished, but reproduce() has not run yet".
+    // iteration technique verifyPopulation's items 15-20 use above, since
+    // there is no external way to observe "every individual finished, but
+    // reproduce() has not run yet".
     {
         const Genome crashGenome = makeCrashGenome();
         const PopulationConfig popConfig = makeTestPopulationConfig(12, 777u);
@@ -9435,14 +9036,11 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
         const CrossoverConfig crossoverConfig;
         const CompatibilityConfig compatibilityConfig;
         // A very tight threshold: only genomes at exactly 0 compatibility
-        // distance from each other share a species. Since the crash genome
-        // has a single connection and mutateWeights() only selects it for
-        // mutation with 80% probability per individual (MutationConfig's
-        // default weightMutationProbability), this deterministically (for
-        // this fixed seed) tends to produce a mix of species -- exercising
-        // both multi-member and singleton species in one run. None of the
-        // checks below hardcode the resulting partition; they hold for
-        // whatever partition this seed deterministically produces.
+        // distance share a species. Since mutateWeights() only mutates the
+        // crash genome's single connection 80% of the time, this seed
+        // deterministically produces a mix of multi-member and singleton
+        // species. None of the checks below hardcode the resulting
+        // partition; they hold for whatever partition this seed produces.
         SpeciationConfig speciationConfig;
         speciationConfig.compatibilityThreshold = 0.0f;
 
@@ -9527,11 +9125,9 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
         if (snapshotIsExact)
         {
             // 40: the Species partition is a pure function of the exact
-            // snapshotted genomes (in index order) -- an independently
-            // constructed Speciator must produce the identical sequence of
-            // member-index sets (SpeciesId numbering may legitimately
-            // differ, since this Population's own Speciator had already
-            // allocated IDs for generation 0 before this call).
+            // snapshotted genomes -- an independently constructed Speciator
+            // must produce the identical sequence of member-index sets
+            // (SpeciesId numbering may legitimately differ).
             Speciator independentSpeciator;
             const std::vector<Species> independentSpecies =
                 independentSpeciator.speciate(genomeSnapshot, compatibilityConfig, speciationConfig);
@@ -9544,11 +9140,9 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
             }
 
             // 1, 2, 3, 4 & 5: fitness sharing -- adjustedFitness ==
-            // rawFitness/speciesSize for every member; raw fitness is
-            // untouched (fitnessSnapshot, read straight from
-            // Individual::getFitness(), is never mutated by this
-            // recomputation); each species' reported adjustedFitnessSum
-            // matches an independent recomputation from the exact snapshot.
+            // rawFitness/speciesSize for every member; each species'
+            // reported adjustedFitnessSum matches an independent
+            // recomputation from the exact snapshot.
             for (std::size_t s = 0; s < speciesCount; ++s)
             {
                 const std::vector<std::size_t>& members = species[s].getMemberIndices();
@@ -9599,47 +9193,35 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
     // 19, 20, 21, 22, 23, 24, 25 & 42 (structural guarantees -- see
     // Population::reproduce()/selectParentFromSpecies() in Population.cpp):
     //   - selectParentFromSpecies() only ever samples from
-    //     species.getMemberIndices(), and reproduce() only ever calls it
-    //     with the one Species currently being processed -- both parents of
-    //     every offspring are therefore guaranteed to come from that exact
-    //     species, and never from any other species (19 & 20). This is the
-    //     one behavioral difference from the pre-Stage-16 code path, which
-    //     called the (still-public, still directly exercised by
-    //     verifyPopulation's items 21/22 above) tournamentSelect() over the
-    //     *entire* population's fitnessValues regardless of species --
-    //     species-aware reproduction's candidate pool for any species
-    //     smaller than the whole population is therefore provably narrower
-    //     than, and different from, that global candidate pool (42).
-    //   - selectParentFromSpecies() reduces its samples via the exact same
+    //     species.getMemberIndices(), called once per Species being
+    //     processed -- both parents of every offspring come from that
+    //     exact species, never another (19 & 20), and that per-species
+    //     candidate pool is provably narrower than tournamentSelect()'s
+    //     whole-population pool for any species smaller than the full
+    //     population (42).
+    //   - selectParentFromSpecies() reduces samples via the same
     //     isBetterTournamentCandidate() free function verifyPopulation's
-    //     items 21/22 already exercise directly -- highest raw fitness
-    //     wins, ties broken by lower original population index (21 & 22).
+    //     items 21/22 exercise directly (21 & 22).
     //   - a species of size 1 gives std::uniform_int_distribution<...>(0, 0),
-    //     which always resolves to its one member -- no special-casing
-    //     exists or is needed for singleton species (23); the resulting
-    //     crossover(parent, parent) call (equal fitness, identical genomes)
-    //     is accepted unconditionally by GenomeCrossover, never throwing,
-    //     and is exercised by the live run above whenever this seed
-    //     produces a singleton species.
+    //     always resolving to its one member; the resulting
+    //     crossover(parent, parent) call is accepted unconditionally by
+    //     GenomeCrossover (23).
     //   - reproduce() passes fitnessValues[parentAIndex]/[parentBIndex] --
-    //     RAW fitness -- into GenomeCrossover::crossover(), and never
-    //     constructs or passes any adjusted-fitness value to it (24 & 25).
+    //     RAW fitness -- into GenomeCrossover::crossover(), never adjusted
+    //     fitness (24 & 25).
 
     // 26, 27, 28, 29, 30 & 31: the crossover + mutation offspring pipeline
     // (mutateWeights/mutateAddConnection/mutateAddNode sharing one
-    // InnovationTracker, parents never mutated) is byte-for-byte the same
-    // code Population::reproduce() already ran before Stage 16 -- only
-    // which two parent indices feed it changed (species-scoped instead of
-    // population-wide). Already exercised end to end, deterministically, by
-    // verifyPopulation's items 24-28 above and by the live run above (every
-    // offspring genome validates and builds a phenotype, per the 35/36
-    // checks).
+    // InnovationTracker, parents never mutated) is the same code
+    // Population::reproduce() runs regardless of species scoping -- already
+    // exercised end to end by verifyPopulation's items 24-28 above and by
+    // the live run above (every offspring genome validates and builds a
+    // phenotype, per the 35/36 checks).
 
     // 37, 43 & 44: fixed seed + identical configs/base genome produce
     // identical species partitions, adjusted-fitness sums, and offspring
-    // allocation -- the entire Stage 16 reproduction pipeline is
-    // deterministic -- and its read-only species/stats accessors never
-    // mutate state when queried repeatedly.
+    // allocation, and the read-only species/stats accessors never mutate
+    // state when queried repeatedly.
     {
         const Genome crashGenome = makeCrashGenome();
         const PopulationConfig popConfig = makeTestPopulationConfig(10, 555u);
@@ -9709,21 +9291,16 @@ void verifySpeciesAwareReproduction(const simulation::Track& track)
     TraceLog(LOG_INFO, "Species-aware reproduction verification: all deterministic checks passed");
 }
 
-// Stage 17 dedicated verification suite: persistent species identity and
-// stagnation management. Exercises Speciator's persistent cross-call
-// lifecycle (SpeciesId retention/extinction, representative reselection
-// ordering) and Species::recordGeneration()'s fitness-history/stagnation
-// rule directly and deterministically (no simulation, no RNG, hand-computed
-// expected values), then a real multi-generation Population run to verify
-// the reproduction-side integration (stagnant species excluded from normal
-// offspring allocation, global elites still protected, the all-stagnant
-// safety fallback) holds as a set of invariants that are safe to check
-// regardless of exactly which species/stagnation pattern this run's RNG
-// happens to produce. Deliberately does not re-test what Stage 17 left
-// untouched (crossover/mutation pipeline, InnovationTracker sharing,
-// compatibility distance itself, Fitness v2, the hard track) beyond
-// confirming those code paths still run cleanly -- verifyPopulation() and
-// verifySpeciesAwareReproduction() above already cover them thoroughly.
+// Checks persistent species identity and stagnation management: Speciator's
+// persistent cross-call lifecycle (SpeciesId retention/extinction,
+// representative reselection ordering) and Species::recordGeneration()'s
+// fitness-history/stagnation rule, driven directly and deterministically
+// (no simulation, no RNG, hand-computed expected values), then a real
+// multi-generation Population run verifying the reproduction-side
+// integration (stagnant species excluded from offspring allocation, global
+// elites still protected, the all-stagnant safety fallback) as invariants
+// safe to check regardless of which species/stagnation pattern this run's
+// RNG produces.
 void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
 {
     using namespace population_verify;
@@ -9752,14 +9329,11 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                "speciesStagnationLimit of 0 must be rejected"); // 1
     }
 
-    // 2-14, 39 & 40: persistent Speciator lifecycle, driven directly (no
-    // Population/simulation involved) across three hand-controlled
-    // generations, so every expected id/membership/representative value
-    // below is exactly computable by hand from compatibilityDistance's
-    // simple formula for makeSimpleGenome() genomes (distance = 0.4 *
-    // |weightA - weightB|, see speciation_verify's own comment) rather than
-    // depending on any simulation outcome. Threshold = 0.5 throughout (so
-    // "compatible" means a weight difference of at most 1.25).
+    // 2-14, 39 & 40: persistent Speciator lifecycle, driven directly across
+    // three hand-controlled generations, so every expected id/membership/
+    // representative value below is exactly computable by hand from
+    // compatibilityDistance's formula for makeSimpleGenome() genomes
+    // (distance = 0.4 * |weightA - weightB|). Threshold = 0.5 throughout.
     {
         Speciator speciator;
         CompatibilityConfig compatConfig;
@@ -9768,11 +9342,9 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
 
         // Generation 1: weight 0.0 (idx0) founds species 0 (rep = 0.0);
         // weight 1.0 (idx1) joins it (dist 0.4*1.0=0.4<=0.5); weight 20.0
-        // (idx2) is incompatible with species 0 (dist 8.0>0.5) and founds
-        // species 1. Reselection at the end of THIS call is a no-op for
-        // both: each founder is already its own lowest-index member (see
-        // Speciator.h's own reasoning) -- species 0's rep stays 0.0,
-        // species 1's stays 20.0.
+        // (idx2) is incompatible (dist 8.0>0.5) and founds species 1.
+        // Reselection is a no-op: each founder is already its own
+        // lowest-index member.
         std::vector<Genome> gen1 = {makeSimpleGenome(0.0f), makeSimpleGenome(1.0f), makeSimpleGenome(20.0f)};
         const std::vector<Species>& afterGen1 = speciator.speciate(gen1, compatConfig, speciationConfig);
         assert(afterGen1.size() == 2 && afterGen1[0].getId() == 0 && afterGen1[1].getId() == 1 &&
@@ -9787,17 +9359,15 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                    "a newly created species must start in the documented 'never evaluated' history state"); // 2
         }
 
-        // Generation 2: weight 1.05 (idx0) and weight 0.05 (idx1) are both
-        // compared against species 0's OLD representative (still 0.0, from
+        // Generation 2: weight 1.05 (idx0) and 0.05 (idx1) are both compared
+        // against species 0's OLD representative (still 0.0, from
         // generation 1): dist(0.0,1.05)=0.42<=0.5 and dist(0.0,0.05)=0.02<=0.5
-        // -- BOTH join species 0 (proving assignment used the persistent old
-        // representative, item 9 -- their own compatibility with each other
-        // is irrelevant to first-match assignment). Species 1's rep (20.0)
-        // matches neither (dist >= 7.58) -- it goes EXTINCT (item 13),
-        // never resurfacing (its id, 1, is never reused, item 6).
-        // Reselection at the end of THIS call picks species 0's lowest
-        // CURRENT member index (0, weight 1.05) as its NEW representative
-        // -- a genuine change from the old 0.0 (proving items 7, 8 & 14).
+        // -- both join species 0 (proving assignment used the persistent
+        // old representative, item 9). Species 1's rep (20.0) matches
+        // neither -- it goes extinct (item 13), its id (1) never reused
+        // (item 6). Reselection at the end of this call picks species 0's
+        // lowest CURRENT member index (0, weight 1.05) as its new
+        // representative -- a change from 0.0 (items 7, 8 & 14).
         std::vector<Genome> gen2 = {makeSimpleGenome(1.05f), makeSimpleGenome(0.05f)};
         const std::vector<Species>& afterGen2 = speciator.speciate(gen2, compatConfig, speciationConfig);
         assert(afterGen2.size() == 1 && afterGen2[0].getId() == 0 &&
@@ -9807,28 +9377,21 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                "member lists must be cleared and rebuilt fresh each pass, not accumulated across generations"); // 7
 
         // Generation 3: weight 2.0. dist to generation 2's RESELECTED
-        // representative (1.05) = 0.4*0.95=0.38<=0.5 -> joins species 0. If
-        // assignment had instead (incorrectly) used generation 1's original
-        // representative (0.0), dist(0.0,2.0)=0.8>0.5 -> would NOT have
-        // joined. If reselection had instead (incorrectly) picked the
-        // LOWEST-WEIGHT generation-2 member (0.05, at index 1) rather than
-        // the lowest-INDEX one (1.05, at index 0), dist(0.05,2.0)=0.78>0.5
-        // -> would ALSO not have joined. Observing that it DOES join
-        // therefore proves, simultaneously: the representative changes only
-        // AFTER a full pass's assignment completes and takes effect
-        // starting with the NEXT call (item 10); a persistent
-        // representative genuinely exists between passes (item 8); and
-        // reselection specifically picks the lowest MEMBER INDEX, not the
-        // lowest weight or any fitness-based criterion -- Speciator has no
-        // fitness to consult at all (item 11). A second genome, weight
-        // 20.0 -- the same weight species 1 (now long extinct) was founded
-        // with -- is incompatible with species 0's representative and
-        // founds a BRAND NEW species with the next monotonically
-        // increasing id (2, never the extinct 1), starting in the same
-        // fresh 'never evaluated' state as any other new species -- proving
-        // an extinct species' identity/history never resurfaces, even when
-        // a numerically identical genome reappears later (items 4, 5, 39 &
-        // 40).
+        // representative (1.05) = 0.4*0.95=0.38<=0.5 -> joins species 0. Had
+        // assignment instead used generation 1's original representative
+        // (0.0), dist(0.0,2.0)=0.8>0.5 would NOT join; had reselection
+        // instead picked the lowest-WEIGHT generation-2 member (0.05)
+        // rather than the lowest-INDEX one (1.05), dist(0.05,2.0)=0.78>0.5
+        // would ALSO not join. Joining therefore proves: the representative
+        // changes only after a full pass completes, taking effect on the
+        // NEXT call (item 10); it persists between passes (item 8); and
+        // reselection picks the lowest member INDEX, not lowest weight or
+        // fitness (Speciator has no fitness to consult; item 11). A second
+        // genome, weight 20.0 -- the same weight the now-extinct species 1
+        // was founded with -- founds a brand new species with the next
+        // monotonically increasing id (2, never the extinct 1), in the same
+        // fresh state as any new species, proving an extinct species'
+        // identity/history never resurfaces (items 4, 5, 39 & 40).
         std::vector<Genome> gen3 = {makeSimpleGenome(2.0f), makeSimpleGenome(20.0f)};
         const std::vector<Species>& afterGen3 = speciator.speciate(gen3, compatConfig, speciationConfig);
         assert(afterGen3.size() == 2 && afterGen3[0].getId() == 0 && afterGen3[1].getId() == 2 &&
@@ -9841,10 +9404,8 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                "a disappeared species' history must not resurface on a differently-numbered new species"); // 40
 
         // 12: no RNG state exists anywhere in Speciator or Species --
-        // neither class declares a std::mt19937 (or any other generator)
-        // member, and Speciator's constructor takes no seed (see
-        // Speciator.h/Species.h). Determinism (see the fixed-seed
-        // Population comparison further below) is a direct consequence.
+        // neither declares a generator member, and Speciator's constructor
+        // takes no seed (see Speciator.h/Species.h).
     }
 
     // 15-24: fitness-history/stagnation rules, driven directly through
@@ -9913,22 +9474,16 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                afterGen6[0].getHistoricalBestFitness() == 50.0f &&
                "an improving generation must clear stagnation and reset generationsSinceImprovement"); // 22
 
-        // 24: adjusted fitness never affects historical best -- structural:
-        // updateFitnessHistory()'s only parameter besides the stagnation
-        // limit is rawFitnessByGenomeIndex (see Speciator.h), and it is fed
-        // directly into Species::recordGeneration() with no division or
-        // scaling of any kind (see Speciator.cpp) -- there is no adjusted
-        // fitness value anywhere in this call path for it to be affected
-        // by.
+        // 24: adjusted fitness never affects historical best --
+        // updateFitnessHistory()'s only fitness parameter is
+        // rawFitnessByGenomeIndex, fed directly into
+        // Species::recordGeneration() with no scaling (see Speciator.cpp).
     }
 
-    // 25 & 34 (allocateSpeciesOffspring's role in Stage 17's eligibility
-    // filtering): a species excluded from the eligible subset passed to
+    // 25 & 34: a species excluded from the eligible subset passed to
     // allocateSpeciesOffspring() -- exactly what Population::reproduce()
-    // does for every stagnant, non-fallback species (see Population.cpp
-    // step 6) -- contributes NOTHING to the allocation, regardless of how
-    // large its own effective fitness would have been, since it is not
-    // part of the input at all.
+    // does for every stagnant, non-fallback species -- contributes nothing
+    // to the allocation, regardless of its own effective fitness.
     {
         const std::vector<SpeciesId> eligibleOnly = {1};
         const std::vector<float> eligibleOnlySums = {2.0f}; // deliberately small vs. the excluded species' implied sum
@@ -9944,8 +9499,7 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
     {
         const Genome crashGenome = makeCrashGenome();
         PopulationConfig popConfig = makeTestPopulationConfig(10, 4242u);
-        popConfig.speciesStagnationLimit = 2; // small on purpose for testing -- see this suite's own doc comment;
-                                               // the production default (15) is never changed.
+        popConfig.speciesStagnationLimit = 2; // small on purpose for testing; production default (15) unchanged
         const MutationConfig mutationConfig;
         const CrossoverConfig crossoverConfig;
         const CompatibilityConfig compatibilityConfig;
@@ -9965,10 +9519,10 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
         assert(population.getGeneration() + 1 >= targetGeneration &&
                "setup: the population must reach at least generation targetGeneration-1 within the step budget");
 
-        // Snapshot exactly (re-snapshotting every iteration, same technique
-        // as verifyPopulation's items 15-20 and verifySpeciesAwareReproduction
-        // above) across the FINAL transition, so the fitness/genome values
-        // used below are provably what reproduce() itself used.
+        // Snapshot every iteration (same technique as verifyPopulation's
+        // items 15-20 and verifySpeciesAwareReproduction above) across the
+        // final transition, so the values below are provably what
+        // reproduce() itself used.
         std::vector<Genome> genomeSnapshot;
         std::vector<float> fitnessSnapshot;
         std::size_t finishedBeforeTransitionCall = 0;
@@ -10012,11 +9566,9 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
         }
 
         // 26, 27 & 36: a stagnant, non-eligible species receives zero
-        // offspring (and therefore, per Stage 16's still-intact rule, both
-        // its parent-selection calls -- see selectParentFromSpecies() in
-        // Population.cpp -- never execute for it, since the inner offspring
-        // loop bound is exactly allocatedOffspring); a non-stagnant species
-        // always remains eligible.
+        // offspring (so its parent-selection calls never execute, since the
+        // inner offspring loop bound is exactly allocatedOffspring); a
+        // non-stagnant species always remains eligible.
         bool anyEligible = false;
         for (const Population::SpeciesReproductionStats& s : stats)
         {
@@ -10072,11 +9624,7 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
         // 28 & 29: the global elite mechanism is untouched by species
         // stagnation -- elite slot 0 must be an unchanged copy of whichever
         // snapshot individual had the strictly highest raw fitness,
-        // regardless of that individual's species' stagnation state, and
-        // (structurally -- see Population.cpp step 5, byte-for-byte
-        // unchanged from Stage 16) elitism ranking never reads or writes
-        // any Species/stagnation field, so it cannot reset stagnation
-        // history either way.
+        // regardless of that individual's species' stagnation state.
         if (snapshotIsExact)
         {
             std::size_t topIndex = 0;
@@ -10092,9 +9640,8 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
                    "elite slot 0 must be an unchanged, byte-for-byte copy of the top raw-fitness genome, "
                    "regardless of whether that genome's species was stagnant"); // 28 & 29
 
-            // 23 & 24 (integration-level): the reported historicalBestFitness
-            // for the species containing topIndex, if it is this
-            // generation's new best, reflects the RAW snapshot value, never
+            // 23 & 24: the reported historicalBestFitness for the species
+            // containing topIndex reflects the RAW snapshot value, never
             // divided by species size.
             const std::vector<Species>& currentSpecies = population.getCurrentSpecies();
             for (const Species& species : currentSpecies)
@@ -10116,18 +9663,14 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
             }
         }
 
-        // 37 & 38: species-local mating remains intact, and no
-        // cross-species mating was introduced -- structurally unchanged
-        // from Stage 16 (selectParentFromSpecies() still only ever samples
-        // from the one Species passed to it; see Population.cpp step 8,
-        // byte-for-byte the same loop structure as Stage 16 except the
-        // species being iterated now skips ineligible ones via zero
-        // allocation rather than any change to parent selection itself).
+        // 37 & 38: species-local mating remains intact, no cross-species
+        // mating introduced -- selectParentFromSpecies() still only ever
+        // samples from the one Species passed to it; ineligible species are
+        // skipped via zero allocation, not any change to parent selection.
 
         // 47: structural mutations still share exactly one InnovationTracker
-        // -- unchanged code path from Stage 16 (already exercised end to
-        // end by verifyPopulation's items 24-28 and this suite's genome
-        // validation above).
+        // -- already exercised end to end by verifyPopulation's items
+        // 24-28 and this suite's genome validation above.
     }
 
     // 41 & 42: fixed seed + identical configs/base genome produce
@@ -10192,10 +9735,9 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
         runToGeneration(populationZ, 4);
         assert(populationZ.getGeneration() >= 4 && "setup: populationZ must reach generation 4 within the step budget");
         // 42: populationZ's species lineage may or may not numerically
-        // differ from populationX's -- not asserted either way, since both
-        // are valid outcomes -- but it must remain internally valid
-        // regardless: every species' member indices must be in range, and
-        // every reported species must actually exist in getCurrentSpecies().
+        // differ from populationX's -- not asserted either way -- but it
+        // must remain internally valid: every species' member indices in
+        // range.
         for (const Species& species : populationZ.getCurrentSpecies())
         {
             for (std::size_t memberIndex : species.getMemberIndices())
@@ -10206,17 +9748,14 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
         }
     }
 
-    // 48 & 49: Fitness v2 (ai::FitnessEvaluator) and the hard track
-    // (simulation::createHardTrackDefinition()) are untouched by Stage 17
-    // -- neither file is included or referenced anywhere in Species.h/.cpp
-    // or Speciator.h/.cpp, and Population.cpp's only fitness-related change
-    // is which existing raw-fitness vector it also forwards to
+    // 48 & 49: ai::FitnessEvaluator and the hard track are untouched here --
+    // neither file is referenced anywhere in Species.h/.cpp or
+    // Speciator.h/.cpp; Population.cpp's only fitness-related change is
+    // which existing raw-fitness vector it also forwards to
     // Speciator::updateFitnessHistory().
     //
     // 50: all previous verification suites still pass -- enforced by
-    // main() continuing to call every earlier verify*() function,
-    // including the now Stage-17-updated verifySpeciation() (see its own
-    // doc comment), unchanged.
+    // main() continuing to call every earlier verify*() function unchanged.
 
     TraceLog(LOG_INFO, "Persistent species and stagnation verification: all deterministic checks passed");
 }
@@ -10265,14 +9804,12 @@ Genome makeComplexityTestGenome()
 
 } // namespace training_metrics_verify
 
-// One-shot, deterministic verification of training::GenerationMetrics'
-// pure, file-I/O-free statistics (Stage 21): computeMean/computeMedian/
-// computeMin/computeMax, computeGenomeComplexity, and buildGenerationMetrics
-// itself. Every check here uses hand-picked synthetic data -- no Population,
-// Individual, or Track involved -- so the arithmetic is verified completely
-// independently of whether a live training run happens to produce
-// comparable numbers (see verifyGenerationMetricsPopulationIntegration()
-// below for that separate, end-to-end check).
+// Deterministic check of training::GenerationMetrics' pure, file-I/O-free
+// statistics: computeMean/computeMedian/computeMin/computeMax,
+// computeGenomeComplexity, and buildGenerationMetrics itself. Every check
+// uses hand-picked synthetic data -- no Population/Individual/Track
+// involved (see verifyGenerationMetricsPopulationIntegration() below for
+// the end-to-end check).
 void verifyTrainingMetrics()
 {
     using namespace training_metrics_verify;
@@ -10320,6 +9857,8 @@ void verifyTrainingMetrics()
         const GenomeComplexity complexityC{3, 4, 4};
         const GenomeComplexity complexityD{9, 14, 10}; // belongs to the best (highest-fitness) individual
         input.genomeComplexities = {complexityA, complexityB, complexityC, complexityD};
+        input.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::TimeLimit,
+                                ai::EvaluationFinishReason::TimeLimit, ai::EvaluationFinishReason::NoProgress};
         input.bestIndividualIndex = 3; // rawFitness[3] == 40, the maximum
         input.speciesCount = 2;
         input.largestSpeciesSize = 3;
@@ -10352,21 +9891,28 @@ void verifyTrainingMetrics()
                std::fabs(metrics.avgGenomeConnectionGeneCount - expectedAvgConnections) < 1e-5f &&
                "avg genome node/connection counts must be the population mean"); // 15
         assert(metrics.generationDurationSeconds == 12.5f && "generationDurationSeconds must pass through unchanged"); // 16
+        assert(metrics.terminatedCollisionCount == 1 && metrics.terminatedMaxTimeCount == 2 &&
+               metrics.terminatedNoProgressCount == 1 && metrics.terminatedSlowStartCount == 0 &&
+               "finishReasons must be reduced into the four terminated*Count fields by simple counting"); // 21
     }
 
-    // 17-20: buildGenerationMetrics input validation.
+    // 22-27: buildGenerationMetrics input validation. Every negative case
+    // below fills in every OTHER field with a valid, correctly-sized value
+    // (finishReasons included) so each one exercises exactly the single
+    // validation branch it names.
     {
         GenerationMetricsInput empty;
         assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(empty); }) &&
-               "empty rawFitness must be rejected"); // 17
+               "empty rawFitness must be rejected"); // 22
 
         GenerationMetricsInput mismatched;
         mismatched.rawFitness = {1.0f, 2.0f};
         mismatched.bestProgressValues = {0.1f}; // wrong size
         mismatched.completedLap = {false, false};
         mismatched.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        mismatched.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::Collision};
         assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(mismatched); }) &&
-               "a per-individual vector with the wrong size must be rejected"); // 18
+               "a per-individual vector with the wrong size must be rejected"); // 23
 
         GenerationMetricsInput badAdjusted;
         badAdjusted.rawFitness = {1.0f, 2.0f};
@@ -10374,17 +9920,37 @@ void verifyTrainingMetrics()
         badAdjusted.bestProgressValues = {0.1f, 0.2f};
         badAdjusted.completedLap = {false, false};
         badAdjusted.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        badAdjusted.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::Collision};
         assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(badAdjusted); }) &&
-               "a non-empty adjustedFitness with the wrong size must be rejected"); // 19
+               "a non-empty adjustedFitness with the wrong size must be rejected"); // 24
 
         GenerationMetricsInput badIndex;
         badIndex.rawFitness = {1.0f, 2.0f};
         badIndex.bestProgressValues = {0.1f, 0.2f};
         badIndex.completedLap = {false, false};
         badIndex.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        badIndex.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::Collision};
         badIndex.bestIndividualIndex = 2; // out of range for size 2
         assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(badIndex); }) &&
-               "an out-of-range bestIndividualIndex must be rejected"); // 20
+               "an out-of-range bestIndividualIndex must be rejected"); // 25
+
+        GenerationMetricsInput badFinishReasonsSize;
+        badFinishReasonsSize.rawFitness = {1.0f, 2.0f};
+        badFinishReasonsSize.bestProgressValues = {0.1f, 0.2f};
+        badFinishReasonsSize.completedLap = {false, false};
+        badFinishReasonsSize.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        badFinishReasonsSize.finishReasons = {ai::EvaluationFinishReason::Collision}; // wrong size
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(badFinishReasonsSize); }) &&
+               "a wrong-sized finishReasons vector must be rejected"); // 26
+
+        GenerationMetricsInput unfinishedIndividual;
+        unfinishedIndividual.rawFitness = {1.0f, 2.0f};
+        unfinishedIndividual.bestProgressValues = {0.1f, 0.2f};
+        unfinishedIndividual.completedLap = {false, false};
+        unfinishedIndividual.genomeComplexities = {GenomeComplexity{}, GenomeComplexity{}};
+        unfinishedIndividual.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::None};
+        assert(throwsInvalidArgument([&]() { training::buildGenerationMetrics(unfinishedIndividual); }) &&
+               "finishReasons containing EvaluationFinishReason::None (a still-running individual) must be rejected"); // 27
     }
 
     TraceLog(LOG_INFO, "Training metrics verification: all deterministic checks passed");
@@ -10437,13 +10003,11 @@ std::filesystem::path scratchDir()
 
 } // namespace training_logger_verify
 
-// One-shot, deterministic verification of training::TrainingLogger and its
-// free CSV-formatting functions (Stage 21): csvHeaderLine()/
-// generationMetricsToCsvRow()/formatFloat() as pure string-building (no
-// file I/O), then TrainingLogger's actual file creation/append/no-overwrite
-// behavior against a scratch directory under the OS temp directory (removed
-// before and after, so this never touches or leaves anything in the
-// project's real results/ directory).
+// Deterministic check of training::TrainingLogger and its free
+// CSV-formatting functions: csvHeaderLine()/generationMetricsToCsvRow()/
+// formatFloat() as pure string-building (no file I/O), then TrainingLogger's
+// actual file creation/append/no-overwrite behavior against a scratch
+// directory under the OS temp directory (removed before and after).
 void verifyTrainingLogger()
 {
     using namespace training_logger_verify;
@@ -10463,9 +10027,9 @@ void verifyTrainingLogger()
            "formatFloat must format -Inf as \"-inf\"");
 
     // 3: csvHeaderLine() column count matches GenerationMetrics' own field
-    // count (21) exactly.
+    // count (25) exactly.
     const std::string header = training::csvHeaderLine();
-    assert(countFields(header) == 21 && "CSV header must have exactly 21 columns, one per GenerationMetrics field");
+    assert(countFields(header) == 25 && "CSV header must have exactly 25 columns, one per GenerationMetrics field");
     assert(header.substr(0, 10) == "generation" && "CSV header's first column must be \"generation\"");
 
     // 4: generationMetricsToCsvRow() produces the same column COUNT as the
@@ -10494,6 +10058,10 @@ void verifyTrainingLogger()
         metrics.avgGenomeNodeCount = 11.2f;
         metrics.avgGenomeConnectionGeneCount = 20.4f;
         metrics.generationDurationSeconds = 30.0f;
+        metrics.terminatedCollisionCount = 7;
+        metrics.terminatedMaxTimeCount = 8;
+        metrics.terminatedNoProgressCount = 9;
+        metrics.terminatedSlowStartCount = 10;
 
         const std::string row = training::generationMetricsToCsvRow(metrics);
         assert(countFields(row) == countFields(header) &&
@@ -10506,12 +10074,15 @@ void verifyTrainingLogger()
         {
             fields.push_back(field);
         }
-        assert(fields.size() == 21 && "split CSV row must yield exactly 21 fields"); // 5
+        assert(fields.size() == 25 && "split CSV row must yield exactly 25 fields"); // 5
         assert(fields[0] == "42" && "column 0 (generation) must be \"42\""); // 6
         assert(fields[1] == "812.4" && "column 1 (best_fitness) must be locale-independent \"812.4\""); // 7
         assert(fields[15] == "14" && "column 15 (best_genome_nodes) must be \"14\""); // 8
         assert(fields[16] == "31" && "column 16 (best_genome_connections) must be \"31\""); // 9
         assert(fields[20] == "30" && "column 20 (generation_duration_seconds) must be \"30\""); // 10
+        assert(fields[21] == "7" && fields[22] == "8" && fields[23] == "9" && fields[24] == "10" &&
+               "columns 21-24 (terminated_collision/max_time/no_progress/slow_start_count) must be appended, "
+               "in that order, after every pre-existing column"); // 10 (continued)
     }
 
     // 11-16: TrainingLogger's real file behavior, against a scratch temp
@@ -10564,20 +10135,14 @@ void verifyTrainingLogger()
     TraceLog(LOG_INFO, "Training logger verification: all deterministic checks passed");
 }
 
-// End-to-end integration check (Stage 21): runs a small, fast-finishing
-// (crash genome -- see population_verify::makeCrashGenome()) Population
-// through its first generation transition, re-snapshotting every
-// individual's raw fitness/progress/hasCompletedLap/genome complexity
-// immediately before every update() call (the same technique
-// verifySpeciesAwareReproduction() already uses -- see its own comment for
-// why: generation-finish detection and reproduction happen together inside
-// one update() call, so this is the only way to observe the exact data
-// Population itself used), then confirms Population::getLastGenerationMetrics()
-// matches those independently-recomputed values, and that its species-level
-// fields agree with Population::getCurrentSpecies()/getReproductionStats()
-// read immediately after the transition (both of which continue to reflect
-// the just-finished generation until the NEXT transition -- see
-// Population.h).
+// End-to-end integration check: runs a small, fast-finishing crash-genome
+// Population through its first generation transition, re-snapshotting
+// every individual's raw fitness/progress/hasCompletedLap/genome complexity
+// immediately before every update() call (same technique
+// verifySpeciesAwareReproduction() uses), then confirms
+// Population::getLastGenerationMetrics() matches those independently-
+// recomputed values, and that its species-level fields agree with
+// getCurrentSpecies()/getReproductionStats() read immediately after.
 void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track)
 {
     using ai::neat::CompatibilityConfig;
@@ -10598,22 +10163,16 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
     Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig, mutationConfig,
                            crossoverConfig, compatibilityConfig, speciationConfig);
 
-    // Re-snapshot every individual's raw state immediately BEFORE every
+    // Re-snapshot every individual's raw state immediately before every
     // update() call, exactly like verifySpeciesAwareReproduction() above
-    // does (see its own comment for why): generation-finish detection and
-    // reproduction happen together inside a single update() call, so there
-    // is no way to observe Population's exact just-finished state from
-    // outside except via the snapshot taken right before whichever call
-    // turns out to trigger it. finishedBeforeTransitionCall records how many
-    // individuals had ALREADY finished going into that exact call: only
-    // when it equals the full population size is the preceding snapshot
-    // provably identical to what Population itself used (a finished
-    // individual's Genome/fitness/progress cannot change on a later
-    // update()) -- otherwise, one or more still-running individuals could
-    // gain a final, possibly checkpoint-sized burst of fitness/progress
-    // during that very last call, and the strict per-individual comparisons
-    // below are skipped in favor of the invariants that hold unconditionally
-    // either way.
+    // (generation-finish detection and reproduction happen together inside
+    // one update() call, so there's no other way to observe the exact
+    // just-finished state). finishedBeforeTransitionCall records how many
+    // individuals were already finished going into that call: only when it
+    // equals the full population size is the snapshot provably exact --
+    // otherwise a still-running individual could gain a final burst of
+    // fitness/progress, and the strict comparisons below are skipped in
+    // favor of invariants that hold unconditionally either way.
     std::vector<float> lastRawFitness;
     std::vector<float> lastBestProgress;
     std::vector<bool> lastCompletedLap;
@@ -10702,6 +10261,16 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
     assert(!std::isnan(metrics.bestFitness) && !std::isnan(metrics.avgFitness) && !std::isnan(metrics.avgProgress) &&
            "no metric field may be NaN"); // 9
 
+    // 10: every individual's evaluation has finished with exactly one of
+    // the four EvaluationFinishReason values by the time a generation
+    // transition happens -- the four terminated*Count fields must always
+    // sum to exactly the population size.
+    const std::size_t terminatedTotal = metrics.terminatedCollisionCount + metrics.terminatedMaxTimeCount +
+                                         metrics.terminatedNoProgressCount + metrics.terminatedSlowStartCount;
+    assert(terminatedTotal == population.size() &&
+           "terminatedCollisionCount + terminatedMaxTimeCount + terminatedNoProgressCount + terminatedSlowStartCount "
+           "must sum to exactly the population size"); // 10
+
     TraceLog(LOG_INFO, "Generation metrics / Population integration verification: all deterministic checks passed");
 }
 
@@ -10715,10 +10284,9 @@ int main()
 
     simulation::Track track(makeTrackDefinition());
 
-    // Stage 18: the visual layer's GPU texture is created here, separately
-    // from Track's own (GPU-free) construction above and only now that a
-    // window/GL context exists (see TrackVisual.h) -- Track already
-    // validated this same path's existence/dimensions on the CPU side.
+    // The visual layer's GPU texture is created here, separately from
+    // Track's own (GPU-free) construction above and only now that a
+    // window/GL context exists (see TrackVisual.h).
     simulation::TrackVisual trackVisual(track.getDefinition().visualImagePath, kSimWidth, kSimHeight);
 
     verifyTrack(track);
@@ -10741,6 +10309,7 @@ int main()
     verifyTrackProgress(track);
     verifyImageBasedTrackSystem(track);
     verifyFitnessEvaluator(track);
+    verifyEarlyTermination(track);
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
     verifyPersistentSpeciesAndStagnation(track);
@@ -10749,11 +10318,8 @@ int main()
     verifyGenerationMetricsPopulationIntegration(track);
 
     // The whole training run starts from one hand-built, deterministic
-    // demonstration Genome (see createDemonstrationGenome()) -- Population
-    // copies and mutates it to build generation 0; the Genome itself is
-    // never touched again afterward. The spawn pose (kSpawnPosition/
-    // kSpawnHeading) comes entirely from the Track itself -- see
-    // computeSpawnPose() above.
+    // demonstration Genome -- Population copies and mutates it to build
+    // generation 0; the Genome itself is never touched again afterward.
     const ai::neat::PopulationConfig populationConfig;
     const ai::neat::MutationConfig mutationConfig;
     const ai::neat::CrossoverConfig crossoverConfig;
@@ -10764,14 +10330,12 @@ int main()
                                      kSpawnHeading, populationConfig, mutationConfig, crossoverConfig,
                                      compatibilityConfig, speciationConfig);
 
-    // Stage 21: one CSV row + one companion metadata file per program run,
-    // under results/ (created if missing, never overwritten -- see
+    // One CSV row + one companion metadata file per program run, under
+    // results/ (created if missing, never overwritten -- see
     // TrainingLogger.h). Metadata captures everything needed to reproduce
     // this exact run later: the random seed the whole run is deterministic
-    // from (see Population.h's class comment -- no std::random_device,
-    // rand(), or time-based seeding exists anywhere in this codebase), the
-    // active track, and every NEAT/vehicle-physics config constructed
-    // above/below.
+    // from, the active track, and every NEAT/vehicle-physics config
+    // constructed above/below.
     training::RunMetadata runMetadata;
     runMetadata.buildVersion = OPPARI_BUILD_VERSION;
     runMetadata.trackName = "extreme";
@@ -10786,22 +10350,18 @@ int main()
     TraceLog(LOG_INFO, "Training metrics logging to %s (metadata: %s)", trainingLogger.getCsvPath().c_str(),
              trainingLogger.getMetadataPath().c_str());
 
-    // Stage 20: a standalone manual-control car, entirely independent of
-    // `population` -- lets the new Box2D vehicle handling be driven and
-    // felt directly (TAB to toggle) without waiting on NEAT. Constructed
-    // once up front and reset to spawn every time manual mode is
-    // (re-)entered, so its behavior is predictable across toggles. Never
-    // touched by Population/FitnessEvaluator/AIController -- purely a
-    // second, parallel Car for direct keyboard testing.
+    // A standalone manual-control car, entirely independent of `population`
+    // -- lets the vehicle handling be driven and felt directly (TAB to
+    // toggle) without waiting on NEAT. Reset to spawn every time manual
+    // mode is (re-)entered. Never touched by Population/FitnessEvaluator/
+    // AIController.
     simulation::Car manualCar(makeCarParams(), track);
     manualCar.reset(kSpawnPosition, kSpawnHeading);
     bool manualMode = false;
 
-    // Diagnostic only (Stage 20): logs every generation transition so
-    // training progress is visible from console output too, not only the
-    // on-screen panel -- e.g. for headless/redirected runs while verifying
-    // that generations keep advancing normally after the physics rewrite.
-    // Reads Population's state only; never influences it.
+    // Diagnostic only: logs every generation transition so training
+    // progress is visible from console output too, not only the on-screen
+    // panel. Reads Population's state only; never influences it.
     std::size_t lastLoggedGeneration = population.getGeneration();
 
     while (!WindowShouldClose())
@@ -10823,14 +10383,9 @@ int main()
             }
             else
             {
-                // Restarts the CURRENT generation's evaluation from its
+                // Restarts the current generation's evaluation from its
                 // existing Genomes -- same generation number, same genomes,
-                // only Car/Progress/Fitness state resets. Population::update()
-                // below never needs a separate "is finished" guard: a
-                // population update is always safe to call, whether
-                // individuals are still running, all finished (in which case
-                // update() itself triggers the generation transition), or
-                // freshly restarted.
+                // only Car/Progress/Fitness state resets.
                 population.restartGeneration();
             }
         }
@@ -10847,11 +10402,10 @@ int main()
             {
                 lastLoggedGeneration = population.getGeneration();
 
-                // Stage 21: the just-finished generation's full metrics row
-                // -- captured inside Population::reproduce() before this
-                // transition replaced m_individuals (see
-                // Population::getLastGenerationMetrics()'s doc comment) --
-                // is persisted to CSV and summarized on one console line.
+                // The just-finished generation's full metrics row -- captured
+                // inside Population::reproduce() before this transition
+                // replaced m_individuals -- is persisted to CSV and
+                // summarized on one console line.
                 const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
                 trainingLogger.logGeneration(metrics);
 
@@ -10868,11 +10422,10 @@ int main()
 
         DrawRectangle(0, 0, kSimWidth, kSimHeight, BLACK);
 
-        // Stage 18: the visual layer is a plain image draw -- track_visual.png,
+        // The visual layer is a plain image draw -- track_visual.png,
         // loaded once into trackVisual above -- entirely independent of the
         // mask Car/sensors collide against (see Track::isDrivable()) and of
-        // the centerline TrackProgress uses. No geometry is derived from
-        // TrackDefinition::trackWidth or the sampled centerline here anymore.
+        // the centerline TrackProgress uses.
         trackVisual.draw();
 
         if (manualMode)
@@ -10916,9 +10469,8 @@ int main()
                 drawIndividualCar(individual.getCar(), color, i == highlightedIndex);
             }
 
-            // Stage 19.1: projection debug overlay + suspicious-jump detection,
-            // for the highlighted individual only (never every car -- see
-            // drawProjectionDebug()/reportSuspiciousProjectionJump()).
+            // Projection debug overlay + suspicious-jump detection, for the
+            // highlighted individual only (never every car).
             {
                 const ai::neat::Individual& highlighted = population.getIndividual(highlightedIndex);
                 drawProjectionDebug(highlighted.getCar(), highlighted.getProgress());

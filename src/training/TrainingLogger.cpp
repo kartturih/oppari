@@ -14,9 +14,7 @@ namespace training
 namespace
 {
 
-// "YYYYMMDD_HHMMSS" from the current local time -- second resolution, which
-// is why TrainingLogger still needs a numeric-suffix fallback for two runs
-// started within the same second (see makeUniqueRunId() below).
+// "YYYYMMDD_HHMMSS", second resolution (see makeUniqueRunId()'s suffix fallback).
 std::string formatTimestampForFilename(std::tm localTime)
 {
     char buffer[32];
@@ -25,9 +23,7 @@ std::string formatTimestampForFilename(std::tm localTime)
     return std::string(buffer);
 }
 
-// "YYYY-MM-DD HH:MM:SS" -- human-readable form stored in the metadata file
-// (RunMetadata::startedAtLocal), independent of the filename-safe format
-// above.
+// "YYYY-MM-DD HH:MM:SS", for RunMetadata::startedAtLocal.
 std::string formatTimestampForDisplay(std::tm localTime)
 {
     char buffer[32];
@@ -48,11 +44,8 @@ std::tm currentLocalTime()
     return localTime;
 }
 
-// Finds the first unused "training_run_<timestamp>[-N]" stem under
-// resultsDir (which must already exist) by checking for either a matching
-// .csv or .meta.txt file -- so a CSV/metadata pair from an earlier run can
-// never be partially overwritten by a later one, even if only one of the
-// two files from that earlier run still exists for some reason.
+// First unused "training_run_<timestamp>[-N]" stem, checking both .csv and
+// .meta.txt so an earlier run's pair is never partially overwritten.
 std::string makeUniqueRunId(const std::filesystem::path& resultsDir, std::tm localTime)
 {
     const std::string baseStem = "training_run_" + formatTimestampForFilename(localTime);
@@ -76,11 +69,9 @@ void writeMetadataFile(const std::string& path, const RunMetadata& metadata, con
         throw std::runtime_error("TrainingLogger: failed to open metadata file for writing: " + path);
     }
 
-    // Plain "key = value" lines, one per line -- deliberately not JSON/INI/
-    // any other structured format: this is a human-readable reproducibility
-    // note, not something other tooling is expected to parse. Grouped to
-    // mirror the section headers in the Stage 21 report.
-    out << "# Training run metadata (Stage 21)\n";
+    // Plain "key = value" lines -- a human-readable reproducibility note,
+    // not meant for other tooling to parse.
+    out << "# Training run metadata\n";
     out << "run_id = " << metadata.runId << "\n";
     out << "started_at_local = " << metadata.startedAtLocal << "\n";
     out << "build_version = " << metadata.buildVersion << "\n";
@@ -155,12 +146,8 @@ std::string formatFloat(float value)
         return value > 0.0f ? "inf" : "-inf";
     }
 
-    // std::to_chars for floating point (C++17) is defined to never consult
-    // locale and to produce the shortest decimal representation that reads
-    // back to exactly `value` -- both properties matter here: the former is
-    // the whole point (a '.' decimal separator regardless of the process's
-    // global locale), and the latter keeps CSV output compact (e.g. "812.4"
-    // rather than a long fixed-precision expansion).
+    // to_chars never consults locale and gives the shortest round-tripping
+    // representation (e.g. "812.4", not "812.400000").
     std::array<char, 64> buffer{};
     const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
     return std::string(buffer.data(), result.ptr);
@@ -172,7 +159,9 @@ std::string csvHeaderLine()
            "species_count,largest_species_size,smallest_species_size,best_species_historical_fitness,"
            "stagnant_species_excluded,best_progress,avg_progress,laps_completed_count,completion_rate,"
            "best_genome_nodes,best_genome_connections,best_genome_enabled_connections,"
-           "avg_genome_nodes,avg_genome_connections,generation_duration_seconds";
+           "avg_genome_nodes,avg_genome_connections,generation_duration_seconds,"
+           "terminated_collision_count,terminated_max_time_count,terminated_no_progress_count,"
+           "terminated_slow_start_count";
 }
 
 std::string generationMetricsToCsvRow(const GenerationMetrics& metrics)
@@ -186,7 +175,9 @@ std::string generationMetricsToCsvRow(const GenerationMetrics& metrics)
         << formatFloat(metrics.avgProgress) << ',' << metrics.lapsCompletedCount << ',' << formatFloat(metrics.completionRate)
         << ',' << metrics.bestGenomeNodeCount << ',' << metrics.bestGenomeConnectionGeneCount << ','
         << metrics.bestGenomeEnabledConnectionCount << ',' << formatFloat(metrics.avgGenomeNodeCount) << ','
-        << formatFloat(metrics.avgGenomeConnectionGeneCount) << ',' << formatFloat(metrics.generationDurationSeconds);
+        << formatFloat(metrics.avgGenomeConnectionGeneCount) << ',' << formatFloat(metrics.generationDurationSeconds)
+        << ',' << metrics.terminatedCollisionCount << ',' << metrics.terminatedMaxTimeCount << ','
+        << metrics.terminatedNoProgressCount << ',' << metrics.terminatedSlowStartCount;
     return row.str();
 }
 
@@ -225,10 +216,7 @@ TrainingLogger::TrainingLogger(const std::string& resultsDir, const RunMetadata&
 void TrainingLogger::logGeneration(const GenerationMetrics& metrics)
 {
     m_csv << generationMetricsToCsvRow(metrics) << "\n";
-    // Flushed after every single row -- see the class comment: a long
-    // training run that is closed or crashes mid-run must never lose more
-    // than the generation currently in progress.
-    m_csv.flush();
+    m_csv.flush(); // a crash mid-run must never lose more than the in-progress row
     if (!m_csv.good())
     {
         throw std::runtime_error("TrainingLogger: failed while writing CSV row to: " + m_csvPath);

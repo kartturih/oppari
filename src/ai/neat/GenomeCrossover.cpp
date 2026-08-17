@@ -42,11 +42,8 @@ void validateFitness(float fitnessA, float fitnessB)
     }
 }
 
-// Maps each connection gene's innovation number to itself, throwing if the
-// same genome uses the same innovation number twice -- Genome::validate()
-// checks structural endpoints and duplicate (source, target) pairs, but not
-// innovation-number uniqueness, so crossover must check this itself before
-// trusting innovation numbers as an alignment key.
+// Genome::validate() doesn't check innovation-number uniqueness, so this
+// must, before innovation numbers can be trusted as an alignment key.
 std::map<InnovationNumber, const ConnectionGene*> buildInnovationMap(const Genome& genome, bool isParentA)
 {
     std::map<InnovationNumber, const ConnectionGene*> result;
@@ -63,9 +60,7 @@ std::map<InnovationNumber, const ConnectionGene*> buildInnovationMap(const Genom
     return result;
 }
 
-// Throws if the same NodeId exists in both genomes with a different
-// NodeType. One direction (scanning a's nodes and looking each up in b)
-// covers every shared ID, since the relation is symmetric.
+// Throws if the same NodeId has a different NodeType in each genome.
 void validateNodeTypeConsistency(const Genome& a, const Genome& b)
 {
     for (const NodeGene& nodeInA : a.nodes())
@@ -84,10 +79,8 @@ const NodeGene* findNodeInEitherParent(NodeId id, const Genome& parentA, const G
     return found != nullptr ? found : parentB.findNode(id);
 }
 
-// True if 'to' is reachable from 'from' by following only *enabled*
-// connections within a plain staged vector (not yet a Genome, since not all
-// of the child's nodes may exist yet during equal-fitness candidate
-// inspection). Mirrors GenomeMutator's own hasEnabledPath() helper.
+// Same as GenomeMutator's hasEnabledPath(), but over a staged vector (the
+// child isn't a Genome yet during equal-fitness candidate inspection).
 bool hasEnabledPathAmong(const std::vector<ConnectionGene>& connections, NodeId from, NodeId to)
 {
     std::vector<NodeId> frontier{from};
@@ -130,9 +123,7 @@ bool wouldCreateDuplicateDirectedConnection(const std::vector<ConnectionGene>& e
     return false;
 }
 
-// Adding candidate would close a cycle among enabled connections exactly
-// when candidate is itself enabled and its target can already reach its
-// source through the connections decided so far.
+// True if candidate is enabled and its target can already reach its source.
 bool wouldCreateEnabledCycle(const std::vector<ConnectionGene>& existing, const ConnectionGene& candidate)
 {
     if (!candidate.isEnabled())
@@ -142,8 +133,7 @@ bool wouldCreateEnabledCycle(const std::vector<ConnectionGene>& existing, const 
     return hasEnabledPathAmong(existing, candidate.getTargetId(), candidate.getSourceId());
 }
 
-// One matching connection gene: same innovation number, already verified to
-// share the same source/target, present in both parents.
+// A connection gene present in both parents with the same innovation number.
 struct MatchingPair
 {
     InnovationNumber innovation;
@@ -171,11 +161,8 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
 
     validateNodeTypeConsistency(parentA, parentB);
 
-    // Align connection genes by innovation number alone -- never by vector
-    // index or endpoint pair. This single, RNG-free pass both classifies
-    // every gene as matching/non-matching and validates that every
-    // matching innovation agrees on source/target between parents, so any
-    // structural inconsistency is rejected before any RNG draw occurs.
+    // Align by innovation number, classifying matching/non-matching and
+    // checking endpoint agreement -- all before any RNG draw.
     std::vector<MatchingPair> matchingPairs;
     std::vector<const ConnectionGene*> aOnly;
     std::vector<const ConnectionGene*> bOnly;
@@ -209,9 +196,6 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
 
     std::uniform_real_distribution<float> draw01(0.0f, 1.0f);
 
-    // Matching genes: always inherited, one draw for which parent's
-    // structural/weight copy, plus (only when needed) one independent draw
-    // for the child's enabled state.
     for (const MatchingPair& pair : matchingPairs)
     {
         const bool chooseA = draw01(m_rng) < config.matchingGeneChooseParentAProbability;
@@ -236,9 +220,6 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
 
     if (fitterIsA)
     {
-        // No RNG draw: every non-matching gene of the fitter parent is
-        // inherited as-is, every non-matching gene of the other parent is
-        // dropped.
         for (const ConnectionGene* connection : aOnly)
         {
             childConnections.push_back(*connection);
@@ -253,10 +234,8 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
     }
     else
     {
-        // Equal fitness: merge both parents' non-matching candidates into
-        // one ascending-by-innovation sequence, so the RNG draw order is a
-        // deterministic function of genome content alone, then decide each
-        // one independently.
+        // Equal fitness: merge both parents' non-matching candidates,
+        // ascending by innovation, so RNG draw order is deterministic.
         std::vector<const ConnectionGene*> candidates;
         candidates.reserve(aOnly.size() + bOnly.size());
         candidates.insert(candidates.end(), aOnly.begin(), aOnly.end());
@@ -274,18 +253,14 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
             if (wouldCreateDuplicateDirectedConnection(childConnections, *candidate) ||
                 wouldCreateEnabledCycle(childConnections, *candidate))
             {
-                // Would make the child structurally invalid -- skip rather
-                // than inventing a replacement gene.
-                continue;
+                continue; // would make the child invalid -- skip, don't repair
             }
             childConnections.push_back(*candidate);
         }
     }
 
-    // Node collection: mandatory interface nodes (Input/Bias/Output) from
-    // both parents are always included, regardless of which connections
-    // were inherited; Hidden nodes are included only if an inherited
-    // connection actually references them.
+    // Interface nodes (Input/Bias/Output) always included; Hidden nodes only
+    // if an inherited connection references them.
     std::map<NodeId, NodeGene> requiredNodes;
     for (const NodeGene& node : parentA.nodes())
     {
@@ -310,12 +285,7 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
                 const NodeGene* found = findNodeInEitherParent(endpoint, parentA, parentB);
                 if (found == nullptr)
                 {
-                    // Cannot happen given the invariants above (every
-                    // inherited connection gene came verbatim from a
-                    // parent that itself passed validate(), so its
-                    // endpoints must exist in that same parent) -- kept as
-                    // a defensive, clearly-thrown guard rather than ever
-                    // inventing a node.
+                    // Defensive guard; shouldn't happen given the invariants above.
                     throw std::invalid_argument("GenomeCrossover: inherited connection references an unknown node");
                 }
                 requiredNodes.emplace(endpoint, *found);
@@ -323,9 +293,6 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
         }
     }
 
-    // std::map already iterates ascending by key, so both of these are
-    // naturally sorted -- nodes by ID, connections by innovation number --
-    // independent of either parent's own storage order.
     std::vector<NodeGene> childNodes;
     childNodes.reserve(requiredNodes.size());
     for (const auto& [id, node] : requiredNodes)

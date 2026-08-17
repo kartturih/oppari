@@ -39,10 +39,8 @@ void validatePopulationConfig(const PopulationConfig& config)
     }
 }
 
-// One past the highest NodeId used anywhere in genome (0 if genome has no
-// nodes) -- computed by scanning genome itself, never hardcoded, so a
-// fresh InnovationTracker seeded from this can never allocate a node ID
-// the base genome already uses.
+// One past the highest NodeId in genome (0 if none) -- so a fresh
+// InnovationTracker can never collide with an ID baseGenome already uses.
 NodeId computeFirstAvailableNodeId(const Genome& genome)
 {
     NodeId maxId = -1;
@@ -53,8 +51,7 @@ NodeId computeFirstAvailableNodeId(const Genome& genome)
     return maxId + 1;
 }
 
-// One past the highest connection innovation number used anywhere in
-// genome (0 if genome has no connections); same reasoning as above.
+// One past the highest connection innovation number in genome.
 InnovationNumber computeFirstAvailableInnovation(const Genome& genome)
 {
     InnovationNumber maxInnovation = -1;
@@ -175,12 +172,8 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
     , m_compatibilityConfig(compatibilityConfig)
     , m_speciationConfig(speciationConfig)
     , m_innovationTracker(computeFirstAvailableNodeId(baseGenome), computeFirstAvailableInnovation(baseGenome))
-    // Deterministic, distinct seed streams derived from one
-    // PopulationConfig::randomSeed: the orchestration RNG uses the seed
-    // itself, GenomeMutator uses seed+1, GenomeCrossover uses seed+2 --
-    // arbitrary but fixed offsets (std::uint32_t wraparound on overflow is
-    // well-defined, not UB, so this is safe for any input seed). No
-    // std::random_device, rand(), or time-based seeding anywhere.
+    // Distinct deterministic seed streams from one randomSeed (no
+    // random_device/rand()/time-based seeding anywhere).
     , m_mutator(populationConfig.randomSeed + 1u)
     , m_crossover(populationConfig.randomSeed + 2u)
     , m_orchestrationRng(populationConfig.randomSeed)
@@ -201,10 +194,8 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
         m_individuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
     }
 
-    // Establishes m_speciator's persistent species for generation 0 (for
-    // HUD display before this generation has even started evaluating) --
-    // no fitness history is recorded here; that only ever happens once a
-    // generation has actually finished (see reproduce()).
+    // Establishes species for generation 0 (for HUD display); no fitness
+    // history recorded yet -- that happens once a generation finishes.
     computeCurrentSpecies();
 }
 
@@ -333,9 +324,7 @@ void Population::reproduce()
 {
     const std::size_t populationSize = m_individuals.size();
 
-    // 1. Preserve final RAW fitness values before anything else changes --
-    // never overwritten; adjusted fitness (below) is always a separate
-    // vector.
+    // 1. Preserve final raw fitness (adjusted fitness below is separate).
     std::vector<float> fitnessValues;
     fitnessValues.reserve(populationSize);
     for (const Individual& individual : m_individuals)
@@ -350,30 +339,16 @@ void Population::reproduce()
     }
     m_lastGenerationBestFitness = bestFitness;
 
-    // 2. Speciate the generation that just finished ONCE -- this single,
-    // persistent Species vector (ascending SpeciesId order, per Speciator's
-    // contract; a species compatible with its OLD representative keeps its
-    // SpeciesId and its accumulated age/history from earlier generations --
-    // see Speciator::speciate()) is the sole source of species membership
-    // for every remaining step: fitness sharing, species fitness totals,
-    // offspring allocation, and species-local parent pools.
+    // 2. Speciate the finished generation once; this Species vector drives
+    // every remaining step (fitness sharing, allocation, parent selection).
     const std::vector<Species>& currentSpecies = computeCurrentSpecies();
     const std::size_t speciesCount = currentSpecies.size();
 
-    // 2b. Update each species' persistent fitness history from this
-    // generation's RAW fitness values, now that they are finally known --
-    // Speciator itself only manages membership; this is the one point where
-    // Population feeds it the fitness data needed to advance
-    // age/historicalBestFitness/generationsSinceImprovement/stagnant (see
-    // Species::recordGeneration()). currentSpecies (a reference into
-    // m_speciator's own storage) reflects the updated values immediately
-    // afterward, since recordGeneration() mutates each Species in place --
-    // no reallocation of the species vector happens here.
+    // 2b. Feed raw fitness into each species' persistent history now that
+    // it's known (age/historicalBestFitness/stagnation).
     m_speciator.updateFitnessHistory(fitnessValues, m_populationConfig.speciesStagnationLimit);
 
-    // 3. Fitness sharing: adjustedFitness[i] = rawFitness[i] / (size of
-    // i's species). Exists only for reproduction below -- fitnessValues
-    // (raw) is never modified.
+    // 3. Fitness sharing: adjustedFitness[i] = rawFitness[i] / speciesSize.
     std::vector<float> adjustedFitness(populationSize, 0.0f);
     for (const Species& species : currentSpecies)
     {
@@ -384,10 +359,8 @@ void Population::reproduce()
         }
     }
 
-    // 4. Per-species adjusted-fitness sum (unclamped -- exposed via
-    // SpeciesReproductionStats for HUD/debug) and effective adjusted-fitness
-    // sum (each member's contribution clamped to >= 0, per the negative-
-    // fitness safety rule -- used only for offspring allocation below).
+    // 4. Per-species adjusted-fitness sum (unclamped, for HUD) and
+    // effective sum (clamped >= 0 per member, for offspring allocation).
     std::vector<float> speciesAdjustedFitnessSum(speciesCount, 0.0f);
     std::vector<float> speciesEffectiveFitnessSum(speciesCount, 0.0f);
     for (std::size_t s = 0; s < speciesCount; ++s)
@@ -399,18 +372,10 @@ void Population::reproduce()
         }
     }
 
-    // 4b. Reproduction eligibility (Stage 17): a stagnant species is
-    // excluded from normal offspring allocation entirely. EXCEPTION: if
-    // every species this generation is stagnant, exactly one -- the one
-    // with the highest historicalBestFitness, ties broken by lower
-    // SpeciesId -- is temporarily treated as eligible for THIS generation's
-    // allocation only, to prevent total population collapse. Processing
-    // currentSpecies in its already-ascending-SpeciesId order and only ever
-    // replacing the fallback candidate on a STRICTLY greater
-    // historicalBestFitness gives the lower-SpeciesId tie-break for free.
-    // This override never touches the underlying Species's own stagnant/
-    // generationsSinceImprovement state -- it is a reproduction-time
-    // allocation decision only, recomputed fresh every generation.
+    // 4b. A stagnant species is excluded from offspring allocation, unless
+    // every species is stagnant -- then the one with the highest
+    // historicalBestFitness (lowest SpeciesId breaks ties) is temporarily
+    // allowed, to prevent total collapse. Never touches Species's own state.
     std::vector<bool> reproductionEligible(speciesCount, true);
     bool anyEligible = false;
     for (std::size_t s = 0; s < speciesCount; ++s)
@@ -431,11 +396,8 @@ void Population::reproduce()
         reproductionEligible[fallbackIndex] = true;
     }
 
-    // 5. Global elitism ranking: indices sorted by (higher RAW fitness
-    // first, lower original index as a deterministic tie-break). Elites are
-    // selected purely by raw fitness, regardless of their species'
-    // stagnation/eligibility -- an exceptional individual from an otherwise
-    // stagnant species can still survive as a global elite.
+    // 5. Global elitism ranking: higher raw fitness first, lower index breaks
+    // ties. An exceptional individual in a stagnant species can still be an elite.
     std::vector<std::size_t> rankedIndices(populationSize);
     for (std::size_t i = 0; i < populationSize; ++i)
     {
@@ -450,19 +412,9 @@ void Population::reproduce()
                   return a < b;
               });
 
-    // 6. Offspring allocation across species for the remaining (non-elite)
-    // slots -- restricted to reproduction-eligible species only (Stage 17):
-    // an ineligible (stagnant, non-fallback) species is simply left out of
-    // the input to allocateSpeciesOffspring() entirely, so it contributes
-    // nothing to the effective-fitness total and the zero-total-fitness
-    // fallback (if it triggers) only ever splits slots among the eligible
-    // subset. Within that eligible subset, allocation is unchanged from
-    // Stage 16: deterministic proportional allocation (floor + largest
-    // fractional remainder, ties broken by lower SpeciesId), or an
-    // even-as-possible split if every eligible species has zero effective
-    // fitness. Global elites are copied separately above/below and never
-    // subtracted from any species' fitness total here -- this allocation
-    // applies only to remainingSlots.
+    // 6. Offspring allocation for the non-elite slots, restricted to
+    // eligible species (an ineligible one gets nothing and contributes
+    // nothing to the totals allocateSpeciesOffspring() sees).
     const std::size_t remainingSlots = populationSize - m_populationConfig.eliteCount;
     std::vector<SpeciesId> eligibleSpeciesIds;
     std::vector<float> eligibleEffectiveFitnessSums;
@@ -495,9 +447,7 @@ void Population::reproduce()
         throw std::logic_error("Population::reproduce: species offspring allocation did not sum to the remaining slot count");
     }
 
-    // 7. Record this generation's reproduction stats for read-only
-    // HUD/debug/testing consumption -- derived entirely from the data
-    // computed above, never mutated afterward.
+    // 7. Record this generation's reproduction stats for HUD/debug/testing.
     m_reproductionStats.clear();
     m_reproductionStats.reserve(speciesCount);
     for (std::size_t s = 0; s < speciesCount; ++s)
@@ -515,17 +465,8 @@ void Population::reproduce()
         m_reproductionStats.push_back(stats);
     }
 
-    // 7b. Stage 21: snapshot this generation's full training::
-    // GenerationMetrics row -- the LAST point in reproduce() where
-    // m_individuals still holds the just-finished generation (step 9 below
-    // replaces it). Every per-individual value read here (raw/adjusted
-    // fitness, best progress, hasCompletedLap, genome complexity, elapsed
-    // evaluation time) comes straight from that about-to-be-replaced
-    // generation -- nothing computed here feeds back into reproduction
-    // (fitnessValues/adjustedFitness/currentSpecies/rankedIndices/
-    // reproductionEligible are all read-only here, exactly as already
-    // computed above). See training::GenerationMetrics's own doc comment
-    // for the precise definition of every field.
+    // 7b. Snapshot this generation's metrics -- last point where
+    // m_individuals still holds the just-finished generation.
     {
         training::GenerationMetricsInput metricsInput;
         metricsInput.generation = m_generation;
@@ -536,12 +477,14 @@ void Population::reproduce()
         metricsInput.bestProgressValues.reserve(populationSize);
         metricsInput.completedLap.reserve(populationSize);
         metricsInput.genomeComplexities.reserve(populationSize);
+        metricsInput.finishReasons.reserve(populationSize);
         float generationDurationSeconds = 0.0f;
         for (const Individual& individual : m_individuals)
         {
             metricsInput.bestProgressValues.push_back(individual.getProgress().getBestProgress());
             metricsInput.completedLap.push_back(individual.getFitnessEvaluator().hasCompletedLap());
             metricsInput.genomeComplexities.push_back(training::computeGenomeComplexity(individual.getGenome()));
+            metricsInput.finishReasons.push_back(individual.getFitnessEvaluator().getFinishReason());
             generationDurationSeconds =
                 std::max(generationDurationSeconds, individual.getFitnessEvaluator().getElapsedTime());
         }
@@ -576,16 +519,9 @@ void Population::reproduce()
         m_lastGenerationMetrics = training::buildGenerationMetrics(metricsInput);
     }
 
-    // 8. Construct every new Genome -- entirely from the current (soon to
-    // be replaced) generation's data. m_individuals is not touched at any
-    // point during this construction, so parent selection always reads the
-    // complete, unmodified old generation. Global elites are copied first
-    // (no crossover, no mutation), then each species' allocated offspring
-    // is built using parents drawn only from that same species -- species
-    // are processed in ascending SpeciesId order, matching currentSpecies.
-    // A species with zero allocated offspring (stagnant and not this
-    // generation's fallback) simply contributes no non-elite children --
-    // the inner loop below never executes for it.
+    // 8. Build every new Genome from the current (soon-replaced) generation.
+    // Elites copied first, then each species' allocated offspring from
+    // parents drawn only within that species.
     std::vector<Genome> newGenomes;
     newGenomes.reserve(populationSize);
 
@@ -599,20 +535,12 @@ void Population::reproduce()
         const Species& species = currentSpecies[s];
         for (std::size_t offspring = 0; offspring < offspringAllocation[s]; ++offspring)
         {
-            // Both parents come from this species' member indices only --
-            // no cross-species mating. A singleton species (size 1) simply
-            // resolves both selections to its one member; crossover(parent,
-            // parent) with equal fitness is well-defined (GenomeCrossover
-            // never throws on identical parents) and deterministically
-            // reproduces that member's own genes, so no special-casing is
-            // needed for singleton species.
+            // No cross-species mating; a singleton species mates with itself.
             const std::size_t parentAIndex = selectParentFromSpecies(species, fitnessValues);
             const std::size_t parentBIndex = selectParentFromSpecies(species, fitnessValues);
             const Genome& parentA = m_individuals[parentAIndex].getGenome();
             const Genome& parentB = m_individuals[parentBIndex].getGenome();
 
-            // RAW fitness is passed into crossover (never adjusted fitness)
-            // -- preserves the existing fitter-parent gene inheritance rule.
             Genome child = m_crossover.crossover(parentA, fitnessValues[parentAIndex], parentB, fitnessValues[parentBIndex],
                                                   m_crossoverConfig);
 
@@ -629,8 +557,7 @@ void Population::reproduce()
         throw std::logic_error("Population::reproduce: constructed next generation does not match populationSize");
     }
 
-    // 9. Rebuild every Individual from the new Genomes, then replace the
-    // population as one coherent operation.
+    // 9. Rebuild every Individual and replace the population atomically.
     std::vector<Individual> newIndividuals;
     newIndividuals.reserve(populationSize);
     for (Genome& genome : newGenomes)

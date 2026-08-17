@@ -34,32 +34,20 @@ const std::vector<Species>& Speciator::speciate(const std::vector<Genome>& genom
 {
     validateSpeciationConfig(speciationConfig);
 
-    // 1. Clear this pass's membership from every persistent species. Its
-    // SpeciesId, representative (still the OLD one, inherited from the
-    // previous call), and age/history/stagnation state are untouched.
+    // Clear this pass's membership; ID/representative/history untouched.
     for (Species& species : m_species)
     {
         species.clearMembers();
     }
 
-    // 2 & 3. Assign every genome, strictly in vector-index order, to the
-    // first existing persistent species (checked in ascending SpeciesId
-    // order -- m_species is always maintained in that order) whose OLD
-    // representative it is compatible with; otherwise found a new species.
+    // Assign each genome, in vector-index order, to the first compatible
+    // existing species (ascending SpeciesId order); else found a new one.
     for (std::size_t genomeIndex = 0; genomeIndex < genomes.size(); ++genomeIndex)
     {
         const Genome& genome = genomes[genomeIndex];
 
-        // Validate this genome before it can join or found any species --
-        // reuses Genome::validate() for structural correctness, plus a
-        // self-comparison through compatibilityDistance() purely to reuse
-        // its own innovation-uniqueness check (it throws on two different
-        // ConnectionGenes sharing an innovation number) rather than
-        // duplicating that logic here. Runs unconditionally, before any
-        // comparison against an existing representative and before any
-        // SpeciesId is allocated, so a genome that fails validation can
-        // never end up partially added to a species or consume a
-        // SpeciesId -- the exception simply propagates out of speciate().
+        // validate() for structure; self-compatibilityDistance() reuses its
+        // innovation-uniqueness check. Must pass before joining/founding.
         genome.validate();
         (void)compatibilityDistance(genome, genome, compatibilityConfig);
 
@@ -77,10 +65,8 @@ const std::vector<Species>& Speciator::speciate(const std::vector<Genome>& genom
 
         if (!joined)
         {
-            // m_species stores creation order via push_back, which is
-            // exactly ascending-SpeciesId order since m_nextSpeciesId only
-            // ever increments -- appending here always keeps the whole
-            // vector sorted ascending by SpeciesId, even across calls.
+            // push_back keeps m_species sorted ascending by SpeciesId, since
+            // m_nextSpeciesId only ever increments.
             Species newSpecies(m_nextSpeciesId, genome);
             ++m_nextSpeciesId;
             newSpecies.addMember(genomeIndex);
@@ -88,20 +74,12 @@ const std::vector<Species>& Speciator::speciate(const std::vector<Genome>& genom
         }
     }
 
-    // 4. Remove extinct species (zero members after this pass). Erasing
-    // preserves the relative order of survivors, so ascending-SpeciesId
-    // order is preserved. The removed SpeciesId is never reused --
-    // m_nextSpeciesId is never rolled back.
+    // Remove extinct species (zero members); SpeciesId is never reused.
     m_species.erase(std::remove_if(m_species.begin(), m_species.end(), [](const Species& species) { return species.empty(); }),
                      m_species.end());
 
-    // 5. Reselect every surviving species' representative from THIS pass's
-    // own members (lowest genome index, no RNG) -- strictly after every
-    // membership decision above, so this pass's own assignments always
-    // compared against the OLD representative. The new representative only
-    // takes effect starting with the next speciate() call. Member indices
-    // are always ascending (Species::addMember()'s documented invariant),
-    // so front() is exactly the lowest index.
+    // Reselect each survivor's representative (lowest member index, no
+    // RNG) -- takes effect only from the NEXT speciate() call onward.
     for (Species& species : m_species)
     {
         species.setRepresentative(genomes[species.getMemberIndices().front()]);

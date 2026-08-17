@@ -26,8 +26,6 @@ Observation buildObservation(const simulation::Car& car)
         observation.values[i] = std::clamp(sensors[i].normalizedDistance, 0.0f, 1.0f);
     }
 
-    // Car is the single source of truth for its own configured max speed;
-    // Observation only ever reads it, never duplicates the literal.
     const float maxSpeed = car.getMaxSpeed();
 
     observation.values[5] = std::clamp(car.getSpeed() / maxSpeed, 0.0f, 1.0f);

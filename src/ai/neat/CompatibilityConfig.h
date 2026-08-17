@@ -5,26 +5,14 @@
 namespace ai::neat
 {
 
-// Tunable coefficients/threshold for compatibilityDistance(). Pure data --
-// it performs no validation itself; compatibilityDistance() validates every
-// field (throwing std::invalid_argument on an invalid one) before using
-// them.
-//
-// excessCoefficient (c1) / disjointCoefficient (c2) -- weight applied to
-// the excess/disjoint connection-gene counts, each divided by the
-// normalization factor N.
-//
-// weightDifferenceCoefficient (c3) -- weight applied to the mean absolute
-// weight difference of matching connection genes (not divided by N).
-//
-// smallGenomeNormalizationThreshold -- see compatibilityDistance()'s own
-// doc comment for the exact normalization rule this drives.
+// Tunable coefficients/threshold for compatibilityDistance(), validated by
+// that function before use.
 struct CompatibilityConfig
 {
-    float excessCoefficient = 1.0f;
-    float disjointCoefficient = 1.0f;
-    float weightDifferenceCoefficient = 0.4f;
-    std::size_t smallGenomeNormalizationThreshold = 20;
+    float excessCoefficient = 1.0f;         // c1, weight on excess genes / N
+    float disjointCoefficient = 1.0f;       // c2, weight on disjoint genes / N
+    float weightDifferenceCoefficient = 0.4f; // c3, weight on mean matching-gene weight diff
+    std::size_t smallGenomeNormalizationThreshold = 20; // see compatibilityDistance()'s N rule
 };
 
 } // namespace ai::neat

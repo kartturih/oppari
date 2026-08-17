@@ -12,46 +12,24 @@
 namespace ai::neat
 {
 
-// One evaluated member of a Population: a Genome plus everything needed to
-// run it in simulation and score it -- its own Car, AIController (built
-// once from the Genome's phenotype), TrackProgress, and FitnessEvaluator.
-// Every Individual's Car is a fully independent instance (its own
-// position, velocity, alive state, sensors); one Individual crashing,
-// finishing, or otherwise changing state never affects any other.
-// Individual performs no reproduction, mutation, or crossover of its own
-// -- that is entirely Population's responsibility, operating on copies of
-// the Genome this class exposes read-only.
-//
-// Conceptual construction: Genome -> buildPhenotype() -> AIController ->
-// Individual. The constructor performs this chain internally, so callers
-// only ever need to supply a Genome plus the shared simulation
-// environment/spawn pose; no separate NeuralNetwork is stored anywhere --
-// AIController already owns the one built from this Individual's Genome.
+// One evaluated Population member: a Genome plus its own Car, AIController
+// (built from the Genome's phenotype), TrackProgress, and FitnessEvaluator.
+// Every Individual is fully independent -- one crashing/finishing never
+// affects another. Performs no reproduction/mutation/crossover itself.
 class Individual
 {
 public:
-    // Builds the AIController's phenotype from genome (propagates whatever
-    // ai::neat::buildPhenotype() throws for an invalid/incompatible
-    // genome), constructs an independent Car and TrackProgress against
-    // track, and resets car/progress/fitness to spawnPosition/spawnHeading
-    // -- so a freshly constructed Individual is immediately ready to
-    // update().
+    // Builds the phenotype from genome, constructs Car/TrackProgress
+    // against track, and resets to spawnPosition/spawnHeading.
     Individual(Genome genome, const simulation::Track& track, const simulation::CarParams& carParams,
                Vector2 spawnPosition, float spawnHeading);
 
-    // Advances this individual by deltaTime seconds: the AIController reads
-    // the Car's current state and produces a CarInput, the Car updates,
-    // then TrackProgress and FitnessEvaluator update from the result -- in
-    // that fixed order, matching the existing single-car control loop.
-    // Does nothing once isFinished() is true: a finished individual never
-    // updates again, including never re-evaluating its controller.
+    // Advances by deltaTime: controller -> Car -> TrackProgress -> fitness.
+    // No-op once isFinished().
     void update(float deltaTime);
 
-    // Resets this individual back to its spawn pose: Car, TrackProgress,
-    // and FitnessEvaluator all reset, exactly as at construction. The
-    // Genome and AIController (and therefore its phenotype) are untouched
-    // -- this restarts the same individual's evaluation, it does not
-    // create a new one.
+    // Resets Car/TrackProgress/FitnessEvaluator to spawn; Genome/AIController
+    // untouched.
     void reset();
 
     bool isFinished() const { return m_fitness.isEvaluationFinished(); }

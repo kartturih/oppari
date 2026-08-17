@@ -104,9 +104,7 @@ NeuralNetwork::NeuralNetwork(std::vector<Node> nodes, std::vector<Connection> co
         ++indegree[dstIndex];
     }
 
-    // Kahn's algorithm over enabled edges only. This makes evaluation order
-    // depend solely on actual dependencies -- never on node ID value or on
-    // the order nodes/connections were passed in.
+    // Kahn's algorithm over enabled edges only.
     std::vector<int> ready;
     ready.reserve(nodeCount);
     for (int i = 0; i < nodeCount; ++i)
@@ -143,8 +141,7 @@ NeuralNetwork::NeuralNetwork(std::vector<Node> nodes, std::vector<Connection> co
         m_nodeTypes[i] = nodes[i].type;
     }
 
-    // Input/Bias values are seeded directly in evaluate(), not computed, so
-    // only Hidden/Output nodes need to be in the evaluation order.
+    // Input/Bias are seeded directly in evaluate(), not computed.
     m_evalOrder.reserve(nodeCount);
     for (int idx : order)
     {

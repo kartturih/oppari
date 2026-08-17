@@ -6,95 +6,62 @@
 namespace ai
 {
 
-// Why an evaluation ended. None while it is still running.
+// Why an evaluation ended (None while still running). Completing a lap
+// never itself ends an evaluation -- the car keeps driving.
 enum class EvaluationFinishReason
 {
     None,
     Collision,
     TimeLimit,
-    NoProgress
+    NoProgress,
+    InsufficientInitialProgress
 };
 
-// Computes one scalar fitness value for one car from its TrackProgress and
-// elapsed evaluation time. FitnessEvaluator depends only on
-// simulation::Car (for isAlive()) and simulation::TrackProgress (for
-// progress/lap/checkpoint state) -- it never reads Genome or NeuralNetwork,
-// and manual and AI control modes both feed it through the exact same
-// update() call.
-//
-// Fitness v2 (Stage 15A) -- see FitnessEvaluator.cpp for the exact constants
-// -----------------------------------------------------------------------
-// Fitness v1 (Stage 8-14) rewarded raw survival time (elapsedTime *
-// kSurvivalRewardPerSecond). That is a real optimization target: standing
-// still (or crawling as slowly as possible while still avoiding collision)
-// reduces collision risk and directly increases fitness, with nothing in
-// the objective pushing back against it. By generation 1, many agents had
-// already discovered exactly that. Fitness v2 removes every term that
-// rewards time merely passing, and instead rewards reaching progress
-// *quickly*:
+// Computes one scalar fitness value from a Car's aliveness and its
+// TrackProgress -- never reads Genome/NeuralNetwork; manual and AI control
+// both feed it through the same update().
 //
 //   fitness = baseProgressFitness + progressRateReward + lapSpeedBonus
 //
-//   baseProgressFitness =
-//       TrackProgress::getBestProgress()            * kProgressPointsPerLap
-//     + TrackProgress::getTotalCheckpointsPassed()  * kCheckpointReward
-//     + TrackProgress::getLapCount()                * kCompletedLapReward
+//   baseProgressFitness = bestProgress * kProgressPointsPerLap
+//                        + checkpointsPassed * kCheckpointReward
+//                        + lapCount * kCompletedLapReward
+//   progressRate        = bestProgress / max(elapsedTime, kSmallTimeEpsilon)
+//   progressRateReward   = progressRate * kProgressRateScale
+//   lapSpeedBonus        = hasCompletedLap()
+//                            ? clamp(kLapTimeReferenceSeconds / bestLapTime, 0, kMaxLapSpeedFactor) * kLapSpeedBonusScale
+//                            : 0
 //
-//   progressRate       = bestProgress / max(elapsedTime, kSmallTimeEpsilon)
-//   progressRateReward = progressRate * kProgressRateScale
+// Rewards reaching progress QUICKLY rather than raw survival time (an
+// earlier version rewarding elapsed time let agents learn to idle safely
+// instead of driving) -- progressRateReward can only shrink as elapsedTime
+// grows with progress held fixed, so waiting never helps. Nothing here
+// reads instantaneous Car speed directly.
 //
-//   lapSpeedBonus = hasCompletedLap()
-//                       ? clamp(kLapTimeReferenceSeconds / max(bestLapTime, kSmallTimeEpsilon), 0, kMaxLapSpeedFactor)
-//                         * kLapSpeedBonusScale
-//                       : 0
+// Lap timing: detected purely by TrackProgress::getLapCount() increasing;
+// lap time = elapsedTime since the last completed lap (or spawn).
 //
-// baseProgressFitness is unchanged from v1 and remains the dominant term
-// (see the constants in the .cpp for the exact scale comparison).
-// progressRateReward is the key new term: for a *fixed* amount of progress,
-// it is strictly larger the less time that progress took, so two cars that
-// reach the same point on the track no longer score equally -- the faster
-// one wins. It can never reward waiting: with bestProgress held fixed,
-// progressRate (and therefore progressRateReward) can only shrink or stay
-// flat as elapsedTime grows, never grow. lapSpeedBonus is a separate,
-// bounded bonus specifically for *completed* laps (see "Lap timing" below)
-// -- faster completed laps score higher, a slower completed lap can never
-// reduce the recorded best lap time, and there is no lap-speed bonus at all
-// before any lap has been completed. Nothing in this formula rewards
-// instantaneous Car speed directly (only Car::isAlive() is ever read) or
-// survival time on its own.
-//
-// Lap timing
-// ----------
-// FitnessEvaluator has no notion of a clock beyond deltaTime accumulation;
-// it detects a completed lap purely by watching
-// TrackProgress::getLapCount() increase between update() calls (never by
-// reading any other lap/timer state from TrackProgress, which exposes
-// none). On an increase, the lap time is elapsedTime since the start of
-// that lap attempt (m_lapStartTime, itself reset to the current elapsedTime
-// right after every completed lap, and implicitly 0 at construction/reset
-// -- i.e. the first lap's start is spawn). If getLapCount() somehow jumps by
-// more than 1 in a single update() (not expected from normal physics --
-// TrackProgress's own plausibility gate bounds how far a single update can
-// advance), the whole jump is treated as one lap-timing event spanning the
-// entire elapsed interval since the last completed lap: deterministic, and
-// the only sensible behavior with no finer-grained timing information to
-// split across the jump.
+// Early termination (independent of the formula above -- a terminated
+// evaluation's fitness is just whatever it had already accumulated, as if
+// kMaxEvaluationTime had hit early). Both are driven only by
+// TrackProgress::getBestProgress(), never speed/coordinates:
+//   1. No-progress timeout: ends the run if bestProgress hasn't grown by
+//      more than kProgressImprovementEpsilon for kNoProgressTimeout seconds
+//      (catches circling/parking; backward or revisited progress never
+//      resets the timer, since bestProgress is monotonic).
+//   2. Initial-progress deadline: a one-shot check at
+//      kInitialProgressDeadline seconds requiring bestProgress >=
+//      kMinimumInitialProgress (catches a car crawling just enough to dodge
+//      rule 1 while still stuck near spawn).
+// A car making genuine progress can still run to kMaxEvaluationTime.
 class FitnessEvaluator
 {
 public:
-    // Clears all evaluation state: fitness and every fitness component back
-    // to 0, elapsed time and the no-progress timer to 0, the finish reason
-    // to None, and all lap-timing state (previous lap count, lap start
-    // time, last/best lap time, hasCompletedLap()) back to "no laps
-    // completed yet".
+    // Clears fitness, elapsed time, finish reason, and lap-timing state.
     void reset();
 
-    // Advances the evaluation by deltaTime seconds using the car's current
-    // alive state and the progress tracker's current values. Does nothing
-    // once the evaluation has already finished (isEvaluationFinished() ==
-    // true) -- fitness (and every component below), elapsed time, all lap
-    // timing state, and the finish reason all stay frozen at their final
-    // values.
+    // Advances by deltaTime from the car/progress's current state. No-op
+    // once isEvaluationFinished().
     void update(const simulation::Car& car, const simulation::TrackProgress& progress, float deltaTime);
 
     float getFitness() const { return m_fitness; }
@@ -102,20 +69,13 @@ public:
     bool isEvaluationFinished() const { return m_finishReason != EvaluationFinishReason::None; }
     EvaluationFinishReason getFinishReason() const { return m_finishReason; }
 
-    // Fitness component breakdown from the most recent update() (or reset()
-    // to 0) -- read-only, purely for HUD/debug visibility into why the
-    // objective favors a given behavior. getFitness() always equals their
-    // sum (within float rounding).
+    // Fitness component breakdown from the most recent update(); sums to getFitness().
     float getBaseProgressFitness() const { return m_baseProgressFitness; }
     float getProgressRate() const { return m_progressRate; }
     float getProgressRateReward() const { return m_progressRateReward; }
     float getLapSpeedBonus() const { return m_lapSpeedBonus; }
 
-    // Lap timing, read-only. getBestLapTime()/getLastLapTime() are only
-    // meaningful once hasCompletedLap() is true -- before that, both read
-    // as 0.0f (the documented "no completed lap yet" sentinel), which is
-    // never itself a valid lap time (a lap always takes some positive
-    // amount of simulated time).
+    // getBestLapTime()/getLastLapTime() are 0.0f (sentinel) until hasCompletedLap().
     bool hasCompletedLap() const { return m_hasCompletedLap; }
     float getBestLapTime() const { return m_bestLapTime; }
     float getLastLapTime() const { return m_lastLapTime; }
@@ -126,18 +86,15 @@ private:
     float m_fitness = 0.0f;
     float m_elapsedTime = 0.0f;
 
-    float m_lastMeaningfulBestProgress = 0.0f; // best progress last time meaningful forward progress was seen
-    float m_timeSinceProgress = 0.0f;          // seconds since best progress last advanced meaningfully
+    float m_lastMeaningfulBestProgress = 0.0f;
+    float m_timeSinceProgress = 0.0f;
 
-    // Lap timing state (see the class comment's "Lap timing" section).
-    int m_previousLapCount = 0;     // TrackProgress::getLapCount() as of the last update()
-    float m_lapStartTime = 0.0f;    // m_elapsedTime at the start of the lap currently in progress
-    float m_lastLapTime = 0.0f;     // most recently completed lap's time; 0 (sentinel) if none yet
-    float m_bestLapTime = 0.0f;     // fastest completed lap's time; 0 (sentinel) if none yet
-    bool m_hasCompletedLap = false; // true once at least one lap has been completed
+    int m_previousLapCount = 0;
+    float m_lapStartTime = 0.0f;
+    float m_lastLapTime = 0.0f;
+    float m_bestLapTime = 0.0f;
+    bool m_hasCompletedLap = false;
 
-    // Fitness component breakdown, recomputed every update() (see the class
-    // comment's fitness formula).
     float m_baseProgressFitness = 0.0f;
     float m_progressRate = 0.0f;
     float m_progressRateReward = 0.0f;

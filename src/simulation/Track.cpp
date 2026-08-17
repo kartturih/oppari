@@ -43,10 +43,8 @@ void validate(const TrackDefinition& def)
     }
 }
 
-// Uniform Catmull-Rom interpolation between p1 and p2 (p0/p3 are the
-// neighboring control points used to shape the tangents at each end),
-// t in [0,1]. At t=0 this reduces exactly to p1; at t=1 it reduces exactly
-// to p2 -- deterministic, no randomness anywhere.
+// Uniform Catmull-Rom between p1 and p2 (p0/p3 shape the end tangents),
+// t in [0,1]. t=0 -> p1, t=1 -> p2.
 Vector2 catmullRom(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Vector2& p3, float t)
 {
     const float t2 = t * t;
@@ -66,8 +64,8 @@ struct SegmentProjection
     float t;
 };
 
-// Clamped projection of p onto the segment a->b. Degenerate (zero-length)
-// segments deterministically resolve to t = 0, point = a.
+// Clamped projection of p onto segment a->b; zero-length segments resolve
+// to t = 0, point = a.
 SegmentProjection closestPointOnSegment(Vector2 p, Vector2 a, Vector2 b)
 {
     const Vector2 ab = {b.x - a.x, b.y - a.y};
@@ -112,9 +110,8 @@ void Track::buildCenterline()
         const Vector2& p2 = controlPoints[(i + 1) % pointCount];
         const Vector2& p3 = controlPoints[(i + 2) % pointCount];
 
-        // t deliberately never reaches 1: that sample is p2, which is
-        // produced again as t=0 of the next segment -- sampling it here too
-        // would duplicate the seam between segments.
+        // t never reaches 1 -- that sample is p2, produced again as the next
+        // segment's t=0, so sampling it here would duplicate the seam.
         for (int j = 0; j < samplesPerSegment; ++j)
         {
             const float t = static_cast<float>(j) / static_cast<float>(samplesPerSegment);
@@ -200,16 +197,13 @@ void Track::buildMaskFromImage()
                                      m_definition.maskImagePath);
     }
 
-    // Normalize to a fixed, known format so pixel access below is simple
-    // and consistent regardless of the PNG's original color depth/format.
+    // Normalize format so pixel access below is consistent.
     ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     Color* pixels = LoadImageColors(image);
 
     m_mask.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
 
-    // Threshold semantics (Stage 18): luminance >= 128 -> drivable (white/
-    // bright), luminance < 128 -> non-drivable (black/dark). Alpha is
-    // ignored -- only RGB luminance decides drivability.
+    // Luminance >= 128 -> drivable; alpha ignored.
     constexpr float kDrivableLuminanceThreshold = 128.0f;
     for (int y = 0; y < height; ++y)
     {
@@ -238,10 +232,8 @@ void Track::buildMaskFromCenterlineWidth()
 
     m_mask.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
 
-    // A pixel can only be drivable if it lies within trackWidth/2 of some
-    // centerline sample, so only the centerline's bounding box (expanded by
-    // that margin) ever needs to be scanned -- pixels outside it are left
-    // at their zero-initialized default without touching a single segment.
+    // Only the centerline's bounding box (expanded by trackWidth/2) needs
+    // scanning -- nothing outside it can be drivable.
     float minX = m_centerline[0].x;
     float maxX = m_centerline[0].x;
     float minY = m_centerline[0].y;
@@ -295,12 +287,8 @@ void Track::buildMaskFromCenterlineWidth()
 
 void Track::computeSpawn()
 {
-    // spawnDistanceAlongTrack defaults to 0.0f, in which case this is
-    // byte-identical to the original Stage 14 behavior (spawn = centerline
-    // sample 0, heading toward sample 1) -- handled as an exact special
-    // case rather than going through getPointAtDistance()'s general
-    // fmod()-based lookup, so existing tracks' spawn pose does not shift by
-    // even a float ULP.
+    // Default (0.0f) case handled exactly (not via getPointAtDistance()'s
+    // fmod()-based lookup) so spawn pose never shifts by even a float ULP.
     if (m_definition.spawnDistanceAlongTrack == 0.0f)
     {
         m_spawnPosition = m_centerline[0];
@@ -311,16 +299,12 @@ void Track::computeSpawn()
     {
         m_spawnPosition = getPointAtDistance(m_definition.spawnDistanceAlongTrack);
 
-        // Small forward arc-length probe to estimate the tangent direction
-        // at an arbitrary spawn distance (not necessarily a sample index).
+        // Small forward probe to estimate the tangent at an arbitrary distance.
         constexpr float kHeadingProbeDistance = 1.0f; // px, well below any segment length
         const Vector2 ahead = getPointAtDistance(m_definition.spawnDistanceAlongTrack + kHeadingProbeDistance);
         m_spawnHeading = std::atan2(ahead.y - m_spawnPosition.y, ahead.x - m_spawnPosition.x);
     }
 
-    // Stage 18: spawn must be drivable in whichever mask this Track ended
-    // up with (image-based or procedural) -- computeSpawn() runs after
-    // buildMask(), so the mask is already available here.
     const int spawnX = static_cast<int>(std::lround(m_spawnPosition.x));
     const int spawnY = static_cast<int>(std::lround(m_spawnPosition.y));
     if (!isDrivable(spawnX, spawnY))
@@ -353,8 +337,7 @@ void Track::considerSegment(Vector2 position, std::size_t segmentIndex, TrackPro
     const float dy = position.y - proj.point.y;
     const float distSq = dx * dx + dy * dy;
 
-    // Strict '<' only: the first (lowest-index, in scan order) segment
-    // achieving the minimum distance wins, giving a deterministic tie-break.
+    // Strict '<': lowest-index segment wins ties.
     if (distSq < bestDistSq)
     {
         bestDistSq = distSq;
@@ -404,47 +387,20 @@ void Track::considerSegmentLocal(Vector2 position, std::size_t segmentIndex, std
     const float dy = position.y - proj.point.y;
     const float distance = std::sqrt(dx * dx + dy * dy);
 
-    // Shortest-direction, wrap-aware index gap from referenceIndex -- the
-    // same notion of "distance around the loop" projectOntoCenterlineLocal()
-    // uses to build its search window in the first place, so a candidate
-    // right at the window's edge is penalized proportionally to how far it
-    // actually is from where tracking was anchored, not just however the
-    // window happened to be laid out.
+    // Shortest-direction, wrap-aware index gap from referenceIndex.
     const std::size_t forwardGap = (segmentIndex + sampleCount - referenceIndex) % sampleCount;
     const std::size_t indexGap = std::min(forwardGap, sampleCount - forwardGap);
 
-    // continuityFreeZone samples cost nothing at all before the (still
-    // sub-linear, square-root) penalty starts -- without this, even a
-    // single sample of genuine forward movement away from an
-    // already-close-fitting candidate would cost more than the tiny real
-    // distance improvement that movement provides, making the tracked
-    // segment refuse to ever advance once anchored near a locally good
-    // match (observed directly: a synthetic car driven smoothly through
-    // the same hairpin stayed pinned to its entry segment for 40+
-    // consecutive frames, arc-length distance climbing past 90px, with a
-    // free zone of 0). A handful of samples of slack is enough for that,
-    // since real per-frame movement is under 1 sample; see
-    // TrackProgress::kLocalContinuityFreeZone for the exact value.
-    //
-    // Beyond the free zone, the penalty is sub-linear (square-root, not
-    // indexGap itself): a linear penalty has to be large enough per-sample
-    // to overcome close-margin ties at small gaps (a few px over tens of
-    // samples, empirically), but that same per-sample rate then compounds
-    // to an oversized total penalty at the much larger gaps (~50-160
-    // samples) legitimate single-frame local jumps can genuinely need --
-    // large enough, in testing, to make a nearby but wrong candidate beat
-    // the true (zero-distance) far target outright. Square-root keeps the
-    // penalty effective just past the free zone while growing it much more
-    // slowly for large gaps, satisfying both at once -- see
-    // TrackProgress::kLocalContinuityWeight for the empirical derivation of
-    // the weight actually used.
+    // continuityFreeZone samples are penalty-free (so ordinary forward
+    // movement is never penalized vs. standing still); beyond that the
+    // penalty grows as sqrt(gap), not linearly -- strong enough to break
+    // small-gap ties without letting a large legitimate single-frame jump
+    // lose to a nearby-but-wrong candidate. See TrackProgress::
+    // kLocalContinuityWeight/kLocalContinuityFreeZone for the tuned values.
     const std::size_t penalizedGap = indexGap > continuityFreeZone ? indexGap - continuityFreeZone : 0;
     const float score = distance + continuityWeight * std::sqrt(static_cast<float>(penalizedGap));
 
-    // Strict '<' only: the first (lowest scan-order) segment achieving the
-    // minimum score wins, giving a deterministic tie-break -- matching
-    // considerSegment()'s convention (with continuityWeight == 0.0f this is
-    // byte-for-byte the same tie-break considerSegment() itself would give).
+    // Strict '<': lowest scan-order segment wins ties (matches considerSegment()).
     if (score < bestScore)
     {
         bestScore = score;
@@ -473,10 +429,8 @@ TrackProjection Track::projectOntoCenterlineLocal(Vector2 position, std::size_t 
     const std::size_t sampleCount = m_centerline.size();
     previousSegmentIndex %= sampleCount;
 
-    // If searchRadius reaches (or exceeds) half the loop, clamp so the
-    // window covers the whole closed loop exactly once instead of
-    // revisiting segments -- at that point this degenerates to (and stays
-    // consistent with) a full projectOntoCenterline() scan.
+    // Clamp so a large radius covers the loop exactly once (degenerates to
+    // a full projectOntoCenterline() scan) rather than revisiting segments.
     const std::size_t radius = std::min(searchRadius, sampleCount - 1);
     const std::size_t windowSize = std::min(sampleCount, 2 * radius + 1);
     const std::size_t start = (previousSegmentIndex + sampleCount - radius) % sampleCount;
@@ -527,42 +481,11 @@ Vector2 Track::getPointAtDistance(float distanceAlongTrack) const
 
 TrackDefinition createHardTrackDefinition(int simWidth, int simHeight)
 {
-    // Stage 14B: a hand-authored, asymmetric closed circuit -- deliberately
-    // not an oval -- laid out (for the current 1200x700 simulation area) as
-    // a sequence of clearly distinct driving challenges, in forward-travel
-    // (control-point index) order:
-    //
-    //   P0 -> P1 -> P2   : one long straight (~600px) -- sample 0 (spawn)
-    //                      sits here, well before the first corner, so cars
-    //                      have room to accelerate.
-    //   P2 -> P3 -> P4 -> P5 : one broad, wide-radius sweeping corner
-    //                      (bottom-right around to the right side).
-    //   P5 -> P6 -> P7 -> P8 : an S-shaped chicane across the top of the
-    //                      circuit -- P6 -> P7 dips down, then P7 -> P8
-    //                      rises back up, a genuine direction reversal.
-    //                      This chicane's two legs occupy disjoint x-ranges
-    //                      (P6-P7 spans roughly x in [620,880], P7-P8 spans
-    //                      roughly x in [400,620]) -- a real zigzag that
-    //                      keeps making net leftward progress, rather than
-    //                      a fold that doubles back over the same ground
-    //                      (which is what earlier design iterations of this
-    //                      track got wrong: two bends sharing an x-range
-    //                      inevitably pass close to each other away from
-    //                      their shared control point, not just at it).
-    //   P8 -> P9         : tighter corner #1 -- a noticeably sharper apex
-    //                      turning the circuit from heading left to heading
-    //                      down.
-    //   P9 -> P10 -> P11 : a gentle descent down the left side.
-    //   P11              : tighter corner #2 -- a second sharp apex,
-    //                      turning the circuit back toward the start.
-    //   P11 -> P0        : a closing section back to the spawn straight.
-    //
-    // Every section keeps generous clearance from every other, non-adjacent
-    // section (see verifyTrack()'s self-intersection/separation checks in
-    // main.cpp). All coordinates are deliberately hand-placed (no formula/
-    // symmetry), and stay within a comfortable margin of the 1200x700
-    // simulation area so the road band and Catmull-Rom overshoot near
-    // sharp corners never approach the edges.
+    // Hand-authored asymmetric closed circuit (1200x700 area): a long
+    // straight (spawn), a broad sweeping corner, an S-chicane, two tighter
+    // corners, and a closing section -- see inline point comments below.
+    // Every section keeps generous clearance from every other non-adjacent
+    // one (verified by verifyTrack() in main.cpp).
     TrackDefinition def;
     def.simWidth = simWidth;
     def.simHeight = simHeight;
@@ -591,12 +514,7 @@ TrackDefinition createHardTrackDefinition(int simWidth, int simHeight)
         // Gentle descent down the left side.
         Vector2{150.0f, 320.0f}, // P10
 
-        // Tighter corner #2: sharp apex turning back toward the spawn
-        // straight. Positioned low (close to the straight's own y) and far
-        // to the left of spawn, so P1 - P11 (the pair Catmull-Rom uses to
-        // shape the spawn tangent) is already close to horizontal -- the
-        // spawn tangent comes out level, matching the straight it sits on,
-        // without needing a separate lead-in control point.
+        // Tighter corner #2, positioned so the spawn tangent (via P1-P11) comes out level.
         Vector2{50.0f, 550.0f}, // P11
     };
 
@@ -606,32 +524,17 @@ TrackDefinition createHardTrackDefinition(int simWidth, int simHeight)
 TrackDefinition createStage18TestTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
                                                    const std::string& maskImagePath)
 {
-    // Stage 18: reuses createHardTrackDefinition()'s exact control points
-    // and sample density -- see that function's comment for why this
-    // particular closed loop's shape and section layout was chosen; it is
-    // already verified non-self-intersecting with generous separation
-    // between non-adjacent sections, so reusing it here needs no new
-    // geometry verification of its own.
-    //
-    // IMPORTANT: these control points and samplesPerSegment MUST exactly
-    // match CONTROL_POINTS/SAMPLES_PER_SEGMENT in
-    // assets/tracks/test/generate_test_track_assets.py, the script that
-    // rasterized track_visual.png/track_mask.png -- that script's rasterized
-    // drivable band is only guaranteed to contain this centerline if both
-    // sides agree on the exact same points and sampling. If either side
-    // changes, regenerate the assets (or update this function) to match.
+    // Reuses createHardTrackDefinition()'s control points/sample density.
+    // IMPORTANT: must exactly match CONTROL_POINTS/SAMPLES_PER_SEGMENT in
+    // assets/tracks/test/generate_test_track_assets.py (the rasterizer for
+    // track_visual.png/track_mask.png) -- regenerate assets if either changes.
     TrackDefinition def = createHardTrackDefinition(simWidth, simHeight);
 
     def.visualImagePath = visualImagePath;
     def.maskImagePath = maskImagePath;
 
-    // trackWidth is no longer used to build the mask (maskImagePath is set,
-    // so Track::buildMaskFromImage() takes over) -- it is kept only as the
-    // nominal value main.cpp's centerline self-intersection/separation
-    // verification uses as a separation floor. spawnDistanceAlongTrack is
-    // left at its default (0.0f): spawn is exactly centerline sample 0, the
-    // same point createHardTrackDefinition() already places on the long
-    // straight, well clear of every section's mask geometry.
+    // trackWidth is now just a separation-check floor (mask comes from
+    // maskImagePath); spawnDistanceAlongTrack stays at its default (sample 0).
 
     return def;
 }
@@ -642,66 +545,23 @@ TrackDefinition createExtremeTrackDefinition(int simWidth, int simHeight, const 
     // Stage 19: a hand-traced closed loop following the actual road drawn in
     // assets/tracks/extreme/track_mask.png (1200x700). The control points
     // below were chosen by inspecting the mask's connected drivable region
-    // directly (its medial axis, computed offline purely as a tracing aid --
-    // no image processing exists anywhere in the runtime code path) and
-    // manually placing points along that route, denser at hairpins/direction
-    // reversals and sparser on straights, per Stage 19's guidance. Every
-    // control point was then verified offline against the real mask: the
-    // full 20-samples-per-segment sampled centerline lands 100% inside the
-    // drivable region, with centerline-to-nearest-wall clearance never below
-    // 36px anywhere -- comfortable margin for a 12x24px car.
+    // directly (medial axis, traced offline), denser at hairpins/reversals.
+    // Verified offline: the sampled centerline lands 100% inside the
+    // drivable region, clearance never below 36px (car is 12x24px).
     //
-    // Route, in forward-travel (control-point index) order -- P0 is spawn:
-    //
-    //   P0 -> P1 -> P2        : the long top straight (~800px, y~72) -- P0
-    //                           sits near its right end so forward travel
-    //                           (leftward, toward P1/P2) has the whole
-    //                           straight ahead of it at spawn.
-    //   P2 -> P3 -> P4 -> P5 -> P6 : top-left corner, curving down into the
-    //                           second corridor (y~195).
-    //   P6 -> P7 -> P8 -> P9   : second corridor straight, rightward.
-    //   P9 -> P10 -> P11 -> P12 : a detour around the small notch the mask
-    //                           carves into this corridor's right end --
-    //                           curves down and back, close to (but not
-    //                           overlapping) the third corridor below it.
-    //   P12 -> P13 -> P14 -> P15 -> P16 : third corridor, leftward (y~306-360
-    //                           easing to 306).
-    //   P16 -> P17 -> P18      : left corner, curving down into the fourth
-    //                           corridor (y~417).
-    //   P18 -> P19             : fourth corridor straight, rightward.
-    //   P19 -> P20 -> P21      : a tight hook around a second small mask
-    //                           notch, reversing direction.
-    //   P21 -> P22 -> P23      : fifth corridor, leftward (y~527).
-    //   P23 -> P24             : left corner, curving down into the bottom
-    //                           band (y~638).
-    //   P24 -> P25 -> P26      : bottom-left straight, rightward.
-    //   P26 -> P27 -> P28      : S-connector curving up and over a black
-    //                           divider in the middle of the bottom band.
-    //   P28 -> P29             : a short straight at the top of the S.
-    //   P29 -> P30 -> P31      : S-connector curving back down into the
-    //                           bottom-right straight.
-    //   P31 -> P32             : bottom-right straight, rightward.
-    //   P32 -> P33 -> P34      : right corner, sweeping up from the bottom
-    //                           band into the right edge corridor.
-    //   P34 -> P35 -> P36      : right edge corridor, curving up.
-    //   P36 -> P37 -> P38      : top-right corner, curving back left into the
-    //                           top straight -- closes the loop back to P0.
-    //
-    // This loop passes close to itself in exactly one place (the third and
-    // an unrelated later corridor come within ~94px of each other, well
-    // short of actually touching or crossing) -- deliberately preserved
-    // rather than redesigned away, since it is exactly the case
-    // TrackProgress's local projection tracking and global recovery exist
-    // to handle; see TrackProgress.h and main.cpp's Stage 19 verification.
+    // Route (P0 = spawn, top straight) traces the mask clockwise through 5
+    // horizontal corridors connected by corners and two notch detours/hooks
+    // -- see each point's inline label below. The third and a later
+    // corridor pass within ~94px of each other without touching; kept
+    // deliberately, since it's exactly the case TrackProgress's local
+    // tracking/recovery exist to handle.
     TrackDefinition def;
     def.simWidth = simWidth;
     def.simHeight = simHeight;
     def.samplesPerSegment = 20;
 
-    // Nominal only: collision comes entirely from maskImagePath (whose
-    // drivable band width genuinely varies, roughly 72px-202px along this
-    // route), never from this value -- see buildMaskFromImage(). Set to the
-    // corridor width actually measured at spawn, purely for documentation.
+    // Nominal only (collision uses maskImagePath, which varies ~72-202px);
+    // set to the spawn corridor's measured width.
     def.trackWidth = 130.0f;
 
     def.visualImagePath = visualImagePath;
@@ -749,11 +609,8 @@ TrackDefinition createExtremeTrackDefinition(int simWidth, int simHeight, const 
         Vector2{1063.0f, 76.0f},  // P38
     };
 
-    // spawnDistanceAlongTrack left at its default (0.0f): spawn is exactly
-    // P0, at the start of the long top straight, heading toward P1 (i.e.
-    // leftward) -- the full ~800px straight is ahead of every car at spawn,
-    // and the corridor there is a uniform 130px wide (65px clearance to
-    // either wall), giving all 50 cars room to begin driving cleanly.
+    // spawnDistanceAlongTrack stays at its default: spawn = P0, heading
+    // toward P1, with the whole top straight ahead.
 
     return def;
 }

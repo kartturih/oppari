@@ -3,9 +3,7 @@
 namespace ai::neat
 {
 
-// Stable identifier for a node gene. Assigned and interpreted by whatever
-// future code manages innovation numbers/genomes -- this header has no
-// opinion on how IDs are generated, only that they are non-negative.
+// Stable identifier for a node gene; always non-negative.
 using NodeId = int;
 
 enum class NodeType
@@ -16,10 +14,7 @@ enum class NodeType
     Output
 };
 
-// Pure genetic description of a node: identity and role only. This is NOT a
-// runtime node -- it carries no activation value, no incoming connections,
-// and no other runtime/cached state. A future NEAT Genome owns a collection
-// of these and is responsible for turning them into an executable network.
+// Pure genetic description of a node: identity and role only, no runtime state.
 class NodeGene
 {
 public:

@@ -8,10 +8,8 @@
 namespace ai::neat
 {
 
-// The full result of one compatibilityDistance() calculation, useful for
-// debugging/visualization without needing to recompute the intermediate
-// counts separately. Pure data, produced fresh by every call -- never
-// mutated in place, never cached.
+// Full result of one compatibilityDistance() calculation, for
+// debugging/visualization. Fresh data per call, never cached.
 struct CompatibilityBreakdown
 {
     std::size_t matching = 0;
@@ -22,56 +20,26 @@ struct CompatibilityBreakdown
     float distance = 0.0f;
 };
 
-// Computes the standard NEAT-style compatibility distance between two
-// Genomes, using connection genes only -- node genes never directly enter
-// the calculation. A pure, stateless, deterministic function: it never
-// mutates genomeA or genomeB, never draws randomness, never consults
-// InnovationTracker, never builds a phenotype, and depends on nothing but
-// its three arguments (no fitness, no Car/AIController/FitnessEvaluator).
+// Standard NEAT compatibility distance, connection genes only, aligned
+// strictly by innovation number:
 //
 //   delta = c1 * E / N + c2 * D / N + c3 * W
 //
-// Throws std::invalid_argument if:
-//   - any of config's three coefficients is non-finite or negative;
-//   - config.smallGenomeNormalizationThreshold is zero;
-//   - either genome contains two different ConnectionGenes with the same
-//     innovation number (Genome::validate() does not check this);
-//   - the same innovation number exists in both genomes but with a
-//     different source or target ID.
+// A gene matches if its innovation exists in both genomes; W is the mean
+// abs weight difference over matches (0 if none). A gene present in only
+// one genome is excess if its innovation exceeds the other genome's max
+// innovation, otherwise disjoint. N = 1 if the larger genome's connection
+// count is below smallGenomeNormalizationThreshold, else that count --
+// avoids over-penalizing small early genomes.
 //
-// Connection genes are aligned strictly by innovation number -- never by
-// vector index, source/target pair, or insertion order. A gene is
-// "matching" when its innovation number exists in both genomes (its
-// enabled/disabled state never affects matching, disjoint/excess
-// classification, or the distance -- there is no separate enabled-state
-// term). For each matching pair, weightDifference = abs(weightA -
-// weightB); W is their mean (0 if there are no matching genes at all).
-//
-// A gene whose innovation number exists in only one genome is disjoint or
-// excess depending on where it falls relative to the *other* genome's
-// highest innovation number (maxInnovationOther, treated as "below every
-// non-negative innovation number" when the other genome has no connections
-// at all, so every gene of a non-empty genome is excess relative to an
-// empty one): innovation > maxInnovationOther -> excess (E), otherwise ->
-// disjoint (D). This is a pure innovation-number range test, independent
-// of vector position in either genome.
-//
-// N is the normalization factor: letting largerGenomeSize = the greater of
-// the two genomes' connection counts, N = 1 when largerGenomeSize is below
-// config.smallGenomeNormalizationThreshold, otherwise N = largerGenomeSize.
-// This keeps small genomes (the common case early on, before genomes have
-// accumulated many genes) from being over-penalized by division, while
-// still normalizing by genome size once genomes grow past the threshold.
-//
-// distance(A, B) == distance(B, A), and the breakdown's matching/disjoint/
-// excess counts are likewise symmetric -- classifying "only in A" first and
-// "only in B" second internally does not depend on argument order.
+// Pure and stateless (no mutation, RNG, or phenotype build); symmetric:
+// distance(A, B) == distance(B, A).
+// Throws std::invalid_argument if config is invalid, either genome reuses
+// an innovation number, or a matching innovation has conflicting endpoints.
 float compatibilityDistance(const Genome& genomeA, const Genome& genomeB, const CompatibilityConfig& config);
 
-// Same calculation as compatibilityDistance(), returning every intermediate
-// count/value alongside the final distance (breakdown.distance ==
-// compatibilityDistance(genomeA, genomeB, config)). Throws under the exact
-// same conditions.
+// Same calculation, returning every intermediate value (breakdown.distance
+// == compatibilityDistance(...)). Same throw conditions.
 CompatibilityBreakdown compatibilityBreakdown(const Genome& genomeA, const Genome& genomeB,
                                                const CompatibilityConfig& config);
 
