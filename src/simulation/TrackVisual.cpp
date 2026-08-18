@@ -1,7 +1,6 @@
 #include "simulation/TrackVisual.h"
 
 #include <stdexcept>
-#include <utility>
 
 namespace simulation
 {

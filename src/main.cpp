@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cstddef>
-#include <string>
 #include <vector>
 
 #include "raylib.h"

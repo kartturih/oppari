@@ -22,7 +22,7 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(raylib)
 
-# Stage 20: Box2D provides the rigid-body integration and force/impulse API
+# Box2D provides the rigid-body integration and force/impulse API
 # that simulation::Car's vehicle model is built on (see Car.h/.cpp) -- track
 # collision itself stays entirely on Track's CPU pixel mask (see Track.h),
 # never on Box2D geometry. Box2D v3 is a from-scratch C rewrite (different
@@ -42,7 +42,7 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(box2d)
 
-# Stage 21: a short git commit hash, baked in at configure time, so a
+# A short git commit hash, baked in at configure time, so a
 # training run's metadata file can record exactly which build produced it
 # (see training::RunMetadata::buildVersion / TrainingLogger.cpp). Falls back
 # to "unknown" if git is not available or CMAKE_SOURCE_DIR is not inside a
@@ -116,7 +116,7 @@ add_executable(neat_car_simulation
 
 target_include_directories(neat_car_simulation PRIVATE src)
 
-# Stage 18: track image assets (assets/tracks/...) are loaded via an
+# Track image assets (assets/tracks/...) are loaded via an
 # absolute, source-tree-relative path baked in at compile time, so asset
 # loading does not depend on the executable's current working directory
 # (which differs between running from build/ directly vs. from an IDE).

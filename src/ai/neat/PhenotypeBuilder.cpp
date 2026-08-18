@@ -1,7 +1,6 @@
 #include "ai/neat/PhenotypeBuilder.h"
 
 #include <algorithm>
-#include <array>
 #include <utility>
 #include <vector>
 

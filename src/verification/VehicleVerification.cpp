@@ -125,7 +125,7 @@ void verifyCar(const simulation::Track& track)
 // keyboard/render timing. Runs once at startup.
 void verifySensors(const simulation::Track& track)
 {
-    static_assert(simulation::Car::kSensorCount == 5, "Stage 3 requires exactly five sensors");
+    static_assert(simulation::Car::kSensorCount == 5, "Car must expose exactly five sensors");
 
     simulation::Car car(makeCarParams(), track);
     car.reset(kSpawnPosition, kSpawnHeading);
@@ -242,7 +242,7 @@ void verifySensors(const simulation::Track& track)
 // of keyboard/render timing. Runs once at startup.
 void verifyObservation(const simulation::Track& track)
 {
-    static_assert(ai::kObservationSize == 9, "Stage 4 requires exactly nine observation values");
+    static_assert(ai::kObservationSize == 9, "Observation must contain exactly nine values");
 
     simulation::Car car(makeCarParams(), track);
     car.reset(kSpawnPosition, kSpawnHeading);

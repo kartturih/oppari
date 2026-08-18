@@ -1,7 +1,6 @@
 #include "ai/Observation.h"
 
 #include <algorithm>
-#include <cmath>
 
 #include "raylib.h"
 

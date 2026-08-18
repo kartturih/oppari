@@ -130,13 +130,4 @@ const NodeSplitInnovation* InnovationTracker::findNodeSplitInnovation(Innovation
     return &existing->second.innovation;
 }
 
-bool InnovationTracker::hasNodeSplitInnovation(InnovationNumber splitConnectionInnovation) const
-{
-    if (splitConnectionInnovation < 0)
-    {
-        throw std::invalid_argument("InnovationTracker: splitConnectionInnovation must be non-negative");
-    }
-    return m_splits.find(splitConnectionInnovation) != m_splits.end();
-}
-
 } // namespace ai::neat

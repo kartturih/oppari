@@ -52,9 +52,6 @@ public:
     const NodeSplitInnovation* findNodeSplitInnovation(InnovationNumber splitConnectionInnovation, NodeId sourceId,
                                                          NodeId targetId) const;
 
-    // Throws std::invalid_argument if splitConnectionInnovation is negative.
-    bool hasNodeSplitInnovation(InnovationNumber splitConnectionInnovation) const;
-
     // Next ID/innovation number that would be allocated. Allocation throws
     // std::overflow_error rather than wrapping once the counter's type max
     // is reached.

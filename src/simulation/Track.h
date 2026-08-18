@@ -150,11 +150,6 @@ private:
     float m_spawnHeading = 0.0f;
 };
 
-// Hand-authored hard training track: a long straight, a broad sweeping
-// corner, two tighter corners, and an S-chicane, with generous section
-// separation so the closed loop never self-intersects.
-TrackDefinition createHardTrackDefinition(int simWidth, int simHeight);
-
 // User-authored extreme track: a hand-traced 39-control-point closed loop
 // following assets/tracks/extreme/track_mask.png. Road width genuinely
 // varies (collision from maskImagePath only), and it deliberately has

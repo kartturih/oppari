@@ -479,52 +479,10 @@ Vector2 Track::getPointAtDistance(float distanceAlongTrack) const
     return Vector2{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
 }
 
-TrackDefinition createHardTrackDefinition(int simWidth, int simHeight)
-{
-    // Hand-authored asymmetric closed circuit (1200x700 area): a long
-    // straight (spawn), a broad sweeping corner, an S-chicane, two tighter
-    // corners, and a closing section -- see inline point comments below.
-    // Every section keeps generous clearance from every other non-adjacent
-    // one (verified by verifyTrack() in main.cpp).
-    TrackDefinition def;
-    def.simWidth = simWidth;
-    def.simHeight = simHeight;
-    def.trackWidth = 110.0f;
-    def.samplesPerSegment = 24;
-
-    def.controlPoints = {
-        // Long straight (spawn sits on P0, heading toward P1).
-        Vector2{250.0f, 580.0f}, // P0 -- spawn
-        Vector2{500.0f, 580.0f}, // P1
-        Vector2{850.0f, 580.0f}, // P2
-
-        // Broad sweeping corner, bottom-right around to the right side.
-        Vector2{1000.0f, 540.0f}, // P3
-        Vector2{1080.0f, 400.0f}, // P4
-        Vector2{1020.0f, 220.0f}, // P5
-
-        // S-shaped chicane across the top: dip down, then rise back up.
-        Vector2{880.0f, 110.0f}, // P6
-        Vector2{620.0f, 170.0f}, // P7
-        Vector2{400.0f, 100.0f}, // P8
-
-        // Tighter corner #1: sharp apex turning the circuit downward.
-        Vector2{270.0f, 160.0f}, // P9
-
-        // Gentle descent down the left side.
-        Vector2{150.0f, 320.0f}, // P10
-
-        // Tighter corner #2, positioned so the spawn tangent (via P1-P11) comes out level.
-        Vector2{50.0f, 550.0f}, // P11
-    };
-
-    return def;
-}
-
 TrackDefinition createExtremeTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
                                               const std::string& maskImagePath)
 {
-    // Stage 19: a hand-traced closed loop following the actual road drawn in
+    // A hand-traced closed loop following the actual road drawn in
     // assets/tracks/extreme/track_mask.png (1200x700). The control points
     // below were chosen by inspecting the mask's connected drivable region
     // directly (medial axis, traced offline), denser at hairpins/reversals.

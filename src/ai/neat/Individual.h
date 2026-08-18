@@ -37,7 +37,6 @@ public:
 
     const Genome& getGenome() const { return m_genome; }
     const simulation::Car& getCar() const { return m_car; }
-    const ai::AIController& getController() const { return m_controller; }
     const simulation::TrackProgress& getProgress() const { return m_progress; }
     const ai::FitnessEvaluator& getFitnessEvaluator() const { return m_fitness; }
 

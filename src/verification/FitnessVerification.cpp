@@ -889,7 +889,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
                "a car making steady progress the whole time must still be able to reach the 60s TimeLimit, "
-               "unaffected by either Stage 21.1 rule"); // 6
+               "unaffected by either early-termination rule"); // 6
     }
 
     // 7: neither rule reads world coordinates or raw Car speed -- only
