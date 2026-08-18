@@ -27,7 +27,7 @@ constexpr float kMaxLapSpeedFactor = 2.0f;
 // Floor under elapsedTime/lapTime so neither division blows up near zero.
 constexpr float kSmallTimeEpsilon = 0.1f;
 
-constexpr float kMaxEvaluationTime = 30.0f; // seconds, absolute cap
+constexpr float kMaxEvaluationTime = 60.0f; // seconds, absolute cap
 
 // Seconds without meaningful forward progress before early termination
 // (catches circling/parked cars). Short enough to matter, long enough that

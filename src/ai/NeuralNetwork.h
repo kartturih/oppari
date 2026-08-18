@@ -42,13 +42,13 @@ struct Connection
 //
 // Input node order in the constructor's `nodes` determines which
 // Observation slot each receives; Output node order determines which is
-// steering (first) vs. throttle (second). evaluate() never relies on node
-// ID ordering, only on actual connection topology.
+// steering (first), throttle (second), vs. brake (third). evaluate() never
+// relies on node ID ordering, only on actual connection topology.
 class NeuralNetwork
 {
 public:
     static constexpr int kInputCount = kObservationSize;
-    static constexpr int kOutputCount = 2; // 0 = steering, 1 = throttle
+    static constexpr int kOutputCount = 3; // 0 = steering, 1 = throttle, 2 = brake
 
     // Throws std::invalid_argument if structurally invalid: wrong
     // Input/Bias/Output counts, duplicate node IDs, an unknown connection
@@ -58,7 +58,7 @@ public:
 
     // Seeds inputs from observation and bias with 1.0, evaluates
     // Hidden/Output nodes in topological order (tanh of weighted sum),
-    // returns {steering, throttle}. No allocation.
+    // returns {steering, throttle, brake}. No allocation.
     std::array<float, kOutputCount> evaluate(const Observation& observation) const;
 
 private:

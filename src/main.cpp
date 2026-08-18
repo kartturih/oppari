@@ -90,7 +90,7 @@ int main()
     training::RunMetadata runMetadata;
     runMetadata.buildVersion = OPPARI_BUILD_VERSION;
     runMetadata.trackName = "extreme";
-    runMetadata.maxEvaluationTimeSeconds = 30.0f; // mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- see RunMetadata.h
+    runMetadata.maxEvaluationTimeSeconds = 60.0f; // mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- see RunMetadata.h
     runMetadata.populationConfig = populationConfig;
     runMetadata.mutationConfig = mutationConfig;
     runMetadata.crossoverConfig = crossoverConfig;

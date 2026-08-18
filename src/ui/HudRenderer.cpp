@@ -199,6 +199,14 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     std::snprintf(line, sizeof(line), "Index: %d", static_cast<int>(highlightedIndex));
     DrawText(line, x, y, 16, LIGHTGRAY);
     y += lineHeight;
+    {
+        const simulation::TireDebugInfo& input = best.getCar().getTireDebugInfo();
+        std::snprintf(line, sizeof(line), "Steering: %+.2f  Throttle: %.0f%%  Brake: %.0f%%",
+                      static_cast<double>(input.steeringInput), static_cast<double>(input.throttleInput * 100.0f),
+                      static_cast<double>(input.brakeInput * 100.0f));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+    }
 
     // Fitness breakdown -- see FitnessEvaluator.h for the exact formula
     // each of these terms comes from.
@@ -310,7 +318,16 @@ void drawManualPanel(const simulation::Car& car, int panelWidth, int screenHeigh
     y += lineHeight;
     std::snprintf(line, sizeof(line), "Heading: %.1f deg", static_cast<double>(car.getHeading() * RAD2DEG));
     DrawText(line, x, y, 16, LIGHTGRAY);
-    y += lineHeight * 2;
+    y += lineHeight;
+    {
+        const simulation::TireDebugInfo& input = car.getTireDebugInfo();
+        std::snprintf(line, sizeof(line), "Steering: %+.2f  Throttle: %.0f%%  Brake: %.0f%%",
+                      static_cast<double>(input.steeringInput), static_cast<double>(input.throttleInput * 100.0f),
+                      static_cast<double>(input.brakeInput * 100.0f));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
+    }
+    y += lineHeight;
 
     // Front/rear tire model telemetry -- tire slip angles, the Fx/Fy forces
     // each axle applies, yaw rate, and friction-circle saturation. Rear
@@ -347,6 +364,8 @@ void drawManualPanel(const simulation::Car& car, int panelWidth, int screenHeigh
     DrawText("Controls:", x, y, 18, RAYWHITE);
     y += lineHeight;
     DrawText("UP/W throttle", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("DOWN/S brake", x, y, 16, LIGHTGRAY);
     y += lineHeight;
     DrawText("LEFT/A, RIGHT/D steer", x, y, 16, LIGHTGRAY);
     y += lineHeight;

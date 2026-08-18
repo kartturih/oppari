@@ -9,6 +9,7 @@ simulation::CarInput readManualCarInput()
 {
     simulation::CarInput input;
     input.throttle = (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) ? 1.0f : 0.0f;
+    input.brake = (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) ? 1.0f : 0.0f;
     float steering = 0.0f;
     if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
     {

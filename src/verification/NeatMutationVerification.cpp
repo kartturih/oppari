@@ -53,8 +53,10 @@ namespace verification
 namespace genome_mutator_verify
 {
 
-// 9 Input + 1 Bias + 2 Output nodes plus four connections with known
+// 9 Input + 1 Bias + 3 Output nodes plus four connections with known
 // weights, one disabled (so mutation of disabled genes can be checked).
+// Output 102 (brake) is left unconnected -- these tests only need a
+// phenotype-buildable genome, not a realistic driving genome.
 ai::neat::Genome makeTestGenome()
 {
     using ai::neat::ConnectionGene;
@@ -70,6 +72,7 @@ ai::neat::Genome makeTestGenome()
     genome.addNode(NodeGene{9, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
+    genome.addNode(NodeGene{102, NodeType::Output});
 
     genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
     genome.addConnection(ConnectionGene{1, 100, -0.3f, true, 1});
@@ -1088,7 +1091,7 @@ namespace add_node_verify
 
 // Minimal genome: one Input, one Output, one enabled connection. Used for
 // the plain structural-invariant checks that don't need a full
-// Observation-shaped (9 Input + 1 Bias + 2 Output) genome.
+// Observation-shaped (9 Input + 1 Bias + 3 Output) genome.
 ai::neat::Genome makeSimpleSplitGenome()
 {
     using ai::neat::ConnectionGene;

@@ -38,10 +38,10 @@ extern const float kSpawnHeading;
 simulation::CarParams makeCarParams();
 
 // Hand-built, deterministic demonstration Genome (not trained/evolved): 9
-// Input nodes (0-8, matching Observation slot order), 1 Bias, 2 Output
-// (100 = steering, 101 = throttle), direct Input/Bias -> Output only.
-// Left sensors steer negative, right sensors steer positive; bias + center
-// sensor drive throttle.
+// Input nodes (0-8, matching Observation slot order), 1 Bias, 3 Output
+// (100 = steering, 101 = throttle, 102 = brake), direct Input/Bias -> Output
+// only. Left sensors steer negative, right sensors steer positive; bias +
+// center sensor drive throttle; brake starts wired off (see the definition).
 ai::neat::Genome createDemonstrationGenome();
 
 } // namespace app

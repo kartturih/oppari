@@ -500,9 +500,9 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         evaluator.reset();
 
         // Loop bound and the elapsed-time threshold below match
-        // FitnessEvaluator's kMaxEvaluationTime (30.0f).
+        // FitnessEvaluator's kMaxEvaluationTime (60.0f).
         float p = 0.0f;
-        for (int second = 0; second < 32 && !evaluator.isEvaluationFinished(); ++second)
+        for (int second = 0; second < 62 && !evaluator.isEvaluationFinished(); ++second)
         {
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
@@ -512,7 +512,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
                "reaching the maximum evaluation time must end the evaluation with TimeLimit");
-        assert(evaluator.getElapsedTime() >= 30.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
+        assert(evaluator.getElapsedTime() >= 60.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
 
         const float fitnessAtFinish = evaluator.getFitness();
         const float elapsedAtFinish = evaluator.getElapsedTime();
@@ -746,7 +746,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         evaluator.reset();
 
         float p = 0.0f;
-        for (int second = 0; second < 10; ++second) // 10s total, comfortably under kMaxEvaluationTime (30s)
+        for (int second = 0; second < 10; ++second) // 10s total, comfortably under kMaxEvaluationTime (60s)
         {
             p += 0.02f; // >> kProgressImprovementEpsilon (0.001) every step
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
@@ -868,7 +868,7 @@ void verifyEarlyTermination(const simulation::Track& track)
     }
 
     // 6: a car that keeps making steady progress the whole time can still
-    // legitimately run all the way to the existing 30-second maximum --
+    // legitimately run all the way to the existing 60-second maximum --
     // neither new rule can cut it short as long as progress keeps coming.
     {
         simulation::Car car(makeCarParams(), track);
@@ -879,7 +879,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         evaluator.reset();
 
         float p = 0.0f;
-        for (int second = 0; second < 32 && !evaluator.isEvaluationFinished(); ++second)
+        for (int second = 0; second < 62 && !evaluator.isEvaluationFinished(); ++second)
         {
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
@@ -888,7 +888,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
-               "a car making steady progress the whole time must still be able to reach the 30s TimeLimit, "
+               "a car making steady progress the whole time must still be able to reach the 60s TimeLimit, "
                "unaffected by either Stage 21.1 rule"); // 6
     }
 

@@ -173,7 +173,7 @@ std::array<float, NeuralNetwork::kOutputCount> NeuralNetwork::evaluate(const Obs
         m_values[idx] = std::tanh(sum);
     }
 
-    return {m_values[m_outputIndices[0]], m_values[m_outputIndices[1]]};
+    return {m_values[m_outputIndices[0]], m_values[m_outputIndices[1]], m_values[m_outputIndices[2]]};
 }
 
 } // namespace ai

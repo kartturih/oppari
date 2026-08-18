@@ -105,13 +105,15 @@ PopulationConfig makeTestPopulationConfig(std::size_t populationSize, std::uint3
     return config;
 }
 
-// A genome that drives at near-maximum throttle with zero steering
-// (Bias -> Throttle only, weight large enough that tanh saturates close to
-// 1.0) -- from the fixed spawn pose this reliably leaves the road band and
-// collides within a few hundred simulation steps, exactly like the
-// deliberate "drive off track" scenario verifyCar() itself exercises. Used
-// only to keep generation-transition tests fast and their step-count bound
-// tight; it carries no meaning beyond that.
+// A genome that drives at near-maximum throttle with zero steering and no
+// brake (Bias -> Throttle only, weight large enough that tanh saturates
+// close to 1.0; Bias -> Brake strongly negative so brake stays off, same
+// convention as AppConfig.cpp's createDemonstrationGenome()) -- from the
+// fixed spawn pose this reliably leaves the road band and collides within a
+// few hundred simulation steps, exactly like the deliberate "drive off
+// track" scenario verifyCar() itself exercises. Used only to keep
+// generation-transition tests fast and their step-count bound tight; it
+// carries no meaning beyond that.
 Genome makeCrashGenome()
 {
     Genome genome;
@@ -122,7 +124,9 @@ Genome makeCrashGenome()
     genome.addNode(NodeGene{9, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
+    genome.addNode(NodeGene{102, NodeType::Output});
     genome.addConnection(ConnectionGene{9, 101, 5.0f, true, 0});
+    genome.addConnection(ConnectionGene{9, 102, -5.0f, true, 1});
     return genome;
 }
 

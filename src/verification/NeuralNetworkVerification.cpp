@@ -53,12 +53,12 @@ namespace verification
 namespace nn_verify
 {
 
-// Builds the 9 Input + 1 Bias + 2 Output nodes every test network needs.
+// Builds the 9 Input + 1 Bias + 3 Output nodes every test network needs.
 // Input node IDs are 0..8 (Observation slot order), bias is 9, steering
 // output is 100 (first Output -> output index 0), throttle output is 101
-// (second Output -> output index 1). Deliberately not contiguous/sorted
-// with any hidden node IDs used below, so tests can prove evaluation
-// doesn't depend on ID ordering.
+// (second Output -> output index 1), brake output is 102 (third Output ->
+// output index 2). Deliberately not contiguous/sorted with any hidden node
+// IDs used below, so tests can prove evaluation doesn't depend on ID ordering.
 std::vector<ai::Node> makeBaseNodes()
 {
     std::vector<ai::Node> nodes;
@@ -69,6 +69,7 @@ std::vector<ai::Node> makeBaseNodes()
     nodes.push_back(ai::Node{9, ai::NodeType::Bias});
     nodes.push_back(ai::Node{100, ai::NodeType::Output}); // steering
     nodes.push_back(ai::Node{101, ai::NodeType::Output}); // throttle
+    nodes.push_back(ai::Node{102, ai::NodeType::Output}); // brake
     return nodes;
 }
 
@@ -107,12 +108,12 @@ void verifyNeuralNetwork()
     using namespace nn_verify;
     constexpr float kEps = 1e-4f;
 
-    // 1 & 9: exactly 9 inputs + 1 bias + 2 outputs can be constructed; a
+    // 1 & 9: exactly 9 inputs + 1 bias + 3 outputs can be constructed; a
     // fully disconnected Output produces 0 (tanh of an empty sum).
     {
         ai::NeuralNetwork net(makeBaseNodes(), {});
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
-        assert(out[0] == 0.0f && out[1] == 0.0f && "disconnected outputs must evaluate to exactly 0");
+        assert(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f && "disconnected outputs must evaluate to exactly 0");
     }
 
     // 2: direct Input -> Output connection produces the expected tanh result.
@@ -120,7 +121,7 @@ void verifyNeuralNetwork()
         ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, 100, 0.5f, true}});
         const auto out = net.evaluate(makeObservation(0, 1.0f));
         assert(std::fabs(out[0] - std::tanh(0.5f)) < kEps && "Input->Output must equal tanh(input * weight)");
-        assert(out[1] == 0.0f && "unrelated disconnected output must stay 0");
+        assert(out[1] == 0.0f && out[2] == 0.0f && "unrelated disconnected outputs must stay 0");
     }
 
     // 3: Bias -> Output affects output correctly (bias is always 1.0).
@@ -285,21 +286,23 @@ void verifyNeuralNetwork()
 
         assert(throwsInvalidArgument([]() {
             std::vector<ai::Node> nodes = makeBaseNodes();
-            nodes.pop_back(); // drops the throttle Output, leaving 1
+            nodes.pop_back(); // drops the brake Output, leaving 2
             ai::NeuralNetwork net(nodes, {});
         }) && "fewer than kOutputCount Output nodes must be rejected");
     }
 
-    // 17: output values are returned in deterministic steering/throttle order.
+    // 17: output values are returned in deterministic steering/throttle/brake order.
     {
         std::vector<ai::Connection> conns = {
             ai::Connection{0, 100, 1.0f, true},
             ai::Connection{0, 101, 2.0f, true},
+            ai::Connection{0, 102, 3.0f, true},
         };
         ai::NeuralNetwork net(makeBaseNodes(), conns);
         const auto out = net.evaluate(makeObservation(0, 1.0f));
         assert(std::fabs(out[0] - std::tanh(1.0f)) < kEps && "output index 0 must be the steering (first Output) node");
         assert(std::fabs(out[1] - std::tanh(2.0f)) < kEps && "output index 1 must be the throttle (second Output) node");
+        assert(std::fabs(out[2] - std::tanh(3.0f)) < kEps && "output index 2 must be the brake (third Output) node");
     }
 
     TraceLog(LOG_INFO, "Neural network verification: all deterministic checks passed");
@@ -308,13 +311,14 @@ void verifyNeuralNetwork()
 namespace phenotype_verify
 {
 
-// 9 Inputs (0-8) + Bias (9) + 2 Outputs (100 = steering, 101 = throttle),
-// added out of ID order -- proves buildPhenotype()'s slot ordering depends
-// on node ID, never insertion order.
+// 9 Inputs (0-8) + Bias (9) + 3 Outputs (100 = steering, 101 = throttle,
+// 102 = brake), added out of ID order -- proves buildPhenotype()'s slot
+// ordering depends on node ID, never insertion order.
 ai::neat::Genome makeBaseGenome()
 {
     ai::neat::Genome genome;
     genome.addNode(ai::neat::NodeGene{9, ai::neat::NodeType::Bias});
+    genome.addNode(ai::neat::NodeGene{102, ai::neat::NodeType::Output});
     genome.addNode(ai::neat::NodeGene{101, ai::neat::NodeType::Output});
     genome.addNode(ai::neat::NodeGene{100, ai::neat::NodeType::Output});
     for (int i = ai::NeuralNetwork::kInputCount - 1; i >= 0; --i)
@@ -368,7 +372,8 @@ void verifyPhenotypeBuilder()
     {
         ai::NeuralNetwork net = buildPhenotype(makeBaseGenome());
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
-        assert(out[0] == 0.0f && out[1] == 0.0f && "a fully disconnected phenotype must evaluate to exactly 0");
+        assert(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f &&
+               "a fully disconnected phenotype must evaluate to exactly 0");
     }
 
     // 2 & 8: large, non-contiguous node IDs (and connection endpoints
@@ -383,6 +388,7 @@ void verifyPhenotypeBuilder()
         genome.addNode(NodeGene{2000, NodeType::Bias});
         genome.addNode(NodeGene{3000, NodeType::Output});
         genome.addNode(NodeGene{3001, NodeType::Output});
+        genome.addNode(NodeGene{3002, NodeType::Output});
         genome.addConnection(ConnectionGene{1000, 3000, 0.5f, true, 0});
 
         ai::NeuralNetwork net = buildPhenotype(genome);
@@ -412,16 +418,18 @@ void verifyPhenotypeBuilder()
     }
 
     // 5: output slot ordering follows ascending node ID, independent of
-    // Genome insertion order (makeBaseGenome adds Output 101 before 100).
+    // Genome insertion order (makeBaseGenome adds Output 102, then 101, then 100).
     {
         Genome genome = makeBaseGenome();
         genome.addConnection(ConnectionGene{0, 100, 1.0f, true, 0});
         genome.addConnection(ConnectionGene{0, 101, 2.0f, true, 1});
+        genome.addConnection(ConnectionGene{0, 102, 3.0f, true, 2});
         ai::NeuralNetwork net = buildPhenotype(genome);
 
         const auto out = net.evaluate(makeObservation(0, 1.0f));
-        assert(std::fabs(out[0] - std::tanh(1.0f)) < kEps && "output slot 0 must be the lower-ID Output node (100)");
-        assert(std::fabs(out[1] - std::tanh(2.0f)) < kEps && "output slot 1 must be the higher-ID Output node (101)");
+        assert(std::fabs(out[0] - std::tanh(1.0f)) < kEps && "output slot 0 must be the lowest-ID Output node (100)");
+        assert(std::fabs(out[1] - std::tanh(2.0f)) < kEps && "output slot 1 must be the middle-ID Output node (101)");
+        assert(std::fabs(out[2] - std::tanh(3.0f)) < kEps && "output slot 2 must be the highest-ID Output node (102)");
     }
 
     // 6: Bias maps correctly (always contributes 1.0) and stays internal --
@@ -578,7 +586,7 @@ void verifyPhenotypeBuilder()
         const auto obs = makeObservation(0, 0.8f);
         const auto outA = netA.evaluate(obs);
         const auto outB = netB.evaluate(obs);
-        assert(outA[0] == outB[0] && outA[1] == outB[1] &&
+        assert(outA[0] == outB[0] && outA[1] == outB[1] && outA[2] == outB[2] &&
                "repeated builds from the same Genome must evaluate identically");
     }
 

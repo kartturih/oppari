@@ -11,8 +11,12 @@ namespace
 {
 
 // 1 Box2D unit == 1px, no separate scale factor (Box2D v3 has no baked-in
-// "meter-sized" assumption; its maximumLinearSpeed default comfortably
-// exceeds maxSpeed + the safety clamp below).
+// "meter-sized" assumption). Box2D's OWN maximumLinearSpeed default is
+// 400 px/s here -- well BELOW maxSpeed/the safety clamp below -- so
+// b2WorldDef::maximumLinearSpeed is explicitly raised past both in the Car
+// constructor; this comment previously (incorrectly) assumed the default
+// was already high enough, which silently capped every car at 400px/s
+// regardless of maxSpeed/engineForce/tire tuning.
 b2Vec2 toB2(Vector2 v)
 {
     return b2Vec2{v.x, v.y};
@@ -41,6 +45,16 @@ constexpr float kMinAxleSpeedForSlip = 0.5f; // px/s
 // This (not kMinAxleSpeedForSlip, which only guards the angle itself) is
 // what prevents heading-snapping off a standing start.
 constexpr float kTireForceRampSpeed = 15.0f; // px/s
+
+// Floor that per-axle tire relaxation time constants (CarParams::front/
+// rearTireRelaxationTime and front/rearTireReleaseTime) shrink toward as
+// axle speed drops below kTireForceRampSpeed (linearly, gated by the same
+// ramp fraction) -- a nearly-stopped axle's slip angle is poorly
+// conditioned anyway (see kMinAxleSpeedForSlip), so any stored relaxed
+// deflection is made to collapse quickly rather than linger at a stale
+// value into (or through) a near-stop, which is what let recovering from a
+// slide "unfreeze" a stale sideways kick right as the car nearly stopped.
+constexpr float kTireRelaxationLowSpeedFloorTime = 0.01f; // seconds
 
 // For small perturbations the tire model acts like a rotational spring on
 // yaw rate with stiffness kappa = (frontCorneringStiffness*cgToFrontAxle^2
@@ -78,10 +92,67 @@ b2BodyId createCarBody(b2WorldId worldId, const CarParams& params)
     // so density (mass/inertia) is the only field that matters.
     b2CreatePolygonShape(bodyId, &shapeDef, &box);
 
+    // Override the shape-derived rotational inertia with
+    // CarParams::rotationalInertia, keeping the shape/density-derived mass
+    // and center of mass as-is -- see that field's comment for why yaw
+    // inertia is deliberately decoupled from mass/density here.
+    b2MassData massData = b2Body_GetMassData(bodyId);
+    massData.rotationalInertia = params.rotationalInertia;
+    b2Body_SetMassData(bodyId, massData);
+
     return bodyId;
 }
 
 } // namespace
+
+// See the declaration in Car.h for the shape rationale: a rise from 0 with
+// slope corneringStiffness, reaching maxForce at the given (now explicit,
+// independently-tunable) peakSlipAngle, then a smooth (C1-continuous, zero
+// slope at the peak) falloff toward maxForce*slidingGripRatio by 90 degrees
+// of slip, staying at that floor beyond. Caller applies the sign (opposing
+// the slip direction) and any low-speed ramp.
+//
+// The rise is a cubic Hermite in normalized slip x = absSlipAngle/
+// peakSlipAngle, matching g(0)=0, g(1)=1, g'(0)=s0, g'(1)=0, where
+// s0 = corneringStiffness*peakSlipAngle/maxForce is the initial slope
+// EXPRESSED in these normalized units. Requiring a specific peakSlipAngle
+// independent of corneringStiffness/maxForce (rather than the earlier
+// peakSlipAngle = 2*maxForce/corneringStiffness, which ties peak location
+// and on-center slope together) needs a curve whose slope isn't simply
+// decreasing from corneringStiffness the whole way to the peak -- when
+// peakSlipAngle is small relative to maxForce/corneringStiffness (i.e.
+// s0 < 2), the curve must accelerate ABOVE its initial slope partway
+// through before easing into the peak, which a plain quadratic (s0 fixed
+// at 2) can't express. s0=2 reproduces that exact old quadratic as a
+// special case. s0 is clamped well inside the range that keeps this cubic
+// monotonic on [0,1] (no overshoot past maxForce before the peak).
+float tireLateralForceMagnitude(float absSlipAngle, float corneringStiffness, float maxForce, float slidingGripRatio,
+                                 float peakSlipAngle)
+{
+    if (maxForce <= 0.0f || peakSlipAngle <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    if (absSlipAngle <= peakSlipAngle)
+    {
+        const float x = std::clamp(absSlipAngle / peakSlipAngle, 0.0f, 1.0f);
+        const float s0 = std::clamp(corneringStiffness * peakSlipAngle / maxForce, 0.0f, 2.9f);
+        const float g = s0 * x + (3.0f - 2.0f * s0) * x * x + (s0 - 2.0f) * x * x * x;
+        return maxForce * g;
+    }
+
+    // Post-peak: falls from maxForce toward maxForce*slidingGripRatio as
+    // slip goes from peakSlipAngle to 90 degrees (a fully sideways tire),
+    // via a smoothstep so the transition is C1-continuous with the ramp
+    // above (both have zero slope exactly at the peak -- a genuine smooth
+    // maximum, not a corner).
+    constexpr float kFullSlideAngle = 1.5707963f; // 90 degrees, in radians
+    const float span = std::max(kFullSlideAngle - peakSlipAngle, 1e-4f);
+    const float u = std::clamp((absSlipAngle - peakSlipAngle) / span, 0.0f, 1.0f);
+    const float smooth = u * u * (3.0f - 2.0f * u);
+    return maxForce * (1.0f - (1.0f - slidingGripRatio) * smooth);
+}
 
 Car::Car(const CarParams& params, const Track& track)
     : m_params(params)
@@ -89,6 +160,13 @@ Car::Car(const CarParams& params, const Track& track)
 {
     b2WorldDef worldDef = b2DefaultWorldDef();
     worldDef.gravity = b2Vec2{0.0f, 0.0f}; // top-down: no "down"
+    // Box2D's own default maximumLinearSpeed is 400 px/s (see toB2's
+    // comment) -- below this car's safety clamp (kSafetySpeedMultiplier *
+    // maxSpeed), so it would silently override that clamp as the real
+    // ceiling. Raised well past it so the explicit, documented safety clamp
+    // in update() -- not an undocumented engine default -- is what actually
+    // governs top speed.
+    worldDef.maximumLinearSpeed = params.maxSpeed * kSafetySpeedMultiplier * 2.0f;
     m_worldId = b2CreateWorld(&worldDef);
     m_bodyId = createCarBody(m_worldId, m_params);
 }
@@ -129,6 +207,8 @@ void Car::reset(Vector2 spawnPosition, float spawnHeading)
     m_heading = spawnHeading;
     m_alive = true;
     m_tireDebug = TireDebugInfo{};
+    m_frontSlipAngleRelaxed = 0.0f;
+    m_rearSlipAngleRelaxed = 0.0f;
     updateSensors();
 }
 
@@ -141,6 +221,7 @@ void Car::update(const CarInput& input, float dt)
 
     const float throttle = std::clamp(input.throttle, 0.0f, 1.0f);
     const float steering = std::clamp(input.steering, -1.0f, 1.0f);
+    const float brake = std::clamp(input.brake, 0.0f, 1.0f);
     const float steerAngle = steering * m_params.maxSteerAngle;
     const float cosSteer = std::cos(steerAngle);
     const float sinSteer = std::sin(steerAngle);
@@ -203,31 +284,107 @@ void Car::update(const CarInput& input, float dt)
         const float rearAxleSpeed = std::sqrt(vxBody * vxBody + vyRearBody * vyRearBody);
         const float rearSlipAngle = (rearAxleSpeed > kMinAxleSpeedForSlip) ? std::atan2(vyRearBody, vxBody) : 0.0f;
 
-        // Smooth saturating tire curve: Fy = -Fmax * tanh((C/Fmax) *
-        // slipAngle) -- slope C at slipAngle=0, approaches +-Fmax smoothly.
-        // Scaled by each axle's low-speed ramp (kTireForceRampSpeed). This
-        // is lateral force alone, before the rear friction-circle combine below.
         const float frontSpeedRamp = std::clamp(std::fabs(vxFrontWheel) / kTireForceRampSpeed, 0.0f, 1.0f);
         const float rearSpeedRamp = std::clamp(std::fabs(vxBody) / kTireForceRampSpeed, 0.0f, 1.0f);
 
-        const float frontLateralForce = -m_params.frontMaxTireForce *
-                                         std::tanh((m_params.frontCorneringStiffness / m_params.frontMaxTireForce) * frontSlipAngle) *
-                                         frontSpeedRamp;
-        const float rearLateralForceDesired = -m_params.rearMaxTireForce *
-                                               std::tanh((m_params.rearCorneringStiffness / m_params.rearMaxTireForce) * rearSlipAngle) *
-                                               rearSpeedRamp;
+        // Relax the EFFECTIVE slip angle toward the true (instantaneous)
+        // one -- see CarParams::frontTireRelaxationTime's comment for why
+        // this replaced relaxing the force directly. Build-up uses the
+        // normal (slower) time constant; UNLOADING uses the (faster)
+        // release constant instead, so a stale deflection can't linger
+        // through a slide's recovery.
+        //
+        // "Unloading" is |trueSlipAngle| < |storedAngle| -- the tire's
+        // current demand is smaller than what's still stored, whether or
+        // not the true angle has actually crossed zero yet. An earlier
+        // version gated release on a SIGN reversal alone, which missed the
+        // far more common case of true slip angle collapsing back toward
+        // zero WITHOUT crossing it (e.g. true -14deg -> -2deg over a few
+        // frames while, at the old build rate, stored stayed near -13 to
+        // -17deg the whole time): the relaxed angle -- and so the applied
+        // force -- stayed pinned near its old peak for several frames after
+        // the real geometry had already relieved, sustaining a large, by
+        // then stale restoring force right as the car was recovering. That
+        // stale-but-same-sign force is what was driving the sustained
+        // high-speed full-lock yaw oscillation (see the wobble
+        // investigation) -- this is the same "stored force must not outlive
+        // the demand that created it" principle as the sign-reversal fix,
+        // just applied to magnitude as well as sign. Both directions
+        // further shrink toward kTireRelaxationLowSpeedFloorTime as axle
+        // speed drops (same ramp fraction as the force ramp below).
+        auto relaxSlipAngle = [&](float trueSlipAngle, float storedAngle, float speedRamp, float buildTime, float releaseTime) -> float
+        {
+            const bool unloading = std::fabs(trueSlipAngle) < std::fabs(storedAngle);
+            const float baseTime = unloading ? releaseTime : buildTime;
+            const float effectiveTime = std::max(kTireRelaxationLowSpeedFloorTime + (baseTime - kTireRelaxationLowSpeedFloorTime) * speedRamp,
+                                                  kTireRelaxationLowSpeedFloorTime);
+            const float rate = std::clamp(subDt / std::max(effectiveTime, 1e-4f), 0.0f, 1.0f);
+            return storedAngle + (trueSlipAngle - storedAngle) * rate;
+        };
 
-        // Rear-wheel drive + friction circle: desired drive force and
-        // desired lateral force combine into one vector constrained to
-        // sqrt(FxRear^2+FyRear^2) <= rearMaxTireForce -- exceeding the
-        // budget scales BOTH components down together, so heavy throttle
-        // mid-corner reduces available lateral grip (power oversteer). The
-        // front axle never drives, so its lateral force never needs this.
+        m_frontSlipAngleRelaxed = relaxSlipAngle(frontSlipAngle, m_frontSlipAngleRelaxed, frontSpeedRamp,
+                                                  m_params.frontTireRelaxationTime, m_params.frontTireReleaseTime);
+        m_rearSlipAngleRelaxed = relaxSlipAngle(rearSlipAngle, m_rearSlipAngleRelaxed, rearSpeedRamp,
+                                                 m_params.rearTireRelaxationTime, m_params.rearTireReleaseTime);
+
+        // The actually-applied lateral force is the (memoryless) tire curve
+        // evaluated at the relaxed angle, re-gated by the CURRENT low-speed
+        // ramp every substep (never itself stored/relaxed) -- so even if
+        // the relaxed angle still holds a meaningful value, the output
+        // force still collapses toward zero as axle speed drops, rather
+        // than staying available as stored force would.
+        const float frontLateralForceDesired =
+            -std::copysign(tireLateralForceMagnitude(std::fabs(m_frontSlipAngleRelaxed), m_params.frontCorneringStiffness,
+                                                       m_params.frontMaxTireForce, m_params.frontSlidingGripRatio,
+                                                       m_params.frontPeakSlipAngle),
+                            m_frontSlipAngleRelaxed) *
+            frontSpeedRamp;
+        const float rearLateralForceDesired =
+            -std::copysign(tireLateralForceMagnitude(std::fabs(m_rearSlipAngleRelaxed), m_params.rearCorneringStiffness,
+                                                       m_params.rearMaxTireForce, m_params.rearSlidingGripRatio,
+                                                       m_params.rearPeakSlipAngle),
+                            m_rearSlipAngleRelaxed) *
+            rearSpeedRamp;
+
+        // Unrelaxed curve target, for debug/telemetry only (TireDebugInfo::
+        // front/rearTargetForceY) -- never used to drive the applied force.
+        const float frontLateralForceTarget =
+            -std::copysign(tireLateralForceMagnitude(std::fabs(frontSlipAngle), m_params.frontCorneringStiffness,
+                                                       m_params.frontMaxTireForce, m_params.frontSlidingGripRatio,
+                                                       m_params.frontPeakSlipAngle),
+                            frontSlipAngle) *
+            frontSpeedRamp;
+        const float rearLateralForceTarget =
+            -std::copysign(tireLateralForceMagnitude(std::fabs(rearSlipAngle), m_params.rearCorneringStiffness,
+                                                       m_params.rearMaxTireForce, m_params.rearSlidingGripRatio,
+                                                       m_params.rearPeakSlipAngle),
+                            rearSlipAngle) *
+            rearSpeedRamp;
+
+        // Braking: a longitudinal force opposing each axle's OWN current
+        // rolling direction (never a fixed world/body direction), split
+        // front/rear by frontBrakeBias. Reuses each axle's own speed ramp
+        // (frontSpeedRamp/rearSpeedRamp) -- at rest there is nothing to
+        // brake against, so the force (and any sign ambiguity from
+        // copysign at exactly zero speed) vanishes with it, same as the
+        // lateral tire curve above.
+        const float rearBrakeForceDesired =
+            -std::copysign(m_params.maxBrakeForce * (1.0f - m_params.frontBrakeBias) * brake * rearSpeedRamp, vxBody);
+        const float frontBrakeForceDesired =
+            -std::copysign(m_params.maxBrakeForce * m_params.frontBrakeBias * brake * frontSpeedRamp, vxFrontWheel);
+
+        // Rear-wheel drive + brake + friction circle: desired drive force,
+        // desired brake force, and desired lateral force combine into one
+        // vector constrained to sqrt(FxRear^2+FyRear^2) <= rearMaxTireForce
+        // -- exceeding the budget scales every component down together, so
+        // heavy throttle or heavy braking mid-corner both reduce available
+        // lateral grip (power oversteer / trail-braking oversteer alike).
         const float rearDriveForceDesired = m_params.engineForce * throttle;
+        const float rearForceXDesired = rearDriveForceDesired + rearBrakeForceDesired;
         const float rearCombinedMagnitude =
-            std::sqrt(rearDriveForceDesired * rearDriveForceDesired + rearLateralForceDesired * rearLateralForceDesired);
+            std::sqrt(rearForceXDesired * rearForceXDesired + rearLateralForceDesired * rearLateralForceDesired);
 
-        float rearForceX = rearDriveForceDesired;
+        float rearForceX = rearForceXDesired;
         float rearForceY = rearLateralForceDesired;
         if (rearCombinedMagnitude > m_params.rearMaxTireForce)
         {
@@ -236,13 +393,32 @@ void Car::update(const CarInput& input, float dt)
             rearForceY *= scale;
         }
 
+        // Front brake + friction circle: the front axle never drives, but
+        // now can brake, so its desired brake force and desired lateral
+        // force combine under the same sqrt(FxFront^2+FyFront^2) <=
+        // frontMaxTireForce constraint -- braking hard into a corner
+        // genuinely competes with the front's cornering grip.
+        const float frontCombinedMagnitude =
+            std::sqrt(frontBrakeForceDesired * frontBrakeForceDesired + frontLateralForceDesired * frontLateralForceDesired);
+        float frontForceX = frontBrakeForceDesired;
+        float frontForceY = frontLateralForceDesired;
+        if (frontCombinedMagnitude > m_params.frontMaxTireForce)
+        {
+            const float scale = m_params.frontMaxTireForce / frontCombinedMagnitude;
+            frontForceX *= scale;
+            frontForceY *= scale;
+        }
+
         // Apply each force at its own axle's world position -- Box2D
         // derives torque from the offset from center of mass, so yaw is a
         // genuine consequence of these moment arms, never commanded
-        // directly. Front force is in the steered wheel frame; rear in the
-        // body frame (it never steers).
+        // directly. Front force is in the steered wheel frame (X = wheel
+        // rolling direction, Y = wheel lateral); rear in the body frame (it
+        // never steers).
+        const Vector2 wheelForward = {forward.x * cosSteer + right.x * sinSteer, forward.y * cosSteer + right.y * sinSteer};
         const Vector2 wheelRight = {-forward.x * sinSteer + right.x * cosSteer, -forward.y * sinSteer + right.y * cosSteer};
-        const Vector2 frontForce = {wheelRight.x * frontLateralForce, wheelRight.y * frontLateralForce};
+        const Vector2 frontForce = {wheelForward.x * frontForceX + wheelRight.x * frontForceY,
+                                     wheelForward.y * frontForceX + wheelRight.y * frontForceY};
         const Vector2 rearForce = {forward.x * rearForceX + right.x * rearForceY, forward.y * rearForceX + right.y * rearForceY};
 
         const b2Vec2 frontAxlePosition = {comPosition.x + forward.x * m_params.cgToFrontAxle,
@@ -253,16 +429,27 @@ void Car::update(const CarInput& input, float dt)
         b2Body_ApplyForce(m_bodyId, toB2(frontForce), frontAxlePosition, true);
         b2Body_ApplyForce(m_bodyId, toB2(rearForce), rearAxlePosition, true);
 
+        m_tireDebug.steeringInput = steering;
+        m_tireDebug.throttleInput = throttle;
+        m_tireDebug.brakeInput = brake;
         m_tireDebug.steeringAngle = steerAngle;
         m_tireDebug.yawRate = yawRate;
         m_tireDebug.frontSlipAngle = frontSlipAngle;
         m_tireDebug.rearSlipAngle = rearSlipAngle;
-        m_tireDebug.frontForceX = 0.0f;
-        m_tireDebug.frontForceY = frontLateralForce;
+        m_tireDebug.frontSlipAngleRelaxed = m_frontSlipAngleRelaxed;
+        m_tireDebug.rearSlipAngleRelaxed = m_rearSlipAngleRelaxed;
+        m_tireDebug.frontForceX = frontForceX;
+        m_tireDebug.frontForceY = frontForceY;
         m_tireDebug.rearForceX = rearForceX;
         m_tireDebug.rearForceY = rearForceY;
+        m_tireDebug.frontTargetForceY = frontLateralForceTarget;
+        m_tireDebug.rearTargetForceY = rearLateralForceTarget;
+        m_tireDebug.frontAxleVx = vxFrontWheel;
+        m_tireDebug.frontAxleVy = vyFrontWheel;
+        m_tireDebug.rearAxleVx = vxBody;
+        m_tireDebug.rearAxleVy = vyRearBody;
         m_tireDebug.frontGripUtilization =
-            std::fabs(frontLateralForce) / std::max(m_params.frontMaxTireForce, 1e-4f);
+            std::sqrt(frontForceX * frontForceX + frontForceY * frontForceY) / std::max(m_params.frontMaxTireForce, 1e-4f);
         m_tireDebug.rearGripUtilization =
             std::sqrt(rearForceX * rearForceX + rearForceY * rearForceY) / std::max(m_params.rearMaxTireForce, 1e-4f);
 

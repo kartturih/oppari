@@ -64,7 +64,8 @@ ai::neat::Genome createDemonstrationGenome()
     constexpr NodeId kSensorRight60 = 4;
     constexpr NodeId kBiasId = 9;
     constexpr NodeId kSteeringOutputId = 100; // lower Output ID -> output slot 0
-    constexpr NodeId kThrottleOutputId = 101; // higher Output ID -> output slot 1
+    constexpr NodeId kThrottleOutputId = 101; // middle Output ID -> output slot 1
+    constexpr NodeId kBrakeOutputId = 102;    // higher Output ID -> output slot 2
 
     Genome genome;
     for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
@@ -74,6 +75,7 @@ ai::neat::Genome createDemonstrationGenome()
     genome.addNode(NodeGene{kBiasId, NodeType::Bias});
     genome.addNode(NodeGene{kSteeringOutputId, NodeType::Output});
     genome.addNode(NodeGene{kThrottleOutputId, NodeType::Output});
+    genome.addNode(NodeGene{kBrakeOutputId, NodeType::Output});
 
     int innovation = 0;
     genome.addConnection(ConnectionGene{kSensorLeft60, kSteeringOutputId, -0.5f, true, innovation++});
@@ -82,6 +84,11 @@ ai::neat::Genome createDemonstrationGenome()
     genome.addConnection(ConnectionGene{kSensorRight60, kSteeringOutputId, 0.5f, true, innovation++});
     genome.addConnection(ConnectionGene{kBiasId, kThrottleOutputId, 0.6f, true, innovation++});
     genome.addConnection(ConnectionGene{kSensorCenter, kThrottleOutputId, 0.4f, true, innovation++});
+    // Bias -> Brake, strongly negative: with no other wiring, raw brake
+    // output is tanh(-5.0) =~ -1.0, mapping to =~0 -- brakes start off, so
+    // generation 0 can actually drive; NEAT discovers real braking points
+    // via mutation from here, the same way it discovers everything else.
+    genome.addConnection(ConnectionGene{kBiasId, kBrakeOutputId, -5.0f, true, innovation++});
 
     return genome;
 }

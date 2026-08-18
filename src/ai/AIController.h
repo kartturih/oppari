@@ -18,12 +18,14 @@ public:
     // Builds an Observation from car, evaluates the network, maps outputs to
     // a CarInput. If the car is dead, returns a neutral CarInput without
     // evaluating; getRawSteeringOutput()/getRawThrottleOutput()/
-    // getLastObservation() keep reporting the last live evaluation.
+    // getRawBrakeOutput()/getLastObservation() keep reporting the last live
+    // evaluation.
     simulation::CarInput update(const simulation::Car& car);
 
     // Raw network outputs from the most recent live update(), before mapping.
     float getRawSteeringOutput() const { return m_rawSteering; }
     float getRawThrottleOutput() const { return m_rawThrottle; }
+    float getRawBrakeOutput() const { return m_rawBrake; }
 
     // Observation from the most recent live update() (default if none yet).
     const Observation& getLastObservation() const { return m_lastObservation; }
@@ -33,6 +35,7 @@ private:
     Observation m_lastObservation;
     float m_rawSteering = 0.0f;
     float m_rawThrottle = 0.0f;
+    float m_rawBrake = 0.0f;
 };
 
 } // namespace ai

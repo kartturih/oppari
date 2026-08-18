@@ -53,7 +53,7 @@ namespace verification
 namespace genome_crossover_verify
 {
 
-// 9 Input + 1 Bias + 2 Output, no connections -- the minimal interface
+// 9 Input + 1 Bias + 3 Output, no connections -- the minimal interface
 // every phenotype-buildable genome in this suite needs; both parents share
 // it so the child inherits it regardless of which connections it gets.
 ai::neat::Genome makeInterfaceGenome()
@@ -70,6 +70,7 @@ ai::neat::Genome makeInterfaceGenome()
     genome.addNode(NodeGene{9, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
+    genome.addNode(NodeGene{102, NodeType::Output});
     return genome;
 }
 
@@ -163,12 +164,13 @@ void verifyGenomeCrossover()
 
         const Genome child = crossover.crossover(a, 1.0f, b, 1.0f, config);
         assert(child.connections().empty() && "no connections in either parent must yield no connections in the child");
-        assert(child.nodes().size() == 12 && "the child must contain exactly the 9 Input + 1 Bias + 2 Output nodes");
+        assert(child.nodes().size() == 13 && "the child must contain exactly the 9 Input + 1 Bias + 3 Output nodes");
 
         child.validate();
         ai::NeuralNetwork net = ai::neat::buildPhenotype(child);
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
-        assert(out[0] == 0.0f && out[1] == 0.0f && "a fully disconnected child phenotype must evaluate to exactly 0");
+        assert(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f &&
+               "a fully disconnected child phenotype must evaluate to exactly 0");
     }
 
     // 5: matching genes align by innovation number, not vector index --
@@ -433,7 +435,8 @@ void verifyGenomeCrossover()
         assert(child.hasNode(9) && child.findNode(9)->getType() == NodeType::Bias &&
                "the Bias node must be preserved"); // 21
         assert(child.hasNode(100) && child.findNode(100)->getType() == NodeType::Output && child.hasNode(101) &&
-               child.findNode(101)->getType() == NodeType::Output && "every Output node must be preserved"); // 22
+               child.findNode(101)->getType() == NodeType::Output && child.hasNode(102) &&
+               child.findNode(102)->getType() == NodeType::Output && "every Output node must be preserved"); // 22
     }
 
     // 23: a Hidden node referenced by an inherited connection is preserved.
@@ -486,6 +489,8 @@ void verifyGenomeCrossover()
         parentA.addNode(NodeGene{2000, NodeType::Bias});
         parentA.addNode(NodeGene{3000, NodeType::Output});
         parentA.addNode(NodeGene{3001, NodeType::Output});
+        parentA.addNode(NodeGene{3002, NodeType::Output}); // GenomeCrossover::crossover() itself
+                                                             // buildPhenotype()-validates its child
         parentA.addConnection(ConnectionGene{1000, 3000, 0.5f, true, 0});
 
         Genome parentB;
@@ -496,6 +501,7 @@ void verifyGenomeCrossover()
         parentB.addNode(NodeGene{2000, NodeType::Bias});
         parentB.addNode(NodeGene{3000, NodeType::Output});
         parentB.addNode(NodeGene{3001, NodeType::Output});
+        parentB.addNode(NodeGene{3002, NodeType::Output});
         parentB.addConnection(ConnectionGene{1000, 3000, 0.9f, true, 0}); // matching, different weight
 
         GenomeCrossover crossover(1u);
@@ -527,6 +533,8 @@ void verifyGenomeCrossover()
     {
         Genome parentA;
         parentA.addNode(NodeGene{9, NodeType::Bias});
+        parentA.addNode(NodeGene{102, NodeType::Output}); // GenomeCrossover::crossover() itself
+                                                            // buildPhenotype()-validates its child
         parentA.addNode(NodeGene{101, NodeType::Output});
         parentA.addNode(NodeGene{100, NodeType::Output});
         for (int i = ai::NeuralNetwork::kInputCount - 1; i >= 0; --i)
@@ -628,7 +636,7 @@ void verifyGenomeCrossover()
         const auto obs = makeObservation(0, 1.0f);
         const auto outA = netA.evaluate(obs);
         const auto outB = netB.evaluate(obs);
-        assert(outA[0] == outB[0] && outA[1] == outB[1] &&
+        assert(outA[0] == outB[0] && outA[1] == outB[1] && outA[2] == outB[2] &&
                "the phenotype built from a crossover child must evaluate deterministically");
     }
 

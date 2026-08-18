@@ -31,7 +31,7 @@ struct RunMetadata
     std::string trackName;
 
     // Mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- update by hand if that ever changes.
-    float maxEvaluationTimeSeconds = 30.0f;
+    float maxEvaluationTimeSeconds = 60.0f;
 
     ai::neat::PopulationConfig populationConfig;
     ai::neat::MutationConfig mutationConfig;

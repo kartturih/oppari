@@ -282,7 +282,7 @@ training::RunMetadata makeTestMetadata()
     training::RunMetadata metadata;
     metadata.buildVersion = "test-build";
     metadata.trackName = "test-track";
-    metadata.maxEvaluationTimeSeconds = 30.0f;
+    metadata.maxEvaluationTimeSeconds = 60.0f;
     return metadata;
 }
 
@@ -551,8 +551,8 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
     assert(metrics.stagnantSpeciesExcluded == expectedStagnantExcluded &&
            "GenerationMetrics::stagnantSpeciesExcluded must match Population::getReproductionStats()"); // 7
 
-    assert(metrics.generationDurationSeconds > 0.0f && metrics.generationDurationSeconds <= 30.0f + 1e-4f &&
-           "generation duration must be positive and bounded by the 30-second evaluation timeout"); // 8
+    assert(metrics.generationDurationSeconds > 0.0f && metrics.generationDurationSeconds <= 60.0f + 1e-4f &&
+           "generation duration must be positive and bounded by the 60-second evaluation timeout"); // 8
     assert(!std::isnan(metrics.bestFitness) && !std::isnan(metrics.avgFitness) && !std::isnan(metrics.avgProgress) &&
            "no metric field may be NaN"); // 9
 
