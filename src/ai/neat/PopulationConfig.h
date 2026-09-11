@@ -9,7 +9,7 @@ namespace ai::neat
 // Top-level tunables for Population; validated by Population itself.
 struct PopulationConfig
 {
-    std::size_t populationSize = 50;
+    std::size_t populationSize = 100;
     std::size_t eliteCount = 2;
     std::size_t tournamentSize = 3;
 

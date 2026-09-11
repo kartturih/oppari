@@ -29,16 +29,17 @@ float mapThrottle(float rawThrottle)
     return std::clamp((rawThrottle + 1.0f) * 0.5f, 0.0f, 1.0f);
 }
 
-// Same [-1,1] -> [0,1] mapping as throttle -- brake is a fully independent
-// output (never mutually exclusive with throttle; see Car.cpp's friction
-// circle for why simultaneous throttle+brake is self-defeating rather than
-// forbidden).
-float mapBrake(float rawBrake)
-{
-    return std::clamp((rawBrake + 1.0f) * 0.5f, 0.0f, 1.0f);
-}
-
 } // namespace
+
+// Unlike throttle, neutral (or negative) raw output means NO brake -- a
+// network that hasn't learned to brake yet must not coast at an effective
+// 50% brake. Brake is a fully independent output (never mutually exclusive
+// with throttle; see Car.cpp's friction circle for why simultaneous
+// throttle+brake is self-defeating rather than forbidden).
+float AIController::mapBrake(float rawBrake)
+{
+    return std::clamp(rawBrake, 0.0f, 1.0f);
+}
 
 AIController::AIController(NeuralNetwork network)
     : m_network(std::move(network))

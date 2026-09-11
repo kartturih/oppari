@@ -39,6 +39,32 @@ void validatePopulationConfig(const PopulationConfig& config)
     }
 }
 
+// Only the adaptive-threshold tuning fields -- compatibilityThreshold itself
+// is still validated (finite, non-negative) by Speciator on every speciate()
+// call, unchanged.
+void validateSpeciationTuning(const SpeciationConfig& config)
+{
+    if (config.targetSpeciesMin == 0)
+    {
+        throw std::invalid_argument("SpeciationConfig: targetSpeciesMin must be greater than 0");
+    }
+    if (config.targetSpeciesMin > config.targetSpeciesMax)
+    {
+        throw std::invalid_argument("SpeciationConfig: targetSpeciesMin must not exceed targetSpeciesMax");
+    }
+    if (!std::isfinite(config.compatibilityThresholdAdjustment) || config.compatibilityThresholdAdjustment <= 0.0f)
+    {
+        throw std::invalid_argument("SpeciationConfig: compatibilityThresholdAdjustment must be finite and positive");
+    }
+    if (!std::isfinite(config.minimumCompatibilityThreshold) || !std::isfinite(config.maximumCompatibilityThreshold) ||
+        config.minimumCompatibilityThreshold < 0.0f ||
+        config.minimumCompatibilityThreshold > config.maximumCompatibilityThreshold)
+    {
+        throw std::invalid_argument("SpeciationConfig: minimumCompatibilityThreshold must be finite, non-negative, "
+                                     "and not exceed maximumCompatibilityThreshold");
+    }
+}
+
 // One past the highest NodeId in genome (0 if none) -- so a fresh
 // InnovationTracker can never collide with an ID baseGenome already uses.
 NodeId computeFirstAvailableNodeId(const Genome& genome)
@@ -180,8 +206,10 @@ Population::Population(const Genome& baseGenome, const simulation::Track& track,
     , m_speciator()
     , m_generation(0)
     , m_lastGenerationBestFitness(0.0f)
+    , m_currentCompatibilityThreshold(speciationConfig.compatibilityThreshold)
 {
     validatePopulationConfig(m_populationConfig);
+    validateSpeciationTuning(m_speciationConfig);
 
     m_individuals.reserve(m_populationConfig.populationSize);
     for (std::size_t i = 0; i < m_populationConfig.populationSize; ++i)
@@ -274,7 +302,13 @@ const std::vector<Species>& Population::computeCurrentSpecies()
     {
         genomes.push_back(individual.getGenome());
     }
-    return m_speciator.speciate(genomes, m_compatibilityConfig, m_speciationConfig);
+
+    // Speciator only ever sees "the threshold to use right now" -- the
+    // runtime-adaptive value, not the (fixed, initial-only) one stored in
+    // m_speciationConfig. m_speciationConfig itself is never mutated.
+    SpeciationConfig effectiveSpeciationConfig = m_speciationConfig;
+    effectiveSpeciationConfig.compatibilityThreshold = m_currentCompatibilityThreshold;
+    return m_speciator.speciate(genomes, m_compatibilityConfig, effectiveSpeciationConfig);
 }
 
 std::size_t Population::selectParentFromSpecies(const Species& species, const std::vector<float>& fitnessValues)
@@ -343,6 +377,14 @@ void Population::reproduce()
     // every remaining step (fitness sharing, allocation, parent selection).
     const std::vector<Species>& currentSpecies = computeCurrentSpecies();
     const std::size_t speciesCount = currentSpecies.size();
+
+    // Threshold actually used to produce currentSpecies above -- this is
+    // what gets reported (step 7b) as "this generation's" threshold. The
+    // adaptive step-10 adjustment below only prepares the value for the
+    // NEXT generation's speciate() call, so this stays the single, stable
+    // threshold this whole reproduce() call (and the generation it
+    // finishes) used.
+    const float compatibilityThresholdUsed = m_currentCompatibilityThreshold;
 
     // 2b. Feed raw fitness into each species' persistent history now that
     // it's known (age/historicalBestFitness/stagnation).
@@ -473,6 +515,7 @@ void Population::reproduce()
         metricsInput.rawFitness = fitnessValues;
         metricsInput.adjustedFitness = adjustedFitness;
         metricsInput.bestIndividualIndex = rankedIndices[0];
+        metricsInput.compatibilityThresholdUsed = compatibilityThresholdUsed;
 
         metricsInput.bestProgressValues.reserve(populationSize);
         metricsInput.completedLap.reserve(populationSize);
@@ -557,16 +600,49 @@ void Population::reproduce()
         throw std::logic_error("Population::reproduce: constructed next generation does not match populationSize");
     }
 
-    // 9. Rebuild every Individual and replace the population atomically.
-    std::vector<Individual> newIndividuals;
-    newIndividuals.reserve(populationSize);
+    // 9. Release the just-finished generation before building the next one.
+    // newGenomes above is already complete, independent data (copied/moved
+    // out of the old Individuals' Genomes), so nothing past this point needs
+    // m_individuals -- clearing it now destroys every old Individual (and
+    // therefore its Car's private Box2D b2World) before any new Individual
+    // exists. Building the new generation while the old one was still alive
+    // meant up to 2x populationSize concurrent Box2D worlds, which at
+    // populationSize == 100 exceeds Box2D's B2_MAX_WORLDS (128) cap. Clearing
+    // first instead of move-assigning a separately-built vector keeps the
+    // peak at populationSize (old OR new, never both).
+    m_individuals.clear();
+
+    m_individuals.reserve(populationSize);
     for (Genome& genome : newGenomes)
     {
-        newIndividuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
+        m_individuals.emplace_back(std::move(genome), m_track, m_carParams, m_spawnPosition, m_spawnHeading);
     }
 
-    m_individuals = std::move(newIndividuals);
+    // 10. Adapt the compatibility threshold for the NEXT generation's
+    // speciation pass, based on speciesCount (step 2) -- the species count
+    // THIS generation's speciate() call, using compatibilityThresholdUsed,
+    // actually produced. Never touches m_speciationConfig (see its own
+    // comment) or anything already computed above -- this generation's
+    // reproduction used one stable threshold throughout.
+    m_currentCompatibilityThreshold =
+        adjustCompatibilityThreshold(m_currentCompatibilityThreshold, speciesCount, m_speciationConfig);
+
     ++m_generation;
+}
+
+float Population::adjustCompatibilityThreshold(float currentThreshold, std::size_t speciesCount,
+                                                 const SpeciationConfig& config)
+{
+    float adjusted = currentThreshold;
+    if (speciesCount < config.targetSpeciesMin)
+    {
+        adjusted -= config.compatibilityThresholdAdjustment;
+    }
+    else if (speciesCount > config.targetSpeciesMax)
+    {
+        adjusted += config.compatibilityThresholdAdjustment;
+    }
+    return std::clamp(adjusted, config.minimumCompatibilityThreshold, config.maximumCompatibilityThreshold);
 }
 
 } // namespace ai::neat

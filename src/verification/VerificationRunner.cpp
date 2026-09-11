@@ -21,6 +21,7 @@ void runAll(const simulation::Track& track)
     verifyAddConnectionMutation();
     verifyAddNodeMutation();
     verifyGenomeCrossover();
+    verifyGenomeCrossoverCycleSafety();
     verifyCompatibilityDistance();
     verifySpeciation();
     verifyAIController(track);
@@ -31,9 +32,12 @@ void runAll(const simulation::Track& track)
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
     verifyPersistentSpeciesAndStagnation(track);
+    verifyAdaptiveCompatibilityThreshold(track);
     verifyTrainingMetrics();
     verifyTrainingLogger();
     verifyGenerationMetricsPopulationIntegration(track);
+    verifyTrainingSpeedDeterminism(track);
+    verifyHairpinTelemetry(track);
 }
 
 } // namespace verification

@@ -41,6 +41,8 @@ GenomeComplexity computeGenomeComplexity(const ai::neat::Genome& genome);
 //   best/avg/median/worstFitness -- over RAW evaluation fitness, never species-adjusted
 //   avgAdjustedFitness         -- mean of species-adjusted fitness (0 if not supplied)
 //   speciesCount/largest/smallestSpeciesSize -- this generation's species grouping
+//   compatibilityThresholdUsed -- the (runtime-adaptive) compatibility threshold actually used to
+//                                  produce this generation's species grouping (Population::reproduce())
 //   bestSpeciesHistoricalFitness -- highest all-time species best (Species::getHistoricalBestFitness())
 //   stagnantSpeciesExcluded    -- species excluded from offspring allocation this generation
 //                                  (not removed -- that only happens once a species hits 0 members)
@@ -64,6 +66,7 @@ struct GenerationMetrics
     std::size_t speciesCount = 0;
     std::size_t largestSpeciesSize = 0;
     std::size_t smallestSpeciesSize = 0;
+    float compatibilityThresholdUsed = 0.0f;
     float bestSpeciesHistoricalFitness = 0.0f;
     std::size_t stagnantSpeciesExcluded = 0;
 
@@ -109,6 +112,7 @@ struct GenerationMetricsInput
     std::size_t speciesCount = 0;
     std::size_t largestSpeciesSize = 0;
     std::size_t smallestSpeciesSize = 0;
+    float compatibilityThresholdUsed = 0.0f;
     float bestSpeciesHistoricalFitness = 0.0f;
     std::size_t stagnantSpeciesExcluded = 0;
 

@@ -40,6 +40,11 @@ public:
     const simulation::TrackProgress& getProgress() const { return m_progress; }
     const ai::FitnessEvaluator& getFitnessEvaluator() const { return m_fitness; }
 
+    // Read-only access to the controller's most recent raw network outputs
+    // / observation (AIController::getRawSteeringOutput() etc.) -- debug/
+    // telemetry only, never used to drive control from outside Individual.
+    const ai::AIController& getController() const { return m_controller; }
+
 private:
     Genome m_genome;
     Vector2 m_spawnPosition;

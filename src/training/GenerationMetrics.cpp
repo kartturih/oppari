@@ -114,6 +114,7 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
     metrics.speciesCount = input.speciesCount;
     metrics.largestSpeciesSize = input.largestSpeciesSize;
     metrics.smallestSpeciesSize = input.smallestSpeciesSize;
+    metrics.compatibilityThresholdUsed = input.compatibilityThresholdUsed;
     metrics.bestSpeciesHistoricalFitness = input.bestSpeciesHistoricalFitness;
     metrics.stagnantSpeciesExcluded = input.stagnantSpeciesExcluded;
 

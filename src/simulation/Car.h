@@ -388,7 +388,18 @@ public:
     // Five forward sensors at fixed angles, cast in fixed steps to a fixed range.
     static constexpr int kSensorCount = 5;
     static constexpr float kSensorAngleDegrees[kSensorCount] = {-60.0f, -30.0f, 0.0f, 30.0f, 60.0f};
-    static constexpr float kMaxSensorDistance = 200.0f; // px
+    // Perception-range experiment: raised from the original 200px -- see
+    // the hairpin-telemetry investigation, which measured real cars
+    // reaching ~480-495px/s on the start straight while useful forward
+    // warning only appeared around 110-136px, well under the ~276-292px
+    // stopping distance that speed needs. 400px was chosen as the smallest
+    // change that could plausibly close that gap for the speeds actually
+    // observed (not an attempt to cover the full ~590px/s theoretical top
+    // speed). Sensor angles/origin/step and every consumer (Observation's
+    // normalization, HairpinTelemetry's raw-px fields) all derive from this
+    // one constant, so nothing else needed to change alongside it.
+    static constexpr float kMaxSensorDistance = 400.0f; // px
+
     static constexpr float kSensorStep = 2.0f;           // px
 
     // Box2D v3 soft-step sub-step count per update(); outer timestep is

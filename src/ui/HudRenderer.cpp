@@ -116,6 +116,10 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
                       activeCount, stagnantCount);
         DrawText(line, x, y, 16, LIGHTGRAY);
         y += lineHeight;
+        std::snprintf(line, sizeof(line), "Compatibility threshold: %.2f",
+                      static_cast<double>(population.getCurrentCompatibilityThreshold()));
+        DrawText(line, x, y, 16, LIGHTGRAY);
+        y += lineHeight;
     }
 
     DrawText("REPRODUCTION: SPECIES-AWARE", x, y, 16, SKYBLUE);
@@ -281,6 +285,8 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     DrawText("R restart current generation", x, y, 16, LIGHTGRAY);
     y += lineHeight;
     DrawText("TAB manual control mode", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("F: Toggle training speed", x, y, 16, LIGHTGRAY);
 }
 
 void drawManualPanel(const simulation::Car& car, int panelWidth, int screenHeight)
@@ -372,6 +378,25 @@ void drawManualPanel(const simulation::Car& car, int panelWidth, int screenHeigh
     DrawText("R reset car to spawn", x, y, 16, LIGHTGRAY);
     y += lineHeight;
     DrawText("TAB back to NEAT training", x, y, 16, LIGHTGRAY);
+    y += lineHeight;
+    DrawText("F: Toggle training speed", x, y, 16, LIGHTGRAY);
+}
+
+void drawTrainingSpeedHud(bool fastMode, float simSpeedMultiplier, bool simSpeedMultiplierValid)
+{
+    char line[64];
+    const int x = 12;
+    int y = 8;
+
+    std::snprintf(line, sizeof(line), "Training speed: %s", fastMode ? "FAST" : "NORMAL");
+    DrawText(line, x, y, 18, fastMode ? ORANGE : RAYWHITE);
+    y += 20;
+
+    if (fastMode && simSpeedMultiplierValid)
+    {
+        std::snprintf(line, sizeof(line), "Sim speed: %.1fx", static_cast<double>(simSpeedMultiplier));
+        DrawText(line, x, y, 16, ORANGE);
+    }
 }
 
 } // namespace ui

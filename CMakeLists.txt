@@ -112,6 +112,8 @@ add_executable(neat_car_simulation
     src/ai/neat/Population.cpp
     src/training/GenerationMetrics.cpp
     src/training/TrainingLogger.cpp
+    src/telemetry/HairpinTelemetry.cpp
+    src/verification/HairpinTelemetryVerification.cpp
 )
 
 target_include_directories(neat_car_simulation PRIVATE src)
@@ -135,4 +137,41 @@ add_executable(generate_test_fixtures EXCLUDE_FROM_ALL tools/generate_test_fixtu
 target_link_libraries(generate_test_fixtures PRIVATE raylib)
 target_compile_definitions(generate_test_fixtures PRIVATE
     OPPARI_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+)
+
+# Dev-only, read-only diagnostic for the Bias->Brake evolvability experiment
+# (see tools/inspect_brake_genomes.cpp): prints individual 0's/the best
+# individual's genome wiring at chosen generations, headless (no window).
+# Not part of the normal build or any dependency of neat_car_simulation --
+# build/run it explicitly only when inspecting brake-related genome
+# structure directly is needed.
+add_executable(inspect_brake_genomes EXCLUDE_FROM_ALL
+    tools/inspect_brake_genomes.cpp
+    src/AppConfig.cpp
+    src/simulation/Track.cpp
+    src/simulation/Car.cpp
+    src/simulation/TrackProgress.cpp
+    src/ai/Observation.cpp
+    src/ai/NeuralNetwork.cpp
+    src/ai/AIController.cpp
+    src/ai/FitnessEvaluator.cpp
+    src/ai/neat/NodeGene.cpp
+    src/ai/neat/ConnectionGene.cpp
+    src/ai/neat/Genome.cpp
+    src/ai/neat/PhenotypeBuilder.cpp
+    src/ai/neat/GenomeMutator.cpp
+    src/ai/neat/InnovationTracker.cpp
+    src/ai/neat/GenomeCrossover.cpp
+    src/ai/neat/CompatibilityDistance.cpp
+    src/ai/neat/Species.cpp
+    src/ai/neat/Speciator.cpp
+    src/ai/neat/Individual.cpp
+    src/ai/neat/Population.cpp
+    src/training/GenerationMetrics.cpp
+)
+target_include_directories(inspect_brake_genomes PRIVATE src)
+target_link_libraries(inspect_brake_genomes PRIVATE raylib box2d::box2d)
+target_compile_definitions(inspect_brake_genomes PRIVATE
+    OPPARI_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+    OPPARI_BUILD_VERSION="${OPPARI_BUILD_VERSION}"
 )

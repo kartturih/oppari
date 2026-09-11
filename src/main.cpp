@@ -19,6 +19,7 @@
 
 #include "AppConfig.h"
 #include "input/ManualInput.h"
+#include "telemetry/HairpinTelemetry.h"
 #include "ui/DebugRenderer.h"
 #include "ui/HudRenderer.h"
 #include "ui/SimulationRenderer.h"
@@ -42,6 +43,7 @@ using ui::drawIndividualCar;
 using ui::drawManualPanel;
 using ui::drawPopulationPanel;
 using ui::drawProjectionDebug;
+using ui::drawTrainingSpeedHud;
 using ui::progressRankColor;
 using ui::reportSuspiciousProjectionJump;
 using ui::selectHighlightedIndividual;
@@ -49,6 +51,24 @@ using ui::selectHighlightedIndividual;
 constexpr int kPanelWidth = 400;
 constexpr int kScreenWidth = kSimWidth + kPanelWidth;
 constexpr int kScreenHeight = kSimHeight;
+
+// FAST training-speed mode: how many fixed 1/60s simulation steps run per
+// rendered frame (rendering happens once after the whole batch, never mid-
+// batch -- see the main loop). Chosen empirically (see the training-speed
+// investigation this was built for): large enough for a real, measurable
+// wall-clock speedup, small enough that one batch's uninterrupted compute
+// stays well under the few-hundred-ms range where Windows would start
+// flagging the window as unresponsive (no window-message pump runs during
+// a batch, only before/after it, via IsKeyPressed/WindowShouldClose and
+// BeginDrawing/EndDrawing).
+constexpr int kFastModeStepsPerFrame = 100;
+
+// How often (wall-clock seconds) the achieved simulated-seconds-per-wall-
+// second multiplier is (re)measured and displayed -- long enough to average
+// out per-frame noise, short enough to feel live. Reset (and the multiplier
+// marked invalid again) on every Normal<->Fast toggle so a stale reading
+// from the other mode is never shown.
+constexpr double kSimSpeedMeasurementWindowSeconds = 0.5;
 
 } // namespace
 
@@ -100,6 +120,12 @@ int main()
     TraceLog(LOG_INFO, "Training metrics logging to %s (metadata: %s)", trainingLogger.getCsvPath().c_str(),
              trainingLogger.getMetadataPath().c_str());
 
+    // Debugging-only instrument for the recurring first-hairpin spin failure
+    // -- entirely separate from trainingLogger above (never touches its CSV
+    // or GenerationMetrics), disabled in one place via
+    // telemetry::kHairpinTelemetryEnabled. See HairpinTelemetry.h.
+    telemetry::HairpinTelemetryRecorder hairpinTelemetry(track, "results", kSimulationDt);
+
     // A standalone manual-control car, entirely independent of `population`
     // -- lets the vehicle handling be driven and felt directly (TAB to
     // toggle) without waiting on NEAT. Reset to spawn every time manual
@@ -113,6 +139,27 @@ int main()
     // progress is visible from console output too, not only the on-screen
     // panel. Reads Population's state only; never influences it.
     std::size_t lastLoggedGeneration = population.getGeneration();
+
+    // Runtime-selectable NORMAL/FAST training-speed mode (F to toggle -- see
+    // the main loop below). FAST removes SetTargetFPS's real-time pacing and
+    // runs kFastModeStepsPerFrame fixed simulation steps per rendered frame
+    // instead of one; the fixed step itself (kSimulationDt, always 1/60s) is
+    // identical in both modes, and Population/Car never read wall-clock or
+    // frame time, so which mode is active -- and how many render calls
+    // happen -- cannot change simulation state, RNG call order, or results
+    // (see verifyTrainingSpeedDeterminism() for the structural proof: this
+    // is exactly why NORMAL and FAST are guaranteed to reproduce identical
+    // evolutionary runs for the same seed/config).
+    bool fastMode = false;
+
+    // Simulated-seconds-per-wall-second multiplier, measured (never
+    // fabricated) over rolling kSimSpeedMeasurementWindowSeconds windows;
+    // invalid (not yet shown) until the first window completes after
+    // startup or after a mode toggle.
+    double simSpeedWindowStartWallTime = GetTime();
+    float simSecondsInWindow = 0.0f;
+    float simSpeedMultiplier = 0.0f;
+    bool simSpeedMultiplierValid = false;
 
     while (!WindowShouldClose())
     {
@@ -140,30 +187,76 @@ int main()
             }
         }
 
+        if (IsKeyPressed(KEY_F))
+        {
+            fastMode = !fastMode;
+            // 0 = uncapped in raylib: FAST renders (and polls input) as
+            // fast as the CPU/GPU allow instead of pacing to 60Hz: In this
+            // application the per-frame cost is now the training-step
+            // batch's compute, not vsync, since rendering itself is cheap
+            // and happens only once per batch either way.
+            SetTargetFPS(fastMode ? 0 : 60);
+            simSpeedWindowStartWallTime = GetTime();
+            simSecondsInWindow = 0.0f;
+            simSpeedMultiplierValid = false;
+        }
+
         if (manualMode)
         {
+            // Manual driving always advances one real-time step per
+            // rendered frame regardless of fastMode -- batching human input
+            // would just make control feel laggy/stale; FAST here only
+            // still uncaps the render rate (harmless for a single car).
             manualCar.update(readManualCarInput(), kSimulationDt);
         }
         else
         {
-            population.update(kSimulationDt);
-
-            if (population.getGeneration() != lastLoggedGeneration)
+            // NORMAL: exactly one step per rendered frame, identical to
+            // this loop's behavior before FAST mode existed. FAST: up to
+            // kFastModeStepsPerFrame steps, still each individually
+            // dt=kSimulationDt=1/60s -- never a larger or variable dt.
+            const int stepsThisFrame = fastMode ? kFastModeStepsPerFrame : 1;
+            for (int step = 0; step < stepsThisFrame; ++step)
             {
-                lastLoggedGeneration = population.getGeneration();
+                population.update(kSimulationDt);
+                hairpinTelemetry.update(population);
+                simSecondsInWindow += kSimulationDt;
 
-                // The just-finished generation's full metrics row -- captured
-                // inside Population::reproduce() before this transition
-                // replaced m_individuals -- is persisted to CSV and
-                // summarized on one console line.
-                const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
-                trainingLogger.logGeneration(metrics);
+                if (population.getGeneration() != lastLoggedGeneration)
+                {
+                    lastLoggedGeneration = population.getGeneration();
 
-                TraceLog(LOG_INFO, "Gen %d | best %.1f | avg %.1f | median %.1f | species %d | best nodes %d | best connections %d",
-                         static_cast<int>(metrics.generation), static_cast<double>(metrics.bestFitness),
-                         static_cast<double>(metrics.avgFitness), static_cast<double>(metrics.medianFitness),
-                         static_cast<int>(metrics.speciesCount), static_cast<int>(metrics.bestGenomeNodeCount),
-                         static_cast<int>(metrics.bestGenomeConnectionGeneCount));
+                    // The just-finished generation's full metrics row --
+                    // captured inside Population::reproduce() before this
+                    // transition replaced m_individuals -- is persisted to
+                    // CSV and summarized on one console line.
+                    // generationDurationSeconds here is (and always was)
+                    // simulated elapsed time (FitnessEvaluator::
+                    // getElapsedTime()), never wall-clock -- unaffected by
+                    // which speed mode produced it.
+                    const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
+                    trainingLogger.logGeneration(metrics);
+
+                    TraceLog(LOG_INFO, "Gen %d | best %.1f | avg %.1f | median %.1f | species %d | best nodes %d | best connections %d",
+                             static_cast<int>(metrics.generation), static_cast<double>(metrics.bestFitness),
+                             static_cast<double>(metrics.avgFitness), static_cast<double>(metrics.medianFitness),
+                             static_cast<int>(metrics.speciesCount), static_cast<int>(metrics.bestGenomeNodeCount),
+                             static_cast<int>(metrics.bestGenomeConnectionGeneCount));
+                }
+            }
+        }
+
+        // Measured, not fabricated: only ever computed from actual
+        // simulated-dt accumulated versus actual GetTime() elapsed.
+        {
+            const double wallNow = GetTime();
+            const double wallElapsed = wallNow - simSpeedWindowStartWallTime;
+            if (wallElapsed >= kSimSpeedMeasurementWindowSeconds)
+            {
+                simSpeedMultiplier = static_cast<float>(simSecondsInWindow / wallElapsed);
+                simSpeedMultiplierValid = true;
+                simSpeedWindowStartWallTime = wallNow;
+                simSecondsInWindow = 0.0f;
             }
         }
 
@@ -177,6 +270,8 @@ int main()
         // mask Car/sensors collide against (see Track::isDrivable()) and of
         // the centerline TrackProgress uses.
         trackVisual.draw();
+
+        drawTrainingSpeedHud(fastMode, simSpeedMultiplier, simSpeedMultiplierValid);
 
         if (manualMode)
         {

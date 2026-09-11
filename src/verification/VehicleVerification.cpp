@@ -175,7 +175,7 @@ void verifySensors(const simulation::Track& track)
     }
 
     // 6: a sensor aimed across the road (90 deg off spawn heading) must hit
-    // the boundary well within the 200px range, for any track's spawn geometry.
+    // the boundary well within kMaxSensorDistance, for any track's spawn geometry.
     {
         car.reset(kSpawnPosition, kSpawnHeading + static_cast<float>(PI) * 0.5f);
         const simulation::SensorReading& front = car.getSensors()[2];
@@ -186,7 +186,9 @@ void verifySensors(const simulation::Track& track)
     }
 
     // 7: a ray with no obstacle within range reports exactly maximum distance / normalized 1.0.
-    // At spawn heading, the front sensor points along the spawn straight, clear for 200px.
+    // At spawn heading, the front sensor points along the spawn straight,
+    // clear for at least kMaxSensorDistance (the extreme track's start
+    // straight is ~800px -- see Track.cpp -- comfortably longer).
     {
         const simulation::SensorReading& front = car.getSensors()[2];
         assert(front.distance == simulation::Car::kMaxSensorDistance &&
@@ -234,6 +236,76 @@ void verifySensors(const simulation::Track& track)
     }
 
     car.reset(kSpawnPosition, kSpawnHeading);
+
+    // 10 & 11: obstacle at a KNOWN physical distance is reported exactly --
+    // not just "less than max" (checks 6/8 above) -- using a synthetic
+    // straight corridor (same wide-synthetic-track idiom used elsewhere in
+    // this file, e.g. the grip-saturation checks) whose wall distance from
+    // an on-centerline point is exactly trackWidth/2 by construction (see
+    // Track::buildMaskFromCenterlineWidth()'s distance-to-centerline <=
+    // halfWidth rule) -- PROVIDED the centerline is actually straight there.
+    // A plain 4-corner rectangle is NOT: Catmull-Rom through a corner's two
+    // neighbors curves the "straight" side inward near its middle (verified
+    // the hard way -- an earlier version of this check used a 4-point
+    // rectangle and failed by ~25px). Using several COLINEAR control points
+    // along the top edge instead makes every one of an interior segment's
+    // four control points (p0,p1,p2,p3) share the same y, which collapses
+    // the Catmull-Rom cubic to a plain straight line for that segment
+    // (every t/t^2/t^3 coefficient in y vanishes) -- so the segment between
+    // the two MIDDLE top points is exactly straight, with the nearest
+    // corner still far away (>=500px).
+    {
+        simulation::TrackDefinition straightDef;
+        straightDef.simWidth = 3500;
+        straightDef.simHeight = 1500;
+        straightDef.controlPoints = {Vector2{500.0f, 500.0f}, Vector2{1000.0f, 500.0f}, Vector2{1500.0f, 500.0f},
+                                      Vector2{2000.0f, 500.0f}, Vector2{2500.0f, 500.0f}, Vector2{2500.0f, 700.0f},
+                                      Vector2{500.0f, 700.0f}};
+        straightDef.samplesPerSegment = 8;
+
+        // Sensor origin sits kCarHalfLength ahead of the car's own position
+        // along heading (see Car::getSensorOrigin()) -- pointing heading
+        // -PI/2 ("up", away from the loop's interior) from a position ON
+        // the top edge's centerline (y=500) moves the origin itself
+        // slightly into the band first, so the expected ray distance to the
+        // band edge is halfWidth minus that offset, not halfWidth itself.
+        constexpr float kCarHalfLength = 24.0f * 0.5f; // CarParams::length, see makeCarParams()
+        constexpr float kDistanceTolerance = simulation::Car::kSensorStep + 1.0f; // raycast step + rounding
+
+        auto measureOutwardDistance = [&](float trackWidth) -> float
+        {
+            straightDef.trackWidth = trackWidth;
+            simulation::Track straightTrack(straightDef);
+            simulation::Car straightCar(makeCarParams(), straightTrack);
+            // (1750,500) is the midpoint of the exactly-straight (1500,500)->(2000,500) segment.
+            straightCar.reset(Vector2{1750.0f, 500.0f}, -static_cast<float>(PI) * 0.5f); // on centerline, facing "up"
+            return straightCar.getSensors()[2].distance; // 0 deg sensor now points straight "up"
+        };
+
+        // 10: a wall at 300px -- inside the NEW 400px range but outside the
+        // OLD 200px one -- must be reported at (approximately) its real
+        // distance, not saturated at the old cap. This is the direct,
+        // known-geometry regression check for the range change itself.
+        {
+            const float halfWidth = 300.0f; // trackWidth=600 -> wall at 300px from centerline
+            const float expected = halfWidth - kCarHalfLength;
+            const float measured = measureOutwardDistance(600.0f);
+            assert(std::fabs(measured - expected) <= kDistanceTolerance &&
+                   "a wall at a known 300px distance (within the new 400px range) must be reported at "
+                   "approximately its real physical distance");
+            assert(measured < simulation::Car::kMaxSensorDistance &&
+                   "a wall within range must not read as the saturated maximum");
+        }
+
+        // 11: a wall at 450px -- beyond the new 400px range -- must still
+        // saturate at exactly kMaxSensorDistance, proving the cap itself
+        // (not just the old 200px number) is still respected.
+        {
+            const float measured = measureOutwardDistance(900.0f); // trackWidth=900 -> wall at 450px from centerline
+            assert(measured == simulation::Car::kMaxSensorDistance &&
+                   "a wall beyond kMaxSensorDistance must still saturate at exactly the maximum, not overshoot it");
+        }
+    }
 
     TraceLog(LOG_INFO, "Sensor verification: all deterministic checks passed");
 }
@@ -2192,8 +2264,8 @@ void verifyAIController(const simulation::Track& track)
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
         const simulation::CarInput input = controller.update(car);
-        assert(input.steering == 0.0f && input.throttle == 0.5f && input.brake == 0.5f &&
-               "a disconnected network must map to zero steering and neutral (0.5) throttle/brake");
+        assert(input.steering == 0.0f && input.throttle == 0.5f && input.brake == 0.0f &&
+               "a disconnected network must map to zero steering, neutral (0.5) throttle, and off (0.0) brake");
     }
 
     // 2 & 3: output 0 drives steering, output 1 drives throttle, output 2
@@ -2211,7 +2283,7 @@ void verifyAIController(const simulation::Track& track)
 
         assert(input.steering > 0.5f && "output index 0 must map to steering");
         assert(std::fabs(input.throttle - 0.5f) < kEps && "output index 1 (throttle) must be unaffected");
-        assert(std::fabs(input.brake - 0.5f) < kEps && "output index 2 (brake) must be unaffected");
+        assert(input.brake == 0.0f && "output index 2 (brake) must be unaffected and stay off");
     }
 
     // 4, 5 & 6: raw throttle 0 maps to 0.5; negative maps below 0.5; positive maps above 0.5.
@@ -2241,10 +2313,26 @@ void verifyAIController(const simulation::Track& track)
         assert(positiveInput.throttle > 0.5f + kEps && "positive raw throttle must map above 0.5");
     }
 
-    // 14, 15 & 16: raw brake 0 maps to 0.5; negative maps below 0.5;
-    // positive maps above 0.5 -- the exact same [-1,1] -> [0,1] mapping as
-    // throttle, applied to output index 2. Also confirms mapped brake never
-    // leaves [0,1] even for a saturating weight.
+    // 14, 15, 16, 17 & 18: brake is a deliberate action, not throttle's
+    // neutral-at-0.5 mapping -- neutral or negative raw output means NO
+    // brake (0.0), and braking increases linearly only for positive raw
+    // output, saturating at +1.0 -> full brake. Exercised directly against
+    // AIController::mapBrake since a real network's tanh output can only
+    // approach, never exactly reach, +-1.0.
+    {
+        assert(AIController::mapBrake(-1.0f) == 0.0f && "raw brake -1.0 must map to 0.0"); // 14
+        assert(AIController::mapBrake(-0.5f) == 0.0f && "raw brake -0.5 must map to 0.0"); // 15
+        assert(AIController::mapBrake(0.0f) == 0.0f && "raw brake 0.0 (neutral) must map to 0.0, not 50% brake"); // 16
+        assert(std::fabs(AIController::mapBrake(0.5f) - 0.5f) < kEps && "raw brake +0.5 must map to 0.5"); // 17
+        assert(AIController::mapBrake(1.0f) == 1.0f && "raw brake +1.0 must map to 1.0"); // 18
+        assert(AIController::mapBrake(2.0f) == 1.0f && "raw brake above +1.0 must clamp to 1.0");
+        assert(AIController::mapBrake(-2.0f) == 0.0f && "raw brake below -1.0 must clamp to 0.0");
+    }
+
+    // 19, 20 & 21: the same mapping applies through the full network ->
+    // AIController path -- no Bias->brake wiring (or a negative one) leaves
+    // brake fully off, and a positive Bias->brake weight produces a real,
+    // clamped brake value.
     {
         Genome zeroGenome = makeDisconnectedGenome(); // no Bias->brake connection: raw brake stays 0
         AIController zeroController(ai::neat::buildPhenotype(zeroGenome));
@@ -2252,7 +2340,7 @@ void verifyAIController(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
         const simulation::CarInput zeroInput = zeroController.update(car);
         assert(zeroController.getRawBrakeOutput() == 0.0f && "raw brake must be exactly 0 with no contribution");
-        assert(std::fabs(zeroInput.brake - 0.5f) < kEps && "raw brake 0 must map to mapped brake 0.5"); // 14
+        assert(zeroInput.brake == 0.0f && "neutral raw brake must map to mapped brake 0.0, not 0.5"); // 19
 
         Genome negativeGenome = makeDisconnectedGenome();
         negativeGenome.addConnection(ConnectionGene{9, 102, -1.0f, true, 0});
@@ -2260,7 +2348,7 @@ void verifyAIController(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
         const simulation::CarInput negativeInput = negativeController.update(car);
         assert(negativeController.getRawBrakeOutput() < 0.0f && "negative Bias->brake weight must yield negative raw brake");
-        assert(negativeInput.brake < 0.5f - kEps && "negative raw brake must map below 0.5"); // 15
+        assert(negativeInput.brake == 0.0f && "negative raw brake must still map to 0.0 brake"); // 20
 
         Genome positiveGenome = makeDisconnectedGenome();
         positiveGenome.addConnection(ConnectionGene{9, 102, 10.0f, true, 0}); // saturating weight
@@ -2268,9 +2356,24 @@ void verifyAIController(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
         const simulation::CarInput positiveInput = positiveController.update(car);
         assert(positiveController.getRawBrakeOutput() > 0.0f && "positive Bias->brake weight must yield positive raw brake");
-        assert(positiveInput.brake > 0.5f + kEps && "positive raw brake must map above 0.5"); // 16
+        assert(positiveInput.brake > 0.0f && "positive raw brake must produce a nonzero mapped brake"); // 21
         assert(positiveInput.brake >= 0.0f && positiveInput.brake <= 1.0f &&
-               "mapped brake must stay within [0, 1] even under a saturating weight"); // 1 (clamped)
+               "mapped brake must stay within [0, 1] even under a saturating weight");
+    }
+
+    // 22: the actual generation-0 demonstration genome (AppConfig.cpp's
+    // createDemonstrationGenome(), Bias -> Brake = -0.5 -- see its own
+    // comment for why this isn't -5.0 anymore) still accelerates with brake
+    // fully off: raw brake stays negative, which maps to exactly 0.0.
+    {
+        AIController controller(ai::neat::buildPhenotype(createDemonstrationGenome()));
+        simulation::Car car(makeCarParams(), track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const simulation::CarInput input = controller.update(car);
+        assert(input.throttle > 0.5f && "generation-0 demonstration genome must still accelerate"); // 22
+        assert(controller.getRawBrakeOutput() < 0.0f && "generation-0 raw brake output must remain negative (bias-driven)");
+        assert(input.brake == 0.0f && "generation-0 demonstration genome's brake must start fully off");
+        car.reset(kSpawnPosition, kSpawnHeading);
     }
 
     // 7 & 8: mapped steering stays within [-1,1], throttle and brake within

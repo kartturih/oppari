@@ -12,9 +12,15 @@ constexpr float kProgressPointsPerLap = 1000.0f; // dominant fitness term
 constexpr float kCheckpointReward = 10.0f;       // per ordered checkpoint (<=160/lap)
 constexpr float kCompletedLapReward = 150.0f;
 
-// Scales progressRate into progressRateReward; kept small relative to
-// kProgressPointsPerLap so a high rate can't outscore substantially more
-// actual progress.
+// Scales progressRate into progressRateReward, rewarding a car for
+// covering forward track progress faster -- this is what lets fitness
+// distinguish two cars that reach similar progress but at different
+// speeds, which raw progress alone cannot. Deliberately kept secondary to
+// actual track progress: at the degenerate elapsedTime floor
+// (kSmallTimeEpsilon), the absolute ceiling is
+// kProgressRateScale/kSmallTimeEpsilon = 1000, exactly one lap's worth of
+// kProgressPointsPerLap, so a high rate can never outscore substantially
+// more actual progress.
 constexpr float kProgressRateScale = 100.0f;
 
 constexpr float kLapTimeReferenceSeconds = 15.0f; // "par" time for the lap-speed bonus scale

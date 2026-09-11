@@ -105,15 +105,20 @@ PopulationConfig makeTestPopulationConfig(std::size_t populationSize, std::uint3
     return config;
 }
 
-// A genome that drives at near-maximum throttle with zero steering and no
-// brake (Bias -> Throttle only, weight large enough that tanh saturates
-// close to 1.0; Bias -> Brake strongly negative so brake stays off, same
-// convention as AppConfig.cpp's createDemonstrationGenome()) -- from the
-// fixed spawn pose this reliably leaves the road band and collides within a
-// few hundred simulation steps, exactly like the deliberate "drive off
-// track" scenario verifyCar() itself exercises. Used only to keep
-// generation-transition tests fast and their step-count bound tight; it
-// carries no meaning beyond that.
+// A genome that drives at near-maximum throttle with a fixed, moderate
+// steering bias and no brake (Bias -> Brake strongly negative so brake
+// stays off, same convention as AppConfig.cpp's createDemonstrationGenome())
+// -- from the fixed spawn pose this reliably steers into the road edge and
+// collides within a few hundred simulation steps, exactly like the
+// deliberate "drive off track" scenario verifyCar() itself exercises. The
+// Bias -> Steering connection also matters for weight-mutated copies of this
+// genome (see the generation-transition tests below): since brake is fully
+// off for every individual regardless of its (still-negative) mutated
+// weight, steering is what gives mutated individuals genuinely different
+// trajectories -- and therefore different crash timing, so population-level
+// tests can rely on individuals finishing at different steps rather than in
+// lockstep. Used only to keep generation-transition tests fast and their
+// step-count bound tight; it carries no meaning beyond that.
 Genome makeCrashGenome()
 {
     Genome genome;
@@ -125,8 +130,9 @@ Genome makeCrashGenome()
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
     genome.addNode(NodeGene{102, NodeType::Output});
-    genome.addConnection(ConnectionGene{9, 101, 5.0f, true, 0});
-    genome.addConnection(ConnectionGene{9, 102, -5.0f, true, 1});
+    genome.addConnection(ConnectionGene{9, 100, 1.0f, true, 0});
+    genome.addConnection(ConnectionGene{9, 101, 5.0f, true, 1});
+    genome.addConnection(ConnectionGene{9, 102, -5.0f, true, 2});
     return genome;
 }
 
@@ -238,6 +244,141 @@ void verifyPopulation(const simulation::Track& track)
             }
         }
         assert(sawWeightChange && "initial weight mutation must be able to alter at least one weight"); // 8
+    }
+
+    // Default PopulationConfig -- the one main.cpp actually trains with --
+    // must be the experiment's larger population (100, up from the old 50).
+    // Checked on the struct alone (no Population construction): building a
+    // full 100-individual Population against the real track is exercised
+    // for real by every other check in this file that uses
+    // makeTestPopulationConfig, and repeating that at 4x the cost here
+    // (two 100-individual Populations back to back) is unnecessary weight
+    // for a single field check.
+    {
+        assert(PopulationConfig{}.populationSize == 100 &&
+               "default PopulationConfig::populationSize must be 100 for the larger-population experiment");
+    }
+
+    // 100-individual determinism, at production scale: the same seed
+    // (12345, via makeTestPopulationConfig) must deterministically
+    // reproduce generation 0 exactly, same as the smaller-population
+    // determinism checks elsewhere in this file. Each 100-individual
+    // Population owns 100 concurrent Box2D worlds (one per Car); Box2D
+    // caps concurrent worlds at B2_MAX_WORLDS (128), so the first
+    // Population's genomes are snapshotted into plain data and the
+    // Population itself destroyed *before* constructing the second one --
+    // never holding two 100-individual Populations (200 worlds) alive at
+    // once.
+    {
+        const Genome base = createDemonstrationGenome();
+        const PopulationConfig popConfig = makeTestPopulationConfig(100, 12345u);
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+
+        std::vector<std::vector<ConnectionGene>> firstRunConnections;
+        {
+            Population population(base, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                   mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+            assert(population.size() == 100 && "a Population configured for size 100 must contain 100 individuals");
+
+            firstRunConnections.reserve(population.size());
+            for (std::size_t i = 0; i < population.size(); ++i)
+            {
+                firstRunConnections.push_back(population.getIndividual(i).getGenome().connections());
+            }
+        } // population (and its 100 Box2D worlds) destroyed here, before the next Population is built.
+
+        Population populationRepeat(base, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                     mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        assert(populationRepeat.size() == firstRunConnections.size() &&
+               "repeating the same config must produce the same population size");
+        for (std::size_t i = 0; i < populationRepeat.size(); ++i)
+        {
+            assert(connectionsMatch(firstRunConnections[i],
+                                     populationRepeat.getIndividual(i).getGenome().connections()) &&
+                   "seed 12345 must deterministically reproduce generation 0 at populationSize == 100");
+        }
+    }
+
+    // Regression test for the Box2D world-cap crash during generation
+    // transition at populationSize == 100 (see Population::reproduce()):
+    // building the next generation's Individuals while the just-finished
+    // generation's Individuals (and their Box2D worlds) were still alive
+    // meant up to 2x populationSize concurrent worlds -- fine at the old
+    // default of 50 (50+50=100 < 128), but past B2_MAX_WORLDS (128) at 100
+    // (100+100=200). Population::reproduce() now clears the old generation
+    // before building the new one, so this must complete cleanly. This test
+    // itself only ever holds one 100-individual Population alive at a time
+    // (built, driven through generation 0 and its transition, snapshotted,
+    // then destroyed, before the repeat run below is built) -- respecting
+    // the same cap the fix is about. makeCrashGenome() is used (rather than
+    // the real demonstration genome) so every one of the 100 individuals
+    // reliably finishes within a bounded step count.
+    std::vector<std::vector<ConnectionGene>> generation1ConnectionsFirstRun;
+    {
+        const Genome crashGenome = makeCrashGenome();
+        const PopulationConfig popConfig = makeTestPopulationConfig(100, 12345u);
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+
+        Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                               mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        assert(population.size() == 100 && "setup: population must start at exactly 100 individuals");
+
+        for (int step = 0; step < 4000 && population.getGeneration() == 0; ++step)
+        {
+            population.update(kSimulationDt);
+        }
+        assert(population.getGeneration() == 1 &&
+               "populationSize == 100 must reach generation 1 without a Box2D world-cap crash (regression)");
+        assert(population.size() == 100 &&
+               "population size must remain exactly 100 across the generation-0 -> generation-1 transition");
+        assert(population.getRunningCount() == 100 &&
+               "every individual in the freshly-built generation 1 must be running, not finished");
+
+        const training::GenerationMetrics& metrics = population.getLastGenerationMetrics();
+        assert(metrics.generation == 0 &&
+               "generation 0's metrics, captured inside reproduce() before individuals were replaced, must survive "
+               "the transition to generation 1");
+
+        generation1ConnectionsFirstRun.reserve(population.size());
+        for (std::size_t i = 0; i < population.size(); ++i)
+        {
+            generation1ConnectionsFirstRun.push_back(population.getIndividual(i).getGenome().connections());
+        }
+    } // population (and its 100 generation-1 Box2D worlds) destroyed here, before the repeat run below.
+
+    // Same seed/config, run again from scratch: generation 1's genomes must
+    // come out byte-identical -- the resource-lifetime fix (clearing
+    // m_individuals before rebuilding it) must not have changed the actual
+    // reproduction algorithm, parent selection, or RNG draw sequence.
+    {
+        const Genome crashGenome = makeCrashGenome();
+        const PopulationConfig popConfig = makeTestPopulationConfig(100, 12345u);
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+
+        Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                               mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        for (int step = 0; step < 4000 && population.getGeneration() == 0; ++step)
+        {
+            population.update(kSimulationDt);
+        }
+        assert(population.getGeneration() == 1 && "setup: repeat run must also reach generation 1");
+        assert(population.size() == generation1ConnectionsFirstRun.size() &&
+               "repeating the same config must produce the same generation-1 population size");
+        for (std::size_t i = 0; i < population.size(); ++i)
+        {
+            assert(connectionsMatch(generation1ConnectionsFirstRun[i],
+                                     population.getIndividual(i).getGenome().connections()) &&
+                   "seed 12345 must deterministically reproduce generation 1 at populationSize == 100");
+        }
     }
 
     // 9, 10, 45 & 46: each Individual owns fully independent Car and
@@ -1625,4 +1766,228 @@ void verifyPersistentSpeciesAndStagnation(const simulation::Track& track)
 
     TraceLog(LOG_INFO, "Persistent species and stagnation verification: all deterministic checks passed");
 }
+
+// Deterministic verification of the adaptive compatibility threshold
+// (Population::adjustCompatibilityThreshold() and its use inside
+// reproduce()): the exact per-generation +/-step/clamp rule (A-E), that
+// exactly one stable threshold is used per generation's speciation pass and
+// reported as such in that generation's metrics (F), that the whole
+// mechanism remains fully deterministic (G), and that adding it does not
+// disturb Speciator's persistent-species machinery (H, backed by every
+// unmodified check in verifyPersistentSpeciesAndStagnation() above).
+void verifyAdaptiveCompatibilityThreshold(const simulation::Track& track)
+{
+    using namespace population_verify;
+    using ai::neat::Species;
+    using ai::neat::SpeciesId;
+    constexpr float kEps = 1e-4f;
+
+    // A: below the target range -- threshold decreases by exactly
+    // compatibilityThresholdAdjustment (3.0 -> 2.9), for every species count
+    // strictly below targetSpeciesMin (5).
+    {
+        const SpeciationConfig config; // targetSpeciesMin=5, adjustment=0.1
+        for (std::size_t speciesCount : {std::size_t{0}, std::size_t{1}, std::size_t{4}})
+        {
+            const float adjusted = Population::adjustCompatibilityThreshold(3.0f, speciesCount, config);
+            assert(std::fabs(adjusted - 2.9f) < kEps &&
+                   "species count below targetSpeciesMin must decrease the threshold by exactly the adjustment step"); // A
+        }
+    }
+
+    // B: inside the target range [5, 10] inclusive -- threshold unchanged,
+    // including both boundaries.
+    {
+        const SpeciationConfig config;
+        for (std::size_t speciesCount : {std::size_t{5}, std::size_t{7}, std::size_t{10}})
+        {
+            const float adjusted = Population::adjustCompatibilityThreshold(3.0f, speciesCount, config);
+            assert(adjusted == 3.0f &&
+                   "species count within [targetSpeciesMin, targetSpeciesMax] must leave the threshold unchanged"); // B
+        }
+    }
+
+    // C: above the target range -- threshold increases by exactly
+    // compatibilityThresholdAdjustment (3.0 -> 3.1), for every species count
+    // strictly above targetSpeciesMax (10).
+    {
+        const SpeciationConfig config;
+        for (std::size_t speciesCount : {std::size_t{11}, std::size_t{20}, std::size_t{100}})
+        {
+            const float adjusted = Population::adjustCompatibilityThreshold(3.0f, speciesCount, config);
+            assert(std::fabs(adjusted - 3.1f) < kEps &&
+                   "species count above targetSpeciesMax must increase the threshold by exactly the adjustment step"); // C
+        }
+    }
+
+    // D: lower bound -- repeated below-range updates must never push the
+    // threshold below minimumCompatibilityThreshold (0.5), and must settle
+    // there exactly.
+    {
+        const SpeciationConfig config;
+        float threshold = 3.0f;
+        for (int i = 0; i < 50; ++i)
+        {
+            threshold = Population::adjustCompatibilityThreshold(threshold, 1, config);
+            assert(threshold >= config.minimumCompatibilityThreshold - kEps &&
+                   "the threshold must never drop below minimumCompatibilityThreshold, even after many decreases"); // D
+        }
+        assert(std::fabs(threshold - config.minimumCompatibilityThreshold) < kEps &&
+               "repeated below-range updates must settle exactly at minimumCompatibilityThreshold"); // D
+    }
+
+    // E: upper bound -- repeated above-range updates must never push the
+    // threshold above maximumCompatibilityThreshold (10.0), and must settle
+    // there exactly.
+    {
+        const SpeciationConfig config;
+        float threshold = 3.0f;
+        for (int i = 0; i < 100; ++i)
+        {
+            threshold = Population::adjustCompatibilityThreshold(threshold, 20, config);
+            assert(threshold <= config.maximumCompatibilityThreshold + kEps &&
+                   "the threshold must never exceed maximumCompatibilityThreshold, even after many increases"); // E
+        }
+        assert(std::fabs(threshold - config.maximumCompatibilityThreshold) < kEps &&
+               "repeated above-range updates must settle exactly at maximumCompatibilityThreshold"); // E
+    }
+
+    // F: exactly one stable threshold is used for a whole generation's
+    // speciation pass -- it must not change across the multiple update()
+    // calls generation 0 takes to finish, and the value reported in that
+    // generation's metrics must be the one actually in effect throughout,
+    // not whatever the threshold becomes afterward (prepared for generation
+    // 1, only once generation 0 has fully finished).
+    {
+        const Genome crashGenome = makeCrashGenome();
+        const PopulationConfig popConfig = makeTestPopulationConfig(8, 606u);
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+
+        Population population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                               mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        const float initialThreshold = population.getCurrentCompatibilityThreshold();
+        assert(initialThreshold == speciationConfig.compatibilityThreshold &&
+               "a freshly constructed Population must start at the configured initial threshold"); // F (setup)
+
+        for (int step = 0; step < 4000 && population.getGeneration() == 0; ++step)
+        {
+            assert(population.getCurrentCompatibilityThreshold() == initialThreshold &&
+                   "the threshold must not change at any point during generation 0's speciation pass, "
+                   "no matter how many update() calls it takes to finish"); // F
+            population.update(kSimulationDt);
+        }
+        assert(population.getGeneration() == 1 && "setup: population must complete generation 0 within the step budget");
+
+        assert(population.getLastGenerationMetrics().compatibilityThresholdUsed == initialThreshold &&
+               "generation 0's logged metrics must report the threshold actually used for ITS speciation pass, "
+               "not whatever the threshold has since become for generation 1"); // F
+    }
+
+    // G: determinism -- two sequential Populations (small populationSize,
+    // never simultaneous 100-individual Populations -- see the Box2D
+    // B2_MAX_WORLDS regression test above) built from the identical
+    // seed/config must produce an identical threshold history, identical
+    // species assignments, and identical genomes across multiple adaptive
+    // generation transitions.
+    {
+        const Genome crashGenome = makeCrashGenome();
+        const PopulationConfig popConfig = makeTestPopulationConfig(10, 4343u);
+        const MutationConfig mutationConfig;
+        const CrossoverConfig crossoverConfig;
+        const CompatibilityConfig compatibilityConfig;
+        const SpeciationConfig speciationConfig;
+
+        auto runAndRecordThresholdHistory = [&](Population& population, std::size_t targetGeneration)
+        {
+            std::vector<float> thresholdHistory;
+            for (int step = 0; step < 4000 * (static_cast<int>(targetGeneration) + 2) &&
+                                population.getGeneration() < targetGeneration;
+                 ++step)
+            {
+                const std::size_t generationBefore = population.getGeneration();
+                population.update(kSimulationDt);
+                if (population.getGeneration() != generationBefore)
+                {
+                    thresholdHistory.push_back(population.getLastGenerationMetrics().compatibilityThresholdUsed);
+                }
+            }
+            return thresholdHistory;
+        };
+
+        Population populationX(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        const std::vector<float> historyX = runAndRecordThresholdHistory(populationX, 5);
+        assert(populationX.getGeneration() >= 5 && "setup: populationX must reach generation 5 within the step budget");
+
+        std::vector<std::vector<ConnectionGene>> genomesX;
+        genomesX.reserve(populationX.size());
+        for (std::size_t i = 0; i < populationX.size(); ++i)
+        {
+            genomesX.push_back(populationX.getIndividual(i).getGenome().connections());
+        }
+        const std::vector<Species> speciesX = populationX.getCurrentSpecies();
+
+        Population populationY(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                                mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+        const std::vector<float> historyY = runAndRecordThresholdHistory(populationY, 5);
+        assert(populationY.getGeneration() >= 5 && "setup: populationY must reach generation 5 within the step budget");
+
+        assert(historyX.size() == historyY.size() && "identical seed/config must produce an identically-LENGTHED "
+                                                        "adaptive-threshold history"); // G
+        for (std::size_t i = 0; i < historyX.size(); ++i)
+        {
+            assert(historyX[i] == historyY[i] &&
+                   "identical seed/config must produce an identical adaptive-threshold value at every generation"); // G
+        }
+
+        assert(speciesX.size() == populationY.getCurrentSpecies().size() &&
+               "identical seed/config must produce an identical species count after multiple adaptive-threshold-"
+               "driven generation transitions"); // G
+        for (std::size_t s = 0; s < speciesX.size(); ++s)
+        {
+            const Species& sy = populationY.getCurrentSpecies()[s];
+            assert(speciesX[s].getId() == sy.getId() && speciesX[s].getMemberIndices() == sy.getMemberIndices() &&
+                   "identical seed/config must produce identical species ids/membership after multiple "
+                   "adaptive-threshold-driven generation transitions"); // G
+        }
+        for (std::size_t i = 0; i < populationX.size(); ++i)
+        {
+            assert(connectionsMatch(genomesX[i], populationY.getIndividual(i).getGenome().connections()) &&
+                   "identical seed/config must produce deterministic genomes after multiple adaptive-threshold-"
+                   "driven generation transitions"); // G
+        }
+
+        // H: persistent-species machinery keeps working under a threshold
+        // that actually changes generation to generation -- SpeciesIds stay
+        // strictly non-decreasing/never reused and every member index stays
+        // in range, exactly the invariant verifyPersistentSpeciesAndStagnation()
+        // already covers under a FIXED threshold; here the threshold is
+        // observed to have actually moved (or hit its bounds) at least once,
+        // so this is a genuine exercise of the interaction, not a no-op.
+        const bool thresholdEverChanged =
+            std::any_of(historyX.begin(), historyX.end(), [&](float t) { return t != speciationConfig.compatibilityThreshold; });
+        assert(thresholdEverChanged &&
+               "setup: this test's population must actually exercise the adaptive threshold at least once"); // H (setup)
+        SpeciesId previousId = -1;
+        for (const Species& species : speciesX)
+        {
+            assert(species.getId() > previousId &&
+                   "species ids must remain strictly ascending/never reused even while the compatibility "
+                   "threshold is changing between generations"); // H
+            previousId = species.getId();
+            for (std::size_t memberIndex : species.getMemberIndices())
+            {
+                assert(memberIndex < populationX.size() &&
+                       "every species' member indices must stay within the population's actual size even while "
+                       "the compatibility threshold is changing between generations"); // H
+            }
+        }
+    }
+
+    TraceLog(LOG_INFO, "Adaptive compatibility threshold verification: all deterministic checks passed");
+}
+
 } // namespace verification

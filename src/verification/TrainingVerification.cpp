@@ -322,10 +322,13 @@ void verifyTrainingLogger()
            "formatFloat must format -Inf as \"-inf\"");
 
     // 3: csvHeaderLine() column count matches GenerationMetrics' own field
-    // count (25) exactly.
+    // count (26) exactly -- compatibility_threshold is appended last so
+    // every pre-existing column keeps its original index.
     const std::string header = training::csvHeaderLine();
-    assert(countFields(header) == 25 && "CSV header must have exactly 25 columns, one per GenerationMetrics field");
+    assert(countFields(header) == 26 && "CSV header must have exactly 26 columns, one per GenerationMetrics field");
     assert(header.substr(0, 10) == "generation" && "CSV header's first column must be \"generation\"");
+    assert(header.substr(header.size() - 23) == "compatibility_threshold" &&
+           "CSV header's last column must be \"compatibility_threshold\", appended after every existing column");
 
     // 4: generationMetricsToCsvRow() produces the same column COUNT as the
     // header, in the documented order, with every field's value recoverable
@@ -357,6 +360,7 @@ void verifyTrainingLogger()
         metrics.terminatedMaxTimeCount = 8;
         metrics.terminatedNoProgressCount = 9;
         metrics.terminatedSlowStartCount = 10;
+        metrics.compatibilityThresholdUsed = 2.7f;
 
         const std::string row = training::generationMetricsToCsvRow(metrics);
         assert(countFields(row) == countFields(header) &&
@@ -369,7 +373,7 @@ void verifyTrainingLogger()
         {
             fields.push_back(field);
         }
-        assert(fields.size() == 25 && "split CSV row must yield exactly 25 fields"); // 5
+        assert(fields.size() == 26 && "split CSV row must yield exactly 26 fields"); // 5
         assert(fields[0] == "42" && "column 0 (generation) must be \"42\""); // 6
         assert(fields[1] == "812.4" && "column 1 (best_fitness) must be locale-independent \"812.4\""); // 7
         assert(fields[15] == "14" && "column 15 (best_genome_nodes) must be \"14\""); // 8
@@ -378,6 +382,8 @@ void verifyTrainingLogger()
         assert(fields[21] == "7" && fields[22] == "8" && fields[23] == "9" && fields[24] == "10" &&
                "columns 21-24 (terminated_collision/max_time/no_progress/slow_start_count) must be appended, "
                "in that order, after every pre-existing column"); // 10 (continued)
+        assert(fields[25] == "2.7" &&
+               "column 25 (compatibility_threshold) must be appended last, after every other column"); // 10 (continued)
     }
 
     // 11-16: TrainingLogger's real file behavior, against a scratch temp
@@ -390,6 +396,28 @@ void verifyTrainingLogger()
         training::TrainingLogger logger(dir.string(), makeTestMetadata());
         assert(std::filesystem::exists(logger.getCsvPath()) && "TrainingLogger must create the CSV file"); // 11
         assert(std::filesystem::exists(logger.getMetadataPath()) && "TrainingLogger must create the metadata file"); // 12
+
+        // 12b: the metadata file's [speciation] section reports the full
+        // adaptive-threshold configuration -- initial threshold, target
+        // range, adjustment step, and both bounds -- alongside the
+        // pre-existing compatibility_threshold line.
+        {
+            const std::vector<std::string> metadataLines = readLines(logger.getMetadataPath());
+            auto hasLine = [&metadataLines](const std::string& expected)
+            {
+                return std::find(metadataLines.begin(), metadataLines.end(), expected) != metadataLines.end();
+            };
+            assert(hasLine("compatibility_threshold = 3") &&
+                   "metadata must report the configured initial compatibility_threshold"); // 12b
+            assert(hasLine("target_species_min = 5") && "metadata must report target_species_min"); // 12b
+            assert(hasLine("target_species_max = 10") && "metadata must report target_species_max"); // 12b
+            assert(hasLine("compatibility_threshold_adjustment = 0.1") &&
+                   "metadata must report compatibility_threshold_adjustment"); // 12b
+            assert(hasLine("minimum_compatibility_threshold = 0.5") &&
+                   "metadata must report minimum_compatibility_threshold"); // 12b
+            assert(hasLine("maximum_compatibility_threshold = 10") &&
+                   "metadata must report maximum_compatibility_threshold"); // 12b
+        }
 
         const std::vector<std::string> headerOnly = readLines(logger.getCsvPath());
         assert(headerOnly.size() == 1 && headerOnly[0] == training::csvHeaderLine() &&
@@ -495,6 +523,13 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
     assert(metrics.bestFitness == population.getLastGenerationBestFitness() &&
            "GenerationMetrics::bestFitness must agree with Population::getLastGenerationBestFitness()"); // 2
 
+    // 2b: generation 0's speciation pass used the configured INITIAL
+    // threshold, unadjusted -- the adaptive step only prepares a value for
+    // generation 1's speciate() call, which hasn't happened yet.
+    assert(metrics.compatibilityThresholdUsed == speciationConfig.compatibilityThreshold &&
+           "GenerationMetrics::compatibilityThresholdUsed for generation 0 must equal the configured initial "
+           "threshold, unadjusted"); // 2b
+
     const bool snapshotIsExact = (finishedBeforeTransitionCall == population.size());
     if (snapshotIsExact)
     {
@@ -568,4 +603,127 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
 
     TraceLog(LOG_INFO, "Generation metrics / Population integration verification: all deterministic checks passed");
 }
+
+// Proves the exact invariant main.cpp's NORMAL/FAST training-speed toggle
+// relies on: Population::update() is a pure, deterministic state advance
+// driven only by the fixed dt passed to each call -- Population/Individual/
+// Car never read wall-clock time, frame count, or anything about how the
+// caller's own loop happens to group those calls. So the SAME total number
+// of update(kSimulationDt) calls must produce an IDENTICAL result whether
+// grouped one-per-outer-iteration (NORMAL) or into large, irregular batches
+// (FAST, and deliberately more irregular than FAST's own fixed
+// kFastModeStepsPerFrame, to rule out the invariant only happening to hold
+// for that one specific batch size).
+void verifyTrainingSpeedDeterminism(const simulation::Track& track)
+{
+    using ai::neat::CompatibilityConfig;
+    using ai::neat::CrossoverConfig;
+    using ai::neat::Genome;
+    using ai::neat::MutationConfig;
+    using ai::neat::Population;
+    using ai::neat::PopulationConfig;
+    using ai::neat::SpeciationConfig;
+
+    // 1: the fixed simulation step main.cpp passes to every update() call,
+    // in both modes, is exactly 1/60s -- the one invariant FAST mode must
+    // never touch (it only changes how many such calls happen per rendered
+    // frame, never their size).
+    assert(std::fabs(kSimulationDt - (1.0f / 60.0f)) < 1e-6f &&
+           "kSimulationDt must be exactly 1/60s -- FAST mode must never change the fixed simulation step"); // 1
+
+    const Genome crashGenome = population_verify::makeCrashGenome();
+    const PopulationConfig popConfig = population_verify::makeTestPopulationConfig(12, 999u);
+    const MutationConfig mutationConfig;
+    const CrossoverConfig crossoverConfig;
+    const CompatibilityConfig compatibilityConfig;
+    const SpeciationConfig speciationConfig;
+
+    auto buildPopulation = [&]() -> Population
+    {
+        return Population(crashGenome, track, makeCarParams(), kSpawnPosition, kSpawnHeading, popConfig,
+                           mutationConfig, crossoverConfig, compatibilityConfig, speciationConfig);
+    };
+
+    Population singleStepPopulation = buildPopulation(); // "NORMAL": one update() call per outer iteration
+    Population batchedPopulation = buildPopulation();    // "FAST": irregular multi-step batches
+
+    // Comfortably enough steps (at ~60 steps/sim-second) for several
+    // generation transitions with the fast-crashing genome (see
+    // makeCrashGenome()'s own comment: crashes within a few hundred steps).
+    constexpr int kTotalSteps = 6000;
+    // Deliberately irregular and including main.cpp's real
+    // kFastModeStepsPerFrame (100) among sizes that don't evenly divide
+    // kTotalSteps, so no coincidental alignment could hide a bug.
+    constexpr int kBatchSizes[] = {100, 7, 13, 1, 100, 41};
+    constexpr std::size_t kBatchSizeCount = sizeof(kBatchSizes) / sizeof(kBatchSizes[0]);
+
+    for (int i = 0; i < kTotalSteps; ++i)
+    {
+        singleStepPopulation.update(kSimulationDt);
+    }
+
+    {
+        int stepsDone = 0;
+        std::size_t batchIndex = 0;
+        while (stepsDone < kTotalSteps)
+        {
+            const int batchSize = std::min(kBatchSizes[batchIndex % kBatchSizeCount], kTotalSteps - stepsDone);
+            for (int s = 0; s < batchSize; ++s)
+            {
+                batchedPopulation.update(kSimulationDt);
+            }
+            stepsDone += batchSize;
+            ++batchIndex;
+        }
+        assert(stepsDone == kTotalSteps && "setup: batched driver must reach exactly kTotalSteps, same as the single-step driver");
+    }
+
+    // 2: several generation transitions actually happened, so this exercises
+    // real reproduction (crossover/mutation/speciation RNG draws), not just
+    // per-frame physics -- the property under test only matters if RNG-
+    // consuming code ran during the batches.
+    assert(singleStepPopulation.getGeneration() >= 3 && batchedPopulation.getGeneration() >= 3 &&
+           "setup: kTotalSteps must be enough for several generation transitions in both drivers"); // 2
+
+    // 3: identical total update() calls, however grouped, must reach the
+    // exact same generation number.
+    assert(singleStepPopulation.getGeneration() == batchedPopulation.getGeneration() &&
+           "the same total number of update() calls must reach the same generation regardless of batch grouping"); // 3
+
+    // 4: every individual's raw fitness, best progress, and completed-lap
+    // state must match exactly -- not just the aggregate generation count.
+    assert(singleStepPopulation.size() == batchedPopulation.size() && "setup: population sizes must match");
+    for (std::size_t i = 0; i < singleStepPopulation.size(); ++i)
+    {
+        const ai::neat::Individual& a = singleStepPopulation.getIndividual(i);
+        const ai::neat::Individual& b = batchedPopulation.getIndividual(i);
+        assert(a.getFitness() == b.getFitness() &&
+               "per-individual fitness must be bit-identical regardless of update() batch grouping"); // 4
+        assert(a.getProgress().getBestProgress() == b.getProgress().getBestProgress() &&
+               "per-individual bestProgress must be bit-identical regardless of update() batch grouping");
+        assert(a.getFitnessEvaluator().hasCompletedLap() == b.getFitnessEvaluator().hasCompletedLap() &&
+               "per-individual lap-completion state must match regardless of update() batch grouping");
+    }
+
+    // 5: species count and the last completed generation's full metrics
+    // (genome topology included) must also match exactly.
+    assert(singleStepPopulation.getSpeciesCount() == batchedPopulation.getSpeciesCount() &&
+           "species count must be identical regardless of update() batch grouping"); // 5
+
+    const training::GenerationMetrics& metricsA = singleStepPopulation.getLastGenerationMetrics();
+    const training::GenerationMetrics& metricsB = batchedPopulation.getLastGenerationMetrics();
+    assert(metricsA.bestFitness == metricsB.bestFitness && metricsA.avgFitness == metricsB.avgFitness &&
+           metricsA.bestProgress == metricsB.bestProgress && metricsA.avgProgress == metricsB.avgProgress &&
+           "last completed generation's fitness/progress metrics must be bit-identical regardless of batch grouping"); // 6
+    assert(metricsA.bestGenomeNodeCount == metricsB.bestGenomeNodeCount &&
+           metricsA.bestGenomeConnectionGeneCount == metricsB.bestGenomeConnectionGeneCount &&
+           metricsA.bestGenomeEnabledConnectionCount == metricsB.bestGenomeEnabledConnectionCount &&
+           "best genome's topology (nodes/connections) must be identical regardless of batch grouping -- FAST mode "
+           "cannot change which structural mutations occurred or in what order"); // 7
+    assert(metricsA.compatibilityThresholdUsed == metricsB.compatibilityThresholdUsed &&
+           "the adaptive compatibility threshold must evolve identically regardless of batch grouping");
+
+    TraceLog(LOG_INFO, "Training speed determinism verification: all deterministic checks passed");
+}
+
 } // namespace verification

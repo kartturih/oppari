@@ -22,11 +22,17 @@ public:
     simulation::CarInput update(const simulation::Car& car);
 
     // Raw network outputs from the most recent live update(), before mapping.
+    float getRawSteeringOutput() const { return m_rawSteering; }
     float getRawThrottleOutput() const { return m_rawThrottle; }
     float getRawBrakeOutput() const { return m_rawBrake; }
 
     // Observation from the most recent live update() (default if none yet).
     const Observation& getLastObservation() const { return m_lastObservation; }
+
+    // Brake mapping, exposed for direct verification: neutral/negative raw
+    // output means no brake (0 is not "50% brake"), positive raw output
+    // ramps linearly up to full brake at +1.0.
+    static float mapBrake(float rawBrake);
 
 private:
     NeuralNetwork m_network;

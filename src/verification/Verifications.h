@@ -35,6 +35,7 @@ void verifyAddConnectionMutation();
 void verifyAddNodeMutation();
 
 void verifyGenomeCrossover();
+void verifyGenomeCrossoverCycleSafety();
 
 void verifyCompatibilityDistance();
 void verifySpeciation();
@@ -48,10 +49,14 @@ void verifyEarlyTermination(const simulation::Track& track);
 void verifyPopulation(const simulation::Track& track);
 void verifySpeciesAwareReproduction(const simulation::Track& track);
 void verifyPersistentSpeciesAndStagnation(const simulation::Track& track);
+void verifyAdaptiveCompatibilityThreshold(const simulation::Track& track);
 
 void verifyTrainingMetrics();
 void verifyTrainingLogger();
 void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track);
+void verifyTrainingSpeedDeterminism(const simulation::Track& track);
+
+void verifyHairpinTelemetry(const simulation::Track& track);
 
 // Cross-file test helpers: each is defined alongside its owning verify*()
 // function (see the .cpp comment where it's defined) but also consumed by

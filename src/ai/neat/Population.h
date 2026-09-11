@@ -137,11 +137,30 @@ public:
     const PopulationConfig& getPopulationConfig() const { return m_populationConfig; }
     const InnovationTracker& getInnovationTracker() const { return m_innovationTracker; }
 
+    // Runtime-adaptive compatibility threshold currently in effect for the
+    // NEXT speciate() call. Starts at speciationConfig.compatibilityThreshold
+    // and is adjusted by at most +/- compatibilityThresholdAdjustment once
+    // per completed generation (see reproduce()); never mutates the
+    // SpeciationConfig this Population was constructed with.
+    float getCurrentCompatibilityThreshold() const { return m_currentCompatibilityThreshold; }
+
     // Samples tournamentSize indices (with replacement) from fitnessValues,
     // picks the winner via isBetterTournamentCandidate(). Draws from the
     // owned orchestration RNG, so a direct call advances it like an
     // internal one would.
     std::size_t tournamentSelect(const std::vector<float>& fitnessValues);
+
+    // The exact rule reproduce() applies once per completed generation to
+    // adapt the compatibility threshold for the NEXT one: decrease by
+    // config.compatibilityThresholdAdjustment if speciesCount is below
+    // config.targetSpeciesMin, increase by the same amount if above
+    // config.targetSpeciesMax, otherwise unchanged -- then always clamped to
+    // [config.minimumCompatibilityThreshold, config.maximumCompatibilityThreshold].
+    // A pure function (no RNG, no side effects); exposed as static so
+    // verification can exercise every case directly, without needing a real
+    // Population run to happen to produce a particular species count.
+    static float adjustCompatibilityThreshold(float currentThreshold, std::size_t speciesCount,
+                                               const SpeciationConfig& config);
 
 private:
     bool isGenerationFinished() const;
@@ -177,6 +196,7 @@ private:
 
     std::size_t m_generation;
     float m_lastGenerationBestFitness;
+    float m_currentCompatibilityThreshold;
     std::vector<SpeciesReproductionStats> m_reproductionStats;
     training::GenerationMetrics m_lastGenerationMetrics;
 

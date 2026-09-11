@@ -783,4 +783,169 @@ void verifyGenomeCrossover()
 
     TraceLog(LOG_INFO, "Genome crossover verification: all deterministic checks passed");
 }
+
+// Regression test for the crossover cycle bug (see GenomeCrossover.cpp's
+// class/function comments): two parent genomes that are each individually
+// acyclic can combine, via crossover, into a child with an enabled cycle --
+// the standard NEAT crossover pitfall. Two independent minimal reproducers,
+// one per previously-unprotected code path (a real production run hit this
+// at ~generation 160, almost certainly via path 2, the far more common
+// unequal-fitness case):
+//
+//   1. Two MATCHING genes (same innovation number, present in both
+//      parents) where each parent has exactly one of the pair enabled --
+//      crossover's probabilistic re-enable of a disabled matching gene can
+//      enable BOTH in the child even though neither parent ever had both
+//      enabled at once.
+//   2. A matching gene re-enabled by crossover (as in 1) combined with the
+//      FITTER parent's own exclusive (aOnly) gene, inherited unconditionally
+//      before this fix -- neither parent had both edges enabled
+//      simultaneously, but the child did.
+void verifyGenomeCrossoverCycleSafety()
+{
+    using namespace genome_crossover_verify;
+    using ai::neat::ConnectionGene;
+    using ai::neat::CrossoverConfig;
+    using ai::neat::Genome;
+    using ai::neat::GenomeCrossover;
+    using ai::neat::NodeGene;
+    using ai::neat::NodeType;
+
+    // Scenario 1: matching-gene re-enable path.
+    //
+    // Parent A: hidden 103->104 ENABLED, hidden 104->103 disabled -- alone,
+    // acyclic (single live edge).
+    // Parent B: hidden 103->104 disabled, hidden 104->103 ENABLED -- alone,
+    // also acyclic (single live edge, the opposite one).
+    // Both also share one ordinary, always-enabled-in-both matching gene
+    // (Bias->Steering) to confirm the fix doesn't touch unrelated genes.
+    {
+        Genome parentA = makeInterfaceGenome();
+        parentA.addNode(NodeGene{103, NodeType::Hidden});
+        parentA.addNode(NodeGene{104, NodeType::Hidden});
+        parentA.addConnection(ConnectionGene{9, 100, 0.42f, true, 0});     // ordinary matching gene, both enabled
+        parentA.addConnection(ConnectionGene{103, 104, 0.5f, true, 10});  // enabled in A only
+        parentA.addConnection(ConnectionGene{104, 103, 0.5f, false, 11}); // disabled in A
+
+        Genome parentB = makeInterfaceGenome();
+        parentB.addNode(NodeGene{103, NodeType::Hidden});
+        parentB.addNode(NodeGene{104, NodeType::Hidden});
+        parentB.addConnection(ConnectionGene{9, 100, 0.42f, true, 0});    // same ordinary matching gene
+        parentB.addConnection(ConnectionGene{103, 104, 0.7f, false, 10}); // disabled in B
+        parentB.addConnection(ConnectionGene{104, 103, 0.7f, true, 11}); // enabled in B only
+
+        // 1: both parents individually build a valid phenotype (each is
+        // genuinely, independently acyclic).
+        (void)ai::neat::buildPhenotype(parentA);
+        (void)ai::neat::buildPhenotype(parentB);
+
+        // 2: confirms the scenario is a genuine cycle, independent of
+        // trusting the fix -- a genome with BOTH edges enabled (what the
+        // pre-fix code would have unconditionally produced here, since
+        // disabledGeneRemainDisabledProbability=0 below forces every
+        // disabled-in-one-parent matching gene to be re-enabled) is invalid.
+        {
+            Genome bothEnabled = makeInterfaceGenome();
+            bothEnabled.addNode(NodeGene{103, NodeType::Hidden});
+            bothEnabled.addNode(NodeGene{104, NodeType::Hidden});
+            bothEnabled.addConnection(ConnectionGene{103, 104, 0.5f, true, 10});
+            bothEnabled.addConnection(ConnectionGene{104, 103, 0.5f, true, 11});
+            bool threw = false;
+            try
+            {
+                (void)ai::neat::buildPhenotype(bothEnabled);
+            }
+            catch (const std::invalid_argument&)
+            {
+                threw = true;
+            }
+            assert(threw && "setup: enabling both 103->104 and 104->103 must itself be a genuine cycle"); // 2
+        }
+
+        // 3 & 4: the FIXED crossover, with disabledGeneRemainDisabledProbability=0
+        // (deterministically re-enable every disabled-in-one-parent matching
+        // gene -- the worst case for triggering this bug), must produce an
+        // acyclic child whose phenotype builds successfully.
+        CrossoverConfig config;
+        config.matchingGeneChooseParentAProbability = 0.5f;
+        config.disabledGeneRemainDisabledProbability = 0.0f;
+        GenomeCrossover crossover(4242u);
+        const Genome child = crossover.crossover(parentA, 1.0f, parentB, 1.0f, config); // equal fitness -- exercises the matching-gene path regardless
+        child.validate();
+        (void)ai::neat::buildPhenotype(child); // 3 & 4: must not throw
+
+        // 5: exactly one of the two matching genes ends up enabled -- never
+        // both (would be a cycle) and never neither (a matching gene is
+        // never dropped, only forced disabled -- see 6/7 below). Processing
+        // order is ascending innovation number, so 103->104 (10) is
+        // resolved before 104->103 (11): 10 keeps its re-enabled state,
+        // and 11's re-enable is deterministically overridden back to
+        // disabled because it would close the cycle 10 just opened.
+        const ConnectionGene* geneTen = child.findConnection(103, 104);
+        const ConnectionGene* geneEleven = child.findConnection(104, 103);
+        assert(geneTen != nullptr && geneEleven != nullptr &&
+               "6 & 7: both matching genes must still be present in the child (never dropped)");
+        assert(geneTen->isEnabled() && !geneEleven->isEnabled() &&
+               "5: exactly the first-processed (lowest-innovation) edge must end up enabled, the other forced "
+               "disabled -- deterministically, not both, not neither");
+
+        // 7 (continued): the unrelated, always-enabled-in-both matching
+        // gene must be completely unaffected.
+        const ConnectionGene* unrelated = child.findConnection(9, 100);
+        assert(unrelated != nullptr && unrelated->isEnabled() &&
+               "an ordinary matching gene unrelated to the cycle must be inherited normally, untouched");
+    }
+
+    // Scenario 2: matching-gene re-enable COMBINED with the fitter parent's
+    // own exclusive (aOnly) gene -- the far more common unequal-fitness
+    // crossover path, and the one with NO cycle protection at all before
+    // this fix.
+    //
+    // Parent A (fitter): matching gene 104->103 disabled; exclusive
+    // (aOnly) gene 103->104 enabled. Alone: acyclic (only 103->104 live).
+    // Parent B (less fit): matching gene 104->103 enabled; does not have
+    // the 103->104 innovation at all. Alone: acyclic (only 104->103 live).
+    {
+        Genome parentA = makeInterfaceGenome();
+        parentA.addNode(NodeGene{103, NodeType::Hidden});
+        parentA.addNode(NodeGene{104, NodeType::Hidden});
+        parentA.addConnection(ConnectionGene{104, 103, 0.3f, false, 10}); // matching, disabled in A
+        parentA.addConnection(ConnectionGene{103, 104, 0.4f, true, 11});  // aOnly (A's exclusive gene), enabled
+
+        Genome parentB = makeInterfaceGenome();
+        parentB.addNode(NodeGene{103, NodeType::Hidden});
+        parentB.addNode(NodeGene{104, NodeType::Hidden});
+        parentB.addConnection(ConnectionGene{104, 103, 0.6f, true, 10}); // matching, enabled in B
+
+        (void)ai::neat::buildPhenotype(parentA); // 1 (scenario 2)
+        (void)ai::neat::buildPhenotype(parentB);
+
+        CrossoverConfig config;
+        config.matchingGeneChooseParentAProbability = 0.5f;
+        config.disabledGeneRemainDisabledProbability = 0.0f; // deterministically re-enable the matching gene
+        GenomeCrossover crossover(1337u);
+        // A is strictly fitter -- exercises the previously-unprotected
+        // fitterIsA/aOnly branch, not the equal-fitness merge.
+        const Genome child = crossover.crossover(parentA, 2.0f, parentB, 1.0f, config);
+        child.validate();
+        (void)ai::neat::buildPhenotype(child); // 3 & 4 (scenario 2): must not throw
+
+        const ConnectionGene* matchingGene = child.findConnection(104, 103);
+        const ConnectionGene* exclusiveGene = child.findConnection(103, 104);
+        assert(matchingGene != nullptr && matchingGene->isEnabled() &&
+               "the matching gene (re-enabled deterministically) must be present and enabled in the child");
+        // 6 & 7 (scenario 2): the exclusive gene, unlike a matching gene,
+        // is optional structure -- the fitter parent's own convention this
+        // file already used for equal-fitness merges (skip, don't repair)
+        // extends here: it is dropped rather than force-disabled, since
+        // (unlike a matching gene) it has no shared ancestry in parent B to
+        // preserve continuity for.
+        assert(exclusiveGene == nullptr &&
+               "the fitter parent's cycle-completing exclusive gene must be skipped, not force-added, when it "
+               "would close a cycle against an already-inherited matching gene");
+    }
+
+    TraceLog(LOG_INFO, "Genome crossover cycle-safety verification: all deterministic checks passed");
+}
+
 } // namespace verification

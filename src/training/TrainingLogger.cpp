@@ -109,6 +109,14 @@ void writeMetadataFile(const std::string& path, const RunMetadata& metadata, con
         << "\n";
     out << "\n[speciation]\n";
     out << "compatibility_threshold = " << formatFloat(metadata.speciationConfig.compatibilityThreshold) << "\n";
+    out << "target_species_min = " << metadata.speciationConfig.targetSpeciesMin << "\n";
+    out << "target_species_max = " << metadata.speciationConfig.targetSpeciesMax << "\n";
+    out << "compatibility_threshold_adjustment = "
+        << formatFloat(metadata.speciationConfig.compatibilityThresholdAdjustment) << "\n";
+    out << "minimum_compatibility_threshold = " << formatFloat(metadata.speciationConfig.minimumCompatibilityThreshold)
+        << "\n";
+    out << "maximum_compatibility_threshold = " << formatFloat(metadata.speciationConfig.maximumCompatibilityThreshold)
+        << "\n";
     out << "\n[vehicle_physics]\n";
     out << "length = " << formatFloat(metadata.carParams.length) << "\n";
     out << "width = " << formatFloat(metadata.carParams.width) << "\n";
@@ -161,7 +169,7 @@ std::string csvHeaderLine()
            "best_genome_nodes,best_genome_connections,best_genome_enabled_connections,"
            "avg_genome_nodes,avg_genome_connections,generation_duration_seconds,"
            "terminated_collision_count,terminated_max_time_count,terminated_no_progress_count,"
-           "terminated_slow_start_count";
+           "terminated_slow_start_count,compatibility_threshold";
 }
 
 std::string generationMetricsToCsvRow(const GenerationMetrics& metrics)
@@ -177,7 +185,8 @@ std::string generationMetricsToCsvRow(const GenerationMetrics& metrics)
         << metrics.bestGenomeEnabledConnectionCount << ',' << formatFloat(metrics.avgGenomeNodeCount) << ','
         << formatFloat(metrics.avgGenomeConnectionGeneCount) << ',' << formatFloat(metrics.generationDurationSeconds)
         << ',' << metrics.terminatedCollisionCount << ',' << metrics.terminatedMaxTimeCount << ','
-        << metrics.terminatedNoProgressCount << ',' << metrics.terminatedSlowStartCount;
+        << metrics.terminatedNoProgressCount << ',' << metrics.terminatedSlowStartCount << ','
+        << formatFloat(metrics.compatibilityThresholdUsed);
     return row.str();
 }
 

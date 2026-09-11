@@ -26,4 +26,13 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
 // state only, never mutates it.
 void drawManualPanel(const simulation::Car& car, int panelWidth, int screenHeight);
 
+// Small always-on-top overlay (top-left of the simulation view, over the
+// track) showing the current Normal/Fast training-speed mode and, once
+// measured, the achieved simulated-seconds-per-wall-second multiplier.
+// Purely a rendering helper -- reads nothing but the values passed in,
+// never touches Population/Car state. simSpeedMultiplierValid is false
+// until at least one full measurement window has completed since the last
+// mode switch (see main.cpp) -- never fabricate a multiplier before then.
+void drawTrainingSpeedHud(bool fastMode, float simSpeedMultiplier, bool simSpeedMultiplierValid);
+
 } // namespace ui

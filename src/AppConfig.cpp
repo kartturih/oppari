@@ -84,11 +84,26 @@ ai::neat::Genome createDemonstrationGenome()
     genome.addConnection(ConnectionGene{kSensorRight60, kSteeringOutputId, 0.5f, true, innovation++});
     genome.addConnection(ConnectionGene{kBiasId, kThrottleOutputId, 0.6f, true, innovation++});
     genome.addConnection(ConnectionGene{kSensorCenter, kThrottleOutputId, 0.4f, true, innovation++});
-    // Bias -> Brake, strongly negative: with no other wiring, raw brake
-    // output is tanh(-5.0) =~ -1.0, mapping to =~0 -- brakes start off, so
-    // generation 0 can actually drive; NEAT discovers real braking points
-    // via mutation from here, the same way it discovers everything else.
-    genome.addConnection(ConnectionGene{kBiasId, kBrakeOutputId, -5.0f, true, innovation++});
+    // Bias -> Brake, mildly negative: with no other wiring, raw brake
+    // output is tanh(-0.5) =~ -0.46, still clamped to 0 by mapBrake (any
+    // raw <= 0 means no brake) -- brakes start off, so generation 0 can
+    // still drive. -0.5, not the -5.0 this used to be, is deliberate: under
+    // the OLD brake mapping ((raw+1)*0.5), raw=0 meant 50% brake, so -5.0
+    // was needed to push the network's naturally-saturating tanh output
+    // convincingly past that midpoint. The CURRENT mapping already treats
+    // raw<=0 as fully off, so that -5.0 no longer does anything useful --
+    // it only adds ~4.5 units of dead zone (see mutation/evolvability
+    // investigation) that any other incoming signal must overcome before
+    // brake can become positive at all, since tanh saturates and gives
+    // selection no gradient to climb while deeply negative. -0.5 keeps the
+    // brake-off guarantee (still comfortably negative) while staying inside
+    // the range ordinary weight perturbation (perturbStrength=0.5) can
+    // plausibly cross in a handful of generations, and inside what a single
+    // newly-mutated incoming connection (weight in [-1,1]) or dynamics-input
+    // path could realistically contribute; NEAT discovers real braking
+    // points via mutation from here, the same way it discovers everything
+    // else.
+    genome.addConnection(ConnectionGene{kBiasId, kBrakeOutputId, -0.5f, true, innovation++});
 
     return genome;
 }

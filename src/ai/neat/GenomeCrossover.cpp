@@ -196,6 +196,20 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
 
     std::uniform_real_distribution<float> draw01(0.0f, 1.0f);
 
+    // Each parent's OWN enabled-connection set is independently acyclic
+    // (guaranteed by that genome having built a valid phenotype), but
+    // crossover assembles the child's edge set from a MIX of both parents'
+    // genes -- two independently-acyclic topologies can combine into a
+    // cyclic one (the standard NEAT crossover pitfall: e.g. parent A has
+    // X->Y enabled with Y->Z disabled, parent B has the reverse, and the
+    // child inherits X->Y from A together with a probabilistically
+    // re-enabled Z->X-completing path from B). wouldCreateEnabledCycle()
+    // below is checked incrementally against childConnections as built so
+    // far -- deterministic given a fixed processing order (ascending
+    // innovation number throughout, from the std::map iteration order used
+    // to build matchingPairs/aOnly/bOnly), so which specific edge ends up
+    // disabled when two candidates would jointly cycle is itself
+    // deterministic, not RNG-resolved.
     for (const MatchingPair& pair : matchingPairs)
     {
         const bool chooseA = draw01(m_rng) < config.matchingGeneChooseParentAProbability;
@@ -211,17 +225,45 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
             childEnabled = draw01(m_rng) >= config.disabledGeneRemainDisabledProbability;
         }
 
-        childConnections.emplace_back(chosen.getSourceId(), chosen.getTargetId(), chosen.getWeight(), childEnabled,
-                                       pair.innovation);
+        ConnectionGene candidate(chosen.getSourceId(), chosen.getTargetId(), chosen.getWeight(), childEnabled,
+                                  pair.innovation);
+        // Matching genes are always inherited (shared ancestry, present in
+        // both parents) -- never dropped, only forced disabled if enabling
+        // them would close a cycle against genes already placed earlier in
+        // this same deterministic pass. No duplicate-direction check
+        // needed here: matching-pair innovation numbers are already
+        // distinct from each other and from aOnly/bOnly (InnovationTracker
+        // assigns one innovation number per (source,target) pair for the
+        // whole run -- see InnovationTracker.h -- so two different
+        // innovation numbers can never share an edge).
+        if (childEnabled && wouldCreateEnabledCycle(childConnections, candidate))
+        {
+            candidate.disable();
+        }
+        childConnections.push_back(candidate);
     }
 
     const bool fitterIsA = fitnessA > fitnessB;
     const bool fitterIsB = fitnessB > fitnessA;
 
+    // aOnly/bOnly are the fitter parent's excess/disjoint genes -- optional
+    // structure the other parent doesn't have at all. Unlike matching genes,
+    // dropping one that would create a cycle (rather than force-disabling
+    // it) matches this file's own established convention for exactly this
+    // kind of optional candidate (see the equal-fitness merge below, which
+    // has always skipped rather than disabled). The duplicate-direction
+    // check is kept for defense-in-depth/symmetry with that same merge,
+    // even though it's structurally unreachable here for the same
+    // distinct-innovation-numbers reason noted above.
     if (fitterIsA)
     {
         for (const ConnectionGene* connection : aOnly)
         {
+            if (wouldCreateDuplicateDirectedConnection(childConnections, *connection) ||
+                wouldCreateEnabledCycle(childConnections, *connection))
+            {
+                continue; // would make the child invalid -- skip, don't repair
+            }
             childConnections.push_back(*connection);
         }
     }
@@ -229,6 +271,11 @@ Genome GenomeCrossover::crossover(const Genome& parentA, float fitnessA, const G
     {
         for (const ConnectionGene* connection : bOnly)
         {
+            if (wouldCreateDuplicateDirectedConnection(childConnections, *connection) ||
+                wouldCreateEnabledCycle(childConnections, *connection))
+            {
+                continue; // would make the child invalid -- skip, don't repair
+            }
             childConnections.push_back(*connection);
         }
     }
