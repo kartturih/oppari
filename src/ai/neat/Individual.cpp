@@ -27,10 +27,10 @@ void Individual::update(float deltaTime)
         return;
     }
 
-    const simulation::CarInput input = m_controller.update(m_car);
+    const simulation::CarInput input = m_controller.update(m_car, m_progress);
     m_car.update(input, deltaTime);
     m_progress.update(m_car);
-    m_fitness.update(m_car, m_progress, deltaTime);
+    m_fitness.update(m_car, m_progress, input.steering, deltaTime);
 }
 
 void Individual::reset()

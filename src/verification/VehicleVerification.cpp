@@ -314,16 +314,19 @@ void verifySensors(const simulation::Track& track)
 // of keyboard/render timing. Runs once at startup.
 void verifyObservation(const simulation::Track& track)
 {
-    static_assert(ai::kObservationSize == 9, "Observation must contain exactly nine values");
+    static_assert(ai::kObservationSize == 12, "Observation must contain exactly twelve values");
 
     simulation::Car car(makeCarParams(), track);
     car.reset(kSpawnPosition, kSpawnHeading);
+    simulation::TrackProgress progress(track);
+    progress.reset(car);
 
-    // 1: exactly nine values, fixed-size storage.
-    ai::Observation obs = ai::buildObservation(car);
-    assert(obs.values.size() == 9 && "observation must contain exactly nine values");
+    // 1: exactly twelve values, fixed-size storage.
+    ai::Observation obs = ai::buildObservation(car, progress);
+    assert(obs.values.size() == 12 && "observation must contain exactly twelve values");
 
-    // 2 & 3: sensor values occupy indices 0..4, in documented order, within [0,1].
+    // 2 & 3: sensor values occupy indices 0..4, in documented order, within
+    // [0,1] -- unchanged from before the actual-steering/yaw-rate slots were added.
     const auto& sensors = car.getSensors();
     for (int i = 0; i < simulation::Car::kSensorCount; ++i)
     {
@@ -332,39 +335,142 @@ void verifyObservation(const simulation::Track& track)
         assert(obs.values[i] >= 0.0f && obs.values[i] <= 1.0f && "sensor observation values must stay within [0,1]");
     }
 
-    // 4: speed normalization (speed / maxSpeed, clamped to [0,1]).
+    // 4: speed normalization (speed / maxSpeed, clamped to [0,1]) -- index unchanged.
     {
         const float expected = std::clamp(car.getSpeed() / car.getMaxSpeed(), 0.0f, 1.0f);
         assert(std::fabs(obs.values[5] - expected) < 1e-6f && "speed normalization mismatch");
     }
 
-    // 5: forward velocity normalization (forwardVelocity / maxSpeed, clamped to [-1,1]).
+    // 5: forward velocity normalization (forwardVelocity / maxSpeed, clamped
+    // to [-1,1]) -- index unchanged.
     {
         const float expected = std::clamp(car.getForwardVelocity() / car.getMaxSpeed(), -1.0f, 1.0f);
         assert(std::fabs(obs.values[6] - expected) < 1e-6f && "forward velocity normalization mismatch");
     }
 
-    // 6: lateral velocity normalization (lateralVelocity / maxSpeed, clamped to [-1,1]).
+    // 6: lateral velocity normalization (lateralVelocity / maxSpeed, clamped
+    // to [-1,1]) -- index unchanged.
     {
         const float expected = std::clamp(car.getLateralVelocity() / car.getMaxSpeed(), -1.0f, 1.0f);
         assert(std::fabs(obs.values[7] - expected) < 1e-6f && "lateral velocity normalization mismatch");
     }
 
-    // 7: slip angle normalization (slipAngle / pi, clamped to [-1,1]).
+    // 7: slip angle normalization (slipAngle / pi, clamped to [-1,1]) -- index unchanged.
     {
         const float expected = std::clamp(car.getSlipAngle() / static_cast<float>(PI), -1.0f, 1.0f);
         assert(std::fabs(obs.values[8] - expected) < 1e-6f && "slip angle normalization mismatch");
     }
 
-    // 8: all normalized values respect their documented ranges even under active driving/sliding.
+    // 8: actual (rate-limited) steering angle observation is exactly 0 right
+    // after reset, matching Car::getCurrentSteerAngle()'s own reset state.
+    {
+        assert(car.getCurrentSteerAngle() == 0.0f && "a freshly-reset car must start with zero actual steering angle");
+        assert(obs.values[ai::kActualSteerObservationIndex] == 0.0f &&
+               "actual-steering observation must be exactly 0 right after reset");
+    }
+
+    // 9 & 10: a sustained positive (resp. negative) steering command drives
+    // the actual-steering observation positive (resp. negative) -- exact
+    // sign is well-defined by the formula (currentSteerAngle/maxSteerAngle,
+    // maxSteerAngle > 0), not just measured after the fact.
+    {
+        simulation::CarInput fullRight;
+        fullRight.steering = 1.0f;
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        for (int i = 0; i < 5; ++i)
+        {
+            car.update(fullRight, kSimulationDt);
+            progress.update(car);
+        }
+        const ai::Observation rightObs = ai::buildObservation(car, progress);
+        assert(rightObs.values[ai::kActualSteerObservationIndex] > 0.0f &&
+               "a sustained +1 steering command must drive the actual-steering observation positive"); // 9
+
+        simulation::CarInput fullLeft;
+        fullLeft.steering = -1.0f;
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        for (int i = 0; i < 5; ++i)
+        {
+            car.update(fullLeft, kSimulationDt);
+            progress.update(car);
+        }
+        const ai::Observation leftObs = ai::buildObservation(car, progress);
+        assert(leftObs.values[ai::kActualSteerObservationIndex] < 0.0f &&
+               "a sustained -1 steering command must drive the actual-steering observation negative"); // 10
+    }
+
+    // 11: yaw-rate observation is exactly 0 right after reset, matching
+    // Car::getYawRate()'s own reset state.
+    {
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        const ai::Observation freshObs = ai::buildObservation(car, progress);
+        assert(car.getYawRate() == 0.0f && "a freshly-reset car must start with zero yaw rate");
+        assert(freshObs.values[ai::kYawRateObservationIndex] == 0.0f &&
+               "yaw-rate observation must be exactly 0 right after reset");
+    }
+
+    // 12 & 13: opposite sustained steering commands produce genuinely
+    // opposite-signed yaw rates, and the yaw-rate observation's sign always
+    // matches Car::getYawRate()'s own sign -- proves both a "positive yaw"
+    // and a "negative yaw" case are exercised, without assuming a priori
+    // which steering direction corresponds to which yaw sign.
+    {
+        simulation::CarInput turnRight;
+        turnRight.throttle = 1.0f;
+        turnRight.steering = 1.0f;
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        for (int i = 0; i < 15 && car.isAlive(); ++i)
+        {
+            car.update(turnRight, kSimulationDt);
+            progress.update(car);
+        }
+        assert(car.isAlive() && "setup must keep the car on the track while turning right");
+        const float yawRight = car.getYawRate();
+        const ai::Observation obsRight = ai::buildObservation(car, progress);
+        assert(std::fabs(yawRight) > 0.01f && "sustained turning must produce a genuinely nonzero yaw rate");
+        assert(((yawRight > 0.0f) == (obsRight.values[ai::kYawRateObservationIndex] > 0.0f)) &&
+               "yaw-rate observation sign must match Car::getYawRate()'s sign"); // 12 or 13, depending on convention
+
+        simulation::CarInput turnLeft;
+        turnLeft.throttle = 1.0f;
+        turnLeft.steering = -1.0f;
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        for (int i = 0; i < 15 && car.isAlive(); ++i)
+        {
+            car.update(turnLeft, kSimulationDt);
+            progress.update(car);
+        }
+        assert(car.isAlive() && "setup must keep the car on the track while turning left");
+        const float yawLeft = car.getYawRate();
+        const ai::Observation obsLeft = ai::buildObservation(car, progress);
+        assert(std::fabs(yawLeft) > 0.01f && "sustained turning must produce a genuinely nonzero yaw rate");
+        assert(((yawLeft > 0.0f) == (obsLeft.values[ai::kYawRateObservationIndex] > 0.0f)) &&
+               "yaw-rate observation sign must match Car::getYawRate()'s sign"); // the other of 12/13
+
+        assert((yawRight > 0.0f) != (yawLeft > 0.0f) &&
+               "opposite sustained steering commands must produce opposite-signed yaw rates -- confirms both a "
+               "positive and a negative case were genuinely exercised above");
+    }
+
+    // 14: all normalized values -- including the new actual-steering and
+    // yaw-rate slots -- respect their documented [-1,1]/[0,1] ranges even
+    // under active driving/sliding.
     simulation::CarInput throttleAndSteer;
     throttleAndSteer.throttle = 1.0f;
     throttleAndSteer.steering = 1.0f;
+    car.reset(kSpawnPosition, kSpawnHeading);
+    progress.reset(car);
     for (int i = 0; i < 30 && car.isAlive(); ++i)
     {
         car.update(throttleAndSteer, kSimulationDt);
+        progress.update(car);
     }
-    const ai::Observation movingObs = ai::buildObservation(car);
+    const ai::Observation movingObs = ai::buildObservation(car, progress);
     for (int i = 0; i < simulation::Car::kSensorCount; ++i)
     {
         assert(movingObs.values[i] >= 0.0f && movingObs.values[i] <= 1.0f && "sensor values must stay within [0,1]");
@@ -373,15 +479,218 @@ void verifyObservation(const simulation::Track& track)
     assert(movingObs.values[6] >= -1.0f && movingObs.values[6] <= 1.0f && "forward velocity must stay within [-1,1]");
     assert(movingObs.values[7] >= -1.0f && movingObs.values[7] <= 1.0f && "lateral velocity must stay within [-1,1]");
     assert(movingObs.values[8] >= -1.0f && movingObs.values[8] <= 1.0f && "slip angle must stay within [-1,1]");
+    assert(movingObs.values[ai::kActualSteerObservationIndex] >= -1.0f &&
+           movingObs.values[ai::kActualSteerObservationIndex] <= 1.0f &&
+           "actual-steering observation must never leave [-1,1]"); // 6 (steering normalization never exceeds [-1,1])
+    assert(movingObs.values[ai::kYawRateObservationIndex] >= -1.0f &&
+           movingObs.values[ai::kYawRateObservationIndex] <= 1.0f && "yaw-rate observation must never leave [-1,1]");
+    assert(movingObs.values[ai::kHeadingErrorObservationIndex] >= -1.0f &&
+           movingObs.values[ai::kHeadingErrorObservationIndex] <= 1.0f &&
+           "heading-error observation must never leave [-1,1]");
 
-    // 9: reset/spawn produces deterministic valid observation values.
+    // 15: yaw-rate normalization saturates safely under a genuinely
+    // aggressive maneuver (an opposite-lock flick into a full-lock spin, the
+    // same recipe verifyVehiclePhysics's own DELIBERATE SPIN TEST uses to
+    // provoke the largest yaw excursions this model produces) -- the
+    // observation value never leaves [-1,1] regardless of how large the true
+    // yaw rate gets, and clamps to exactly +-1 (not some larger unclamped
+    // magnitude) whenever |yawRate| reaches or exceeds
+    // kYawRateNormalizationScale.
+    {
+        simulation::TrackDefinition wideDef;
+        wideDef.simWidth = 3000;
+        wideDef.simHeight = 3000;
+        wideDef.controlPoints = {Vector2{1400.0f, 1400.0f}, Vector2{1600.0f, 1400.0f}, Vector2{1600.0f, 1600.0f},
+                                  Vector2{1400.0f, 1600.0f}};
+        wideDef.trackWidth = 2500.0f;
+        wideDef.samplesPerSegment = 8;
+        simulation::Track wideTrack(wideDef);
+        simulation::Car wideCar(makeCarParams(), wideTrack);
+        wideCar.reset(Vector2{1500.0f, 1500.0f}, 0.0f);
+        simulation::TrackProgress wideProgress(wideTrack);
+        wideProgress.reset(wideCar);
+
+        simulation::CarInput straight;
+        straight.throttle = 1.0f;
+        for (int i = 0; i < 150 && wideCar.isAlive(); ++i)
+        {
+            wideCar.update(straight, kSimulationDt);
+            wideProgress.update(wideCar);
+        }
+        assert(wideCar.isAlive() && "saturation-test setup must keep the car on the (huge synthetic) road");
+
+        simulation::CarInput flickAway;
+        flickAway.throttle = 0.3f;
+        flickAway.steering = -1.0f;
+        for (int i = 0; i < 10 && wideCar.isAlive(); ++i)
+        {
+            wideCar.update(flickAway, kSimulationDt);
+            wideProgress.update(wideCar);
+        }
+        simulation::CarInput spinInput;
+        spinInput.throttle = 1.0f;
+        spinInput.steering = 1.0f;
+
+        float maxAbsYawRate = 0.0f;
+        for (int i = 0; i < 180 && wideCar.isAlive(); ++i) // up to 3s
+        {
+            wideCar.update(spinInput, kSimulationDt);
+            wideProgress.update(wideCar);
+            const ai::Observation spinObs = ai::buildObservation(wideCar, wideProgress);
+            const float yawObsValue = spinObs.values[ai::kYawRateObservationIndex];
+            assert(yawObsValue >= -1.0f && yawObsValue <= 1.0f &&
+                   "yaw-rate observation must never leave [-1,1], even mid-spin");
+            const float trueYawRate = wideCar.getYawRate();
+            maxAbsYawRate = std::max(maxAbsYawRate, std::fabs(trueYawRate));
+            if (std::fabs(trueYawRate) >= ai::kYawRateNormalizationScale)
+            {
+                assert(std::fabs(yawObsValue) == 1.0f &&
+                       "yaw-rate observation must clamp to exactly +-1 once the true yaw rate reaches or exceeds "
+                       "kYawRateNormalizationScale, not just approach it");
+            }
+        }
+        assert(wideCar.isAlive() && "the deliberate spin maneuver must not leave the (huge synthetic) road");
+        assert(maxAbsYawRate > 1.0f &&
+               "saturation-test setup must genuinely provoke a large yaw rate, not just a mild one");
+
+        TraceLog(LOG_INFO, "Observation verification: deliberate spin maneuver reached max |yawRate|=%.2frad/s",
+                 static_cast<double>(maxAbsYawRate));
+    }
+
+    // 16: reset/spawn produces deterministic valid observation values,
+    // across every slot including the newest one.
     car.reset(kSpawnPosition, kSpawnHeading);
-    const ai::Observation resetObsA = ai::buildObservation(car);
+    progress.reset(car);
+    const ai::Observation resetObsA = ai::buildObservation(car, progress);
     car.reset(kSpawnPosition, kSpawnHeading);
-    const ai::Observation resetObsB = ai::buildObservation(car);
+    progress.reset(car);
+    const ai::Observation resetObsB = ai::buildObservation(car, progress);
     for (int i = 0; i < ai::kObservationSize; ++i)
     {
         assert(resetObsA.values[i] == resetObsB.values[i] && "reset must produce deterministic observation values");
+    }
+
+    // 17: old input indices 0..10 are completely unaffected by the new
+    // slot -- re-derive each one directly from Car and compare against the
+    // freshly-reset observation above, proving nothing shifted.
+    {
+        assert(std::fabs(resetObsA.values[8] - std::clamp(car.getSlipAngle() / static_cast<float>(PI), -1.0f, 1.0f)) <
+                   1e-6f &&
+               "slot 8 (slip angle) must retain its exact previous index/meaning");
+        assert(resetObsA.values[ai::kActualSteerObservationIndex] == 0.0f &&
+               resetObsA.values[ai::kYawRateObservationIndex] == 0.0f &&
+               "slots 9 (actual steering) and 10 (yaw rate) must retain their exact previous indices"); // 7 (old indices unchanged)
+    }
+
+    // 18: the new heading-error input is exactly index 11 -- the array's
+    // last (and only new) slot, one past the previous size of 11.
+    {
+        assert(ai::kHeadingErrorObservationIndex == 11 && "the heading-error observation must be exactly index 11"); // 8
+        assert(ai::kHeadingErrorObservationIndex == ai::kObservationSize - 1 &&
+               "the heading-error observation must be the last slot, immediately following yaw rate");
+    }
+
+    // 19, 20, 21 & 22: the heading-error formula itself -- car heading minus
+    // the local track tangent direction, wrapped to [-pi,pi], normalized by
+    // pi. The reference angle is READ from the real track's own tangent
+    // (progress.getTrackTangent(), the same value buildObservation() itself
+    // uses) rather than assumed, so these checks hold for any track
+    // geometry, not just a hand-picked one.
+    //
+    // Car's own heading (Box2D rotation -> atan2) is always stored already
+    // wrapped into (-pi,pi], so a desired heading of e.g. trackDirectionAngle
+    // + pi must itself be pre-wrapped with the SAME formula before being
+    // passed to car.reset() -- otherwise Car silently re-wraps it to a
+    // different (but congruent, mod 2*pi) value than the test assumed,
+    // which is exactly why the naive "trackDirectionAngle +/- pi" version of
+    // this test (no local pre-wrap) failed for track directions where that
+    // sum/difference landed outside (-pi,pi]. Pre-wrapping first makes the
+    // result independent of trackDirectionAngle's own sign/magnitude (the
+    // math is congruent mod 2*pi either way, so wrapToPi's OUTPUT is the
+    // same regardless of which branch the pre-wrap happened to take).
+    {
+        auto wrapAngle = [](float angle) -> float
+        {
+            while (angle > PI)
+            {
+                angle -= 2.0f * static_cast<float>(PI);
+            }
+            while (angle < -PI)
+            {
+                angle += 2.0f * static_cast<float>(PI);
+            }
+            return angle;
+        };
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
+        const Vector2 tangent = progress.getTrackTangent();
+        const float trackDirectionAngle = std::atan2(tangent.y, tangent.x);
+
+        // 19: heading exactly aligned with the local track direction -> 0.
+        {
+            car.reset(kSpawnPosition, trackDirectionAngle);
+            progress.reset(car);
+            const ai::Observation aligned = ai::buildObservation(car, progress);
+            assert(std::fabs(aligned.values[ai::kHeadingErrorObservationIndex]) < 1e-4f &&
+                   "heading exactly aligned with the local track direction must give ~0 normalized heading error");
+        }
+
+        // kNearSeamMargin keeps the two boundary tests a hair inside the
+        // seam (never exactly +-pi, which is an unstable value to target
+        // exactly through Box2D's own float rotation representation) --
+        // the task's own wording is "approximately +1"/"approximately -1".
+        constexpr float kNearSeamMargin = 0.02f; // radians
+
+        // 20: heading approaching +pi from the track direction -> normalized ~+1.
+        {
+            const float desiredHeading = wrapAngle(trackDirectionAngle + static_cast<float>(PI) - kNearSeamMargin);
+            car.reset(kSpawnPosition, desiredHeading);
+            progress.reset(car);
+            const ai::Observation opposite = ai::buildObservation(car, progress);
+            const float value = opposite.values[ai::kHeadingErrorObservationIndex];
+            assert(value >= -1.0f && value <= 1.0f && "heading-error observation must stay within [-1,1]"); // 5
+            assert(value > 0.9f &&
+                   "a heading approaching +pi from the track direction must give normalized heading error "
+                   "approximately +1");
+        }
+
+        // 21: heading approaching -pi from the track direction -> normalized
+        // ~-1 -- exercises wrapToPi's OTHER boundary (its two while loops
+        // use strict </> so the two seams are handled by separate branches).
+        {
+            const float desiredHeading = wrapAngle(trackDirectionAngle - static_cast<float>(PI) + kNearSeamMargin);
+            car.reset(kSpawnPosition, desiredHeading);
+            progress.reset(car);
+            const ai::Observation opposite = ai::buildObservation(car, progress);
+            const float value = opposite.values[ai::kHeadingErrorObservationIndex];
+            assert(value >= -1.0f && value <= 1.0f && "heading-error observation must stay within [-1,1]"); // 5
+            assert(value < -0.9f &&
+                   "a heading approaching -pi from the track direction must give normalized heading error "
+                   "approximately -1");
+        }
+
+        // 22: wrapping across the +pi/-pi seam is continuous, not a
+        // discontinuous jump -- a heading a little PAST +pi from the track
+        // direction must land near -1 (not near +1, and never outside
+        // [-1,1]), proving the seam crossing behaves correctly rather than
+        // clamping or jumping.
+        {
+            constexpr float kPastSeam = 0.1f; // radians past +pi
+            const float desiredHeading = wrapAngle(trackDirectionAngle + static_cast<float>(PI) + kPastSeam);
+            car.reset(kSpawnPosition, desiredHeading);
+            progress.reset(car);
+            const ai::Observation wrapped = ai::buildObservation(car, progress);
+            const float value = wrapped.values[ai::kHeadingErrorObservationIndex];
+            const float expected = (-static_cast<float>(PI) + kPastSeam) / static_cast<float>(PI);
+            assert(value >= -1.0f && value <= 1.0f && "heading-error observation must stay within [-1,1]"); // 5
+            assert(std::fabs(value - expected) < 1e-3f &&
+                   "a heading just past +pi from the track direction must wrap to just past -pi, not jump "
+                   "discontinuously or exceed [-1,1]"); // wrapping across +-pi
+        }
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        progress.reset(car);
     }
 
     TraceLog(LOG_INFO, "Observation verification: all deterministic checks passed");
@@ -1747,7 +2056,17 @@ void verifyVehiclePhysics(const simulation::Track& track)
             (9200.0f + 15600.0f) / (0.075f * 24.0f * 12.0f) * (1.0f / 60.0f) * 2.0f; // generous safety bound, see check 24's pattern
         float speedAtQuarterSecond = -1.0f; // sampled at i == 17 (~0.283s, just past 0.25s)
         int framesAtBothLimits = 0;         // frames where BOTH axles sit at/near their friction-circle limit together
-        for (int i = 0; i < 40 && wideCar.isAlive(); ++i) // ~0.67s of sustained hard slide
+        // ~1.0s of sustained hard slide -- widened from the original ~0.67s
+        // (40 frames) to give the steering RATE limiter (CarParams::
+        // maxSteerRateRadPerSec, see the steering-chatter investigation)
+        // room to ramp the actual wheel angle up to full lock (~9 frames)
+        // before the dual-friction-circle-saturation window below is
+        // measured, while still comfortably exceeding the >= 10 sustained
+        // frames the setup assertion requires afterward -- once established
+        // this is a stable limit cycle (see check 40's 5s version), so the
+        // extra ramp-up time does not change what this test is actually
+        // exercising.
+        for (int i = 0; i < 60 && wideCar.isAlive(); ++i)
         {
             wideCar.update(fullSlide, kSimulationDt);
             assert(allFinite(wideCar) && "an intentional high-speed slide must never produce a NaN/Inf state");
@@ -2138,9 +2457,18 @@ void verifyVehiclePhysics(const simulation::Track& track)
         // own measured old-vs-new behavior is 6 reversals (old, spanning
         // the whole run, never settling) vs 2 (new, both within the first
         // 0.4s, then a stable sustained rotation for the remaining 4.6s).
-        assert(meaningfulReversals <= 3 &&
-               "sustained full-lock input must not produce more than a couple of meaningful yaw-rate reversals -- the "
-               "car must commit to understeer or a sustained rotation, not fishtail indefinitely");
+        // Threshold widened from 3 to 4 (see the steering-chatter
+        // investigation): the steering RATE limiter (CarParams::
+        // maxSteerRateRadPerSec) makes the commanded full lock arrive over
+        // ~9 frames instead of instantly, which softens/lengthens this same
+        // early "still developing" transient by one small additional
+        // crossing (measured: 4 reversals, all within 0.78s, none
+        // afterward through the remaining ~4.2s) -- still a single settling
+        // episode, not sustained fishtailing, which is what this assertion
+        // actually exists to catch.
+        assert(meaningfulReversals <= 4 &&
+               "sustained full-lock input must not produce more than a handful of meaningful yaw-rate reversals -- "
+               "the car must commit to understeer or a sustained rotation, not fishtail indefinitely");
 
         // Having committed, yaw rate must actually be doing SOMETHING
         // (either settled into strong sustained rotation, or settled to
@@ -2214,12 +2542,23 @@ void verifyVehiclePhysics(const simulation::Track& track)
         // rear can ever get meaningfully further ahead of it -- an early,
         // strong understeer character that (by design, from the rebound
         // investigation) caps how far a scripted maneuver can push the car
-        // past its self-correcting equilibrium. 23deg is set as the
-        // threshold -- comfortably below what's reached, clearly beyond
-        // ordinary cornering or even the main acceptance test's sustained
-        // rotation (~17deg there), without asserting a number this
-        // particular tuning cannot actually reach.
-        assert(maxAbsBodySlip > 0.401f && // 23deg
+        // past its self-correcting equilibrium.
+        //
+        // Threshold lowered from 23deg to 21deg (see the steering-chatter
+        // investigation): this maneuver's whole mechanism is an ABRUPT
+        // steering reversal snapping the rear loose via inertia -- the
+        // steering RATE limiter (CarParams::maxSteerRateRadPerSec) now
+        // blunts exactly that abruptness (the flick-away and the counter-
+        // snap both ramp over ~9 frames instead of jumping instantly),
+        // which measurably (and expectedly) softens the peak this specific
+        // technique can provoke, from ~30deg down to ~22.5deg. 21deg is
+        // still comfortably below that measured peak, and still clearly
+        // beyond both ordinary cornering (~1-2deg, see check 5) and the
+        // main acceptance test's sustained rotation (~17deg) -- so this
+        // remains a real test that the model is CAPABLE of a genuine,
+        // beyond-ordinary slide when deliberately provoked, not that it can
+        // reach any particular pre-rate-limiter number.
+        assert(maxAbsBodySlip > 0.3665f && // 21deg
                "a deliberate flick at high speed must be capable of reaching a substantial body slip angle beyond "
                "ordinary cornering or sustained rotation");
     }
@@ -2227,6 +2566,212 @@ void verifyVehiclePhysics(const simulation::Track& track)
     car.reset(kSpawnPosition, kSpawnHeading);
 
     TraceLog(LOG_INFO, "Vehicle physics verification: all deterministic checks passed");
+}
+
+// Deterministic checks for the steering RATE limiter (CarParams::
+// maxSteerRateRadPerSec / Car::m_currentSteerAngle) -- added to address
+// visible high-generation steering "chatter"/snaking, where champion
+// telemetry showed the commanded steering flipping between near +-1 many
+// times per second (see the steering-chatter investigation this was built
+// for). Confirms the ACTUAL front-wheel angle ramps toward its commanded
+// target at the configured rate rather than snapping instantly, always
+// respects the per-step rate bound and the +-maxSteerAngle range, still
+// reaches full lock given enough time, and resets cleanly. Also confirms
+// this is driven purely by (state, input, dt) -- nothing resembling a
+// hidden wall-clock/batching dependency, which is the direct proof that
+// NORMAL vs FAST training speed (which only changes how many identical,
+// individually-dt-stamped update() calls happen per rendered frame -- see
+// main.cpp -- never dt itself or call order) cannot affect this feature.
+void verifySteeringRateLimit(const simulation::Track& track)
+{
+    const simulation::CarParams params = makeCarParams();
+
+    // 1: zero steering input keeps the actual angle centered at exactly 0,
+    // both immediately after reset and under continued zero input.
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        assert(car.getTireDebugInfo().steeringAngle == 0.0f &&
+               "a freshly-reset car must start with zero (rate-limited) steering angle");
+
+        simulation::CarInput zeroInput; // steering = 0.0f
+        for (int i = 0; i < 30; ++i)
+        {
+            car.update(zeroInput, kSimulationDt);
+            assert(car.getTireDebugInfo().steeringAngle == 0.0f &&
+                   "zero steering input must keep the actual steering angle centered at exactly 0");
+        }
+    }
+
+    // 2: a sustained +1 steering command makes the ACTUAL angle approach
+    // +maxSteerAngle gradually -- one step moves only partway there (never
+    // instantly reaching it), and the angle increases monotonically toward
+    // the target until it arrives.
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput fullRight;
+        fullRight.steering = 1.0f;
+
+        car.update(fullRight, kSimulationDt);
+        const float afterOneStep = car.getTireDebugInfo().steeringAngle;
+        assert(afterOneStep > 0.0f && afterOneStep < params.maxSteerAngle &&
+               "one step of +1 steering must move the actual angle partway toward full lock, not instantly reach it");
+
+        float previous = afterOneStep;
+        bool reachedFullLock = false;
+        for (int i = 0; i < 60 && !reachedFullLock; ++i)
+        {
+            car.update(fullRight, kSimulationDt);
+            const float current = car.getTireDebugInfo().steeringAngle;
+            assert(current >= previous - 1e-6f &&
+                   "actual steering angle must never decrease while still short of a sustained +1 target");
+            if (current >= params.maxSteerAngle - 1e-4f)
+            {
+                reachedFullLock = true;
+            }
+            previous = current;
+        }
+        assert(reachedFullLock && "sustained +1 steering must eventually reach full lock");
+    }
+
+    // 3: reversing the COMMAND from +1 to -1 does NOT instantly jump the
+    // ACTUAL angle to full opposite lock -- the exact champion-telemetry
+    // chatter scenario (steering command flipping between near +-1). One
+    // step after the reversal, the actual angle must still be mostly on the
+    // OLD (positive) side, only nudged toward the new target.
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput fullRight;
+        fullRight.steering = 1.0f;
+        for (int i = 0; i < 60; ++i) // reach full lock first
+        {
+            car.update(fullRight, kSimulationDt);
+        }
+        const float beforeReversal = car.getTireDebugInfo().steeringAngle;
+        assert(beforeReversal > params.maxSteerAngle * 0.9f && "setup must reach (near) full lock before reversing");
+
+        simulation::CarInput fullLeft;
+        fullLeft.steering = -1.0f;
+        car.update(fullLeft, kSimulationDt);
+        const float afterOneStepReversed = car.getTireDebugInfo().steeringAngle;
+        assert(afterOneStepReversed > 0.0f &&
+               "one step after a full command reversal must NOT jump the actual angle to full opposite lock -- it "
+               "must still be mostly on the old (positive) side");
+        assert(afterOneStepReversed < beforeReversal &&
+               "one step after a command reversal must have moved measurably away from the old lock, not stayed pinned");
+    }
+
+    // 4: the per-step change in actual steering angle never exceeds
+    // maxSteerRateRadPerSec*dt, under the single most adversarial input a
+    // chattering network could produce -- a full -1<->+1 flip EVERY step.
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        const float maxAllowedStep = params.maxSteerRateRadPerSec * kSimulationDt + 1e-5f;
+
+        float previousAngle = car.getTireDebugInfo().steeringAngle;
+        for (int i = 0; i < 120; ++i)
+        {
+            simulation::CarInput input;
+            input.steering = (i % 2 == 0) ? 1.0f : -1.0f;
+            car.update(input, kSimulationDt);
+            const float angle = car.getTireDebugInfo().steeringAngle;
+            assert(std::fabs(angle - previousAngle) <= maxAllowedStep &&
+                   "actual steering angle must never change by more than maxSteerRateRadPerSec*dt in a single step, "
+                   "even under a full -1<->+1 command flip every step");
+            previousAngle = angle;
+        }
+    }
+
+    // 5: the actual steering angle never exceeds +-maxSteerAngle, under any
+    // command sequence.
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        for (int i = 0; i < 200; ++i)
+        {
+            simulation::CarInput input;
+            input.steering = (i % 3 == 0) ? 1.0f : ((i % 3 == 1) ? -1.0f : 0.4f);
+            car.update(input, kSimulationDt);
+            assert(std::fabs(car.getTireDebugInfo().steeringAngle) <= params.maxSteerAngle + 1e-4f &&
+                   "actual steering angle must never exceed +-maxSteerAngle");
+        }
+    }
+
+    // 6: sustained, repeated identical (+1) input reaches EXACTLY full
+    // steering lock given enough time (the rate limiter is a clamped
+    // linear ramp, not an asymptotic approach -- it genuinely arrives, not
+    // just gets arbitrarily close).
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput fullRight;
+        fullRight.steering = 1.0f;
+        // Generous (3x) margin over the exact center-to-lock step count.
+        const int stepsNeeded =
+            static_cast<int>(3.0f * params.maxSteerAngle / params.maxSteerRateRadPerSec / kSimulationDt) + 1;
+        for (int i = 0; i < stepsNeeded; ++i)
+        {
+            car.update(fullRight, kSimulationDt);
+        }
+        assert(std::fabs(car.getTireDebugInfo().steeringAngle - params.maxSteerAngle) < 1e-4f &&
+               "sustained +1 steering, given enough time, must reach exactly full lock");
+    }
+
+    // 7: reset() returns the actual steering angle to exactly neutral,
+    // regardless of how far from center it was beforehand -- no stale
+    // steering state may carry across a reset (new generation, manual
+    // reset, or a freshly-reset Car all go through the same reset()).
+    {
+        simulation::Car car(params, track);
+        car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::CarInput fullLeft;
+        fullLeft.steering = -1.0f;
+        for (int i = 0; i < 60; ++i)
+        {
+            car.update(fullLeft, kSimulationDt);
+        }
+        assert(std::fabs(car.getTireDebugInfo().steeringAngle) > 0.1f &&
+               "setup must actually move the steering angle away from center before testing reset");
+
+        car.reset(kSpawnPosition, kSpawnHeading);
+        assert(car.getTireDebugInfo().steeringAngle == 0.0f &&
+               "reset() must return the actual steering angle to exactly neutral, regardless of prior state");
+    }
+
+    // 8 & 9: purely a function of (state, input, dt) -- driving the SAME
+    // input sequence through two independently-constructed Cars produces
+    // bit-identical actual steering angles (and full vehicle state) at
+    // every step. Car/CarParams/Track never touch any RNG (confirmed by
+    // inspection -- no RNG object exists anywhere in this layer), so this
+    // also directly demonstrates no RNG usage was introduced. This is the
+    // concrete proof that NORMAL vs FAST cannot affect the steering rate
+    // limiter: both modes are just different NUMBERS of these same
+    // individually-dt-stamped calls (see main.cpp) -- never a different dt
+    // or a different call order.
+    {
+        simulation::Car carA(params, track);
+        simulation::Car carB(params, track);
+        carA.reset(kSpawnPosition, kSpawnHeading);
+        carB.reset(kSpawnPosition, kSpawnHeading);
+
+        for (int i = 0; i < 150; ++i)
+        {
+            simulation::CarInput input;
+            input.steering = std::sin(static_cast<float>(i) * 0.37f); // varied, deterministic pattern
+            input.throttle = 0.5f;
+            carA.update(input, kSimulationDt);
+            carB.update(input, kSimulationDt);
+            assert(carA.getTireDebugInfo().steeringAngle == carB.getTireDebugInfo().steeringAngle &&
+                   "identical (state, input, dt) sequences must produce bit-identical actual steering angles"); // 8, 9
+            assert(carA.getPosition().x == carB.getPosition().x && carA.getPosition().y == carB.getPosition().y &&
+                   "identical sequences must produce bit-identical full vehicle state, not just steering angle");
+        }
+    }
+
+    TraceLog(LOG_INFO, "Steering rate limit verification: all deterministic checks passed");
 }
 
 // Deterministic check of the full Car -> Observation -> NeuralNetwork ->
@@ -2241,8 +2786,8 @@ void verifyAIController(const simulation::Track& track)
     using ai::neat::NodeType;
     constexpr float kEps = 1e-4f;
 
-    // 9 Input + 1 Bias + 3 Output, no connections -- every output is
-    // deterministically 0 unless a test adds its own connections.
+    // kInputCount Input + 1 Bias + 3 Output, no connections -- every output
+    // is deterministically 0 unless a test adds its own connections.
     auto makeDisconnectedGenome = []()
     {
         Genome genome;
@@ -2250,7 +2795,7 @@ void verifyAIController(const simulation::Track& track)
         {
             genome.addNode(NodeGene{i, NodeType::Input});
         }
-        genome.addNode(NodeGene{9, NodeType::Bias});
+        genome.addNode(NodeGene{ai::NeuralNetwork::kInputCount, NodeType::Bias});
         genome.addNode(NodeGene{100, NodeType::Output});
         genome.addNode(NodeGene{101, NodeType::Output});
         genome.addNode(NodeGene{102, NodeType::Output});
@@ -2263,7 +2808,9 @@ void verifyAIController(const simulation::Track& track)
         AIController controller(ai::neat::buildPhenotype(makeDisconnectedGenome()));
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput input = controller.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput input = controller.update(car, progress);
         assert(input.steering == 0.0f && input.throttle == 0.5f && input.brake == 0.0f &&
                "a disconnected network must map to zero steering, neutral (0.5) throttle, and off (0.0) brake");
     }
@@ -2274,12 +2821,14 @@ void verifyAIController(const simulation::Track& track)
     // their neutral 0.5.
     {
         Genome genome = makeDisconnectedGenome();
-        genome.addConnection(ConnectionGene{9, 100, 1.0f, true, 0});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 1.0f, true, 0});
         AIController controller(ai::neat::buildPhenotype(genome));
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput input = controller.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput input = controller.update(car, progress);
 
         assert(input.steering > 0.5f && "output index 0 must map to steering");
         assert(std::fabs(input.throttle - 0.5f) < kEps && "output index 1 (throttle) must be unaffected");
@@ -2292,23 +2841,25 @@ void verifyAIController(const simulation::Track& track)
         AIController zeroController(ai::neat::buildPhenotype(zeroGenome));
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput zeroInput = zeroController.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput zeroInput = zeroController.update(car, progress);
         assert(zeroController.getRawThrottleOutput() == 0.0f && "raw throttle must be exactly 0 with no contribution");
         assert(std::fabs(zeroInput.throttle - 0.5f) < kEps && "raw throttle 0 must map to mapped throttle 0.5");
 
         Genome negativeGenome = makeDisconnectedGenome();
-        negativeGenome.addConnection(ConnectionGene{9, 101, -1.0f, true, 0});
+        negativeGenome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, -1.0f, true, 0});
         AIController negativeController(ai::neat::buildPhenotype(negativeGenome));
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput negativeInput = negativeController.update(car);
+        const simulation::CarInput negativeInput = negativeController.update(car, progress);
         assert(negativeController.getRawThrottleOutput() < 0.0f && "negative Bias->throttle weight must yield negative raw throttle");
         assert(negativeInput.throttle < 0.5f - kEps && "negative raw throttle must map below 0.5");
 
         Genome positiveGenome = makeDisconnectedGenome();
-        positiveGenome.addConnection(ConnectionGene{9, 101, 1.0f, true, 0});
+        positiveGenome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 1.0f, true, 0});
         AIController positiveController(ai::neat::buildPhenotype(positiveGenome));
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput positiveInput = positiveController.update(car);
+        const simulation::CarInput positiveInput = positiveController.update(car, progress);
         assert(positiveController.getRawThrottleOutput() > 0.0f && "positive Bias->throttle weight must yield positive raw throttle");
         assert(positiveInput.throttle > 0.5f + kEps && "positive raw throttle must map above 0.5");
     }
@@ -2338,23 +2889,25 @@ void verifyAIController(const simulation::Track& track)
         AIController zeroController(ai::neat::buildPhenotype(zeroGenome));
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput zeroInput = zeroController.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput zeroInput = zeroController.update(car, progress);
         assert(zeroController.getRawBrakeOutput() == 0.0f && "raw brake must be exactly 0 with no contribution");
         assert(zeroInput.brake == 0.0f && "neutral raw brake must map to mapped brake 0.0, not 0.5"); // 19
 
         Genome negativeGenome = makeDisconnectedGenome();
-        negativeGenome.addConnection(ConnectionGene{9, 102, -1.0f, true, 0});
+        negativeGenome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 102, -1.0f, true, 0});
         AIController negativeController(ai::neat::buildPhenotype(negativeGenome));
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput negativeInput = negativeController.update(car);
+        const simulation::CarInput negativeInput = negativeController.update(car, progress);
         assert(negativeController.getRawBrakeOutput() < 0.0f && "negative Bias->brake weight must yield negative raw brake");
         assert(negativeInput.brake == 0.0f && "negative raw brake must still map to 0.0 brake"); // 20
 
         Genome positiveGenome = makeDisconnectedGenome();
-        positiveGenome.addConnection(ConnectionGene{9, 102, 10.0f, true, 0}); // saturating weight
+        positiveGenome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 102, 10.0f, true, 0}); // saturating weight
         AIController positiveController(ai::neat::buildPhenotype(positiveGenome));
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput positiveInput = positiveController.update(car);
+        const simulation::CarInput positiveInput = positiveController.update(car, progress);
         assert(positiveController.getRawBrakeOutput() > 0.0f && "positive Bias->brake weight must yield positive raw brake");
         assert(positiveInput.brake > 0.0f && "positive raw brake must produce a nonzero mapped brake"); // 21
         assert(positiveInput.brake >= 0.0f && positiveInput.brake <= 1.0f &&
@@ -2369,7 +2922,9 @@ void verifyAIController(const simulation::Track& track)
         AIController controller(ai::neat::buildPhenotype(createDemonstrationGenome()));
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput input = controller.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput input = controller.update(car, progress);
         assert(input.throttle > 0.5f && "generation-0 demonstration genome must still accelerate"); // 22
         assert(controller.getRawBrakeOutput() < 0.0f && "generation-0 raw brake output must remain negative (bias-driven)");
         assert(input.brake == 0.0f && "generation-0 demonstration genome's brake must start fully off");
@@ -2381,19 +2936,22 @@ void verifyAIController(const simulation::Track& track)
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{0, 100, 10.0f, true, 0});
-        genome.addConnection(ConnectionGene{9, 101, 10.0f, true, 1});
-        genome.addConnection(ConnectionGene{9, 102, -10.0f, true, 2});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 10.0f, true, 1});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 102, -10.0f, true, 2});
         AIController controller(ai::neat::buildPhenotype(genome));
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
         simulation::CarInput driveInput;
         driveInput.throttle = 1.0f;
         driveInput.steering = 1.0f;
         for (int i = 0; i < 30 && car.isAlive(); ++i)
         {
             car.update(driveInput, kSimulationDt);
-            const simulation::CarInput aiInput = controller.update(car);
+            progress.update(car);
+            const simulation::CarInput aiInput = controller.update(car, progress);
             assert(aiInput.steering >= -1.0f && aiInput.steering <= 1.0f && "mapped steering must stay within [-1, 1]");
             assert(aiInput.throttle >= 0.0f && aiInput.throttle <= 1.0f && "mapped throttle must stay within [0, 1]");
             assert(aiInput.brake >= 0.0f && aiInput.brake <= 1.0f && "mapped brake must stay within [0, 1]");
@@ -2410,7 +2968,9 @@ void verifyAIController(const simulation::Track& track)
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        controller.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        controller.update(car, progress);
 
         const float expectedCenterSensor = car.getSensors()[2].normalizedDistance;
         assert(std::fabs(controller.getLastObservation().values[2] - expectedCenterSensor) < kEps &&
@@ -2421,19 +2981,21 @@ void verifyAIController(const simulation::Track& track)
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{0, 100, 0.7f, true, 0});
-        genome.addConnection(ConnectionGene{9, 101, -0.3f, true, 1});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, -0.3f, true, 1});
         AIController controller(ai::neat::buildPhenotype(genome));
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
 
-        const simulation::CarInput first = controller.update(car);
-        const simulation::CarInput second = controller.update(car);
+        const simulation::CarInput first = controller.update(car, progress);
+        const simulation::CarInput second = controller.update(car, progress);
         assert(first.steering == second.steering && first.throttle == second.throttle && first.brake == second.brake &&
                "repeated updates against an unchanged Car must produce identical CarInput");
     }
 
-    // 11: the controller does not mutate the Car it reads from.
+    // 11: the controller does not mutate the Car or TrackProgress it reads from.
     {
         Genome genome = makeDisconnectedGenome();
         genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
@@ -2441,17 +3003,24 @@ void verifyAIController(const simulation::Track& track)
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
         const Vector2 positionBefore = car.getPosition();
         const Vector2 velocityBefore = car.getVelocity();
         const float headingBefore = car.getHeading();
+        const Vector2 tangentBefore = progress.getTrackTangent();
+        const float bestProgressBefore = progress.getBestProgress();
 
-        controller.update(car);
+        controller.update(car, progress);
 
         assert(car.getPosition().x == positionBefore.x && car.getPosition().y == positionBefore.y &&
                "AIController::update must not move the Car");
         assert(car.getVelocity().x == velocityBefore.x && car.getVelocity().y == velocityBefore.y &&
                "AIController::update must not change the Car's velocity");
         assert(car.getHeading() == headingBefore && "AIController::update must not change the Car's heading");
+        assert(progress.getTrackTangent().x == tangentBefore.x && progress.getTrackTangent().y == tangentBefore.y &&
+               progress.getBestProgress() == bestProgressBefore &&
+               "AIController::update must not modify TrackProgress");
     }
 
     // 13: a disabled connection stays inactive after phenotype construction.
@@ -2462,7 +3031,9 @@ void verifyAIController(const simulation::Track& track)
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
-        const simulation::CarInput input = controller.update(car);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        const simulation::CarInput input = controller.update(car, progress);
         assert(input.steering == 0.0f && "a disabled connection must not affect evaluation after phenotype construction");
     }
 
@@ -2470,11 +3041,13 @@ void verifyAIController(const simulation::Track& track)
     // must apply neutral CarInput instead.
     {
         Genome genome = makeDisconnectedGenome();
-        genome.addConnection(ConnectionGene{9, 101, 1.0f, true, 0}); // would otherwise raise throttle above 0.5
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 1.0f, true, 0}); // would otherwise raise throttle above 0.5
         AIController controller(ai::neat::buildPhenotype(genome));
 
         simulation::Car car(makeCarParams(), track);
         car.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
         simulation::CarInput driveOffTrack;
         driveOffTrack.throttle = 1.0f;
         driveOffTrack.steering = 0.0f;
@@ -2484,7 +3057,7 @@ void verifyAIController(const simulation::Track& track)
         }
         assert(!car.isAlive() && "driving straight for 5s must leave the road band and kill the car");
 
-        const simulation::CarInput deadInput = controller.update(car);
+        const simulation::CarInput deadInput = controller.update(car, progress);
         assert(deadInput.steering == 0.0f && deadInput.throttle == 0.0f && deadInput.brake == 0.0f &&
                "a dead car must receive neutral CarInput from AIController, not a network-derived one");
         car.reset(kSpawnPosition, kSpawnHeading);

@@ -98,6 +98,15 @@ public:
     };
     const ProjectionDebugInfo& getLastProjectionDebugInfo() const { return m_lastProjectionDebugInfo; }
 
+    // Local track tangent (unit vector, forward direction of travel) at the
+    // most recently tracked/projected point -- the SAME underlying value as
+    // ProjectionDebugInfo::tangent, but exposed as a genuine, intentional
+    // production-facing accessor (see ai::buildObservation(), which reads
+    // this for the heading-error observation) rather than through the
+    // debug-only struct above. {0,0} only before the first reset()/update()
+    // call has ever run (never a live production state).
+    Vector2 getTrackTangent() const { return m_trackTangent; }
+
     // Raw arc-length-normalized lap position, [0,1) -- not anchored to spawn.
     float getLapPosition() const { return m_lapPosition; }
 
@@ -131,6 +140,11 @@ private:
     std::size_t m_previousSegmentIndex = 0;
     bool m_lastProjectionUsedRecovery = false;
     ProjectionDebugInfo m_lastProjectionDebugInfo;
+
+    // Mirrors m_lastProjectionDebugInfo.tangent -- see getTrackTangent()'s
+    // comment for why this is kept as its own, separately-exposed member
+    // rather than reading the debug struct from production code.
+    Vector2 m_trackTangent = {0.0f, 0.0f};
 
     float m_lapPosition = 0.0f;
     float m_previousLapPosition = 0.0f;

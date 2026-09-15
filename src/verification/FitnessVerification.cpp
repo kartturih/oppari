@@ -75,6 +75,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
                "reset must produce zero fitness/elapsed time and an unfinished evaluation");
         assert(evaluator.getBaseProgressFitness() == 0.0f && evaluator.getProgressRate() == 0.0f &&
                evaluator.getProgressRateReward() == 0.0f && evaluator.getLapSpeedBonus() == 0.0f &&
+               evaluator.getSteeringSmoothnessPenalty() == 0.0f && evaluator.getAverageAbsSteeringDelta() == 0.0f &&
                "reset must clear every fitness component"); // 27
     }
 
@@ -91,7 +92,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         for (int i = 0; i < 150 && !evaluator.isEvaluationFinished(); ++i) // 2.5s of no movement, under the 3s timeout
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
             assert(evaluator.getFitness() == 0.0f &&
                    "standing still at zero progress must never earn positive fitness from elapsed time alone");
         }
@@ -109,14 +110,14 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         car.reset(positionAtLapPosition(track, 0.1f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         float lastRateReward = evaluator.getProgressRateReward();
         float lastFitness = evaluator.getFitness();
 
         for (int i = 0; i < 120; ++i) // 2s of standing still at the same progress
         {
             progress.update(car); // car did not move; bestProgress unchanged
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
             assert(evaluator.getProgressRateReward() <= lastRateReward + kEps &&
                    "waiting must never increase progress-rate reward");
             assert(evaluator.getFitness() <= lastFitness + kEps && "waiting must never increase total fitness");
@@ -135,13 +136,13 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         const float baseBefore = evaluator.getBaseProgressFitness();
         const float fitnessBefore = evaluator.getFitness();
 
         car.reset(positionAtLapPosition(track, 0.10f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         assert(evaluator.getBaseProgressFitness() > baseBefore && "forward progress must increase base progress fitness");
         assert(evaluator.getFitness() > fitnessBefore && "forward progress must increase total fitness");
     }
@@ -156,12 +157,12 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         car.reset(positionAtLapPosition(track, 0.15f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         const float baseAfterForward = evaluator.getBaseProgressFitness();
 
         car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         assert(evaluator.getBaseProgressFitness() == baseAfterForward &&
                "backward movement must not increase base progress fitness");
     }
@@ -174,13 +175,13 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         const float baseAtStart = evaluator.getBaseProgressFitness();
 
         car.reset(positionAtLapPosition(track, 1.0f / static_cast<float>(simulation::TrackProgress::kCheckpointCount)),
                   kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         assert(progress.getTotalCheckpointsPassed() >= 1 && "the setup must actually pass at least one checkpoint");
         assert(evaluator.getBaseProgressFitness() > baseAtStart && "passing a checkpoint must increase base progress fitness");
     }
@@ -199,14 +200,14 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         {
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         const float baseBeforeLap = evaluator.getBaseProgressFitness();
         assert(progress.getLapCount() == 0 && "setup must not have completed a lap yet");
 
         car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         assert(progress.getLapCount() == 1 && "the final step must complete exactly one lap");
         assert(evaluator.getBaseProgressFitness() > baseBeforeLap && "completing a lap must increase base progress fitness");
         car.reset(kSpawnPosition, kSpawnHeading);
@@ -240,7 +241,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
             // FitnessEvaluator reads TrackProgress's current state, not an
             // integral over time, so one update() with totalTime suffices.
-            evaluator.update(localCar, localProgress, totalTime);
+            evaluator.update(localCar, localProgress, 0.0f, totalTime);
             return evaluator.getFitness();
         };
 
@@ -252,8 +253,10 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
     // 9: substantially greater progress beats a much faster but far less
     // advanced car -- Car C (0.8 laps in 10s) must beat Car D (0.2 laps in
-    // 2s), since kProgressRateScale is deliberately small relative to
-    // kProgressPointsPerLap.
+    // 2s), since progressRateReward is explicitly capped at
+    // kMaxProgressRateFraction of baseProgressFitness and so can never close
+    // a gap this large in actual progress, regardless of how much faster the
+    // lower-progress car reached its own (much smaller) peak.
     {
         auto reachProgressInTime = [&](float targetProgress, float totalTime) -> float
         {
@@ -275,7 +278,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             }
             localCar.reset(positionAtLapPosition(track, targetProgress), kSpawnHeading);
             localProgress.update(localCar);
-            evaluator.update(localCar, localProgress, totalTime);
+            evaluator.update(localCar, localProgress, 0.0f, totalTime);
             return evaluator.getFitness();
         };
 
@@ -285,9 +288,15 @@ void verifyFitnessEvaluator(const simulation::Track& track)
                "substantially greater progress must still beat a much faster but far less advanced car");
     }
 
-    // 10 & 11: progressRate matches bestProgress / max(elapsedTime,
-    // smallTimeEpsilon) exactly, and stays finite even at elapsedTime == 0
-    // (smallTimeEpsilon = 0.1f floor).
+    // 10 & 11: progressRate matches bestProgress / max(timeAtBestProgress,
+    // kMinTimeToProgress) exactly -- NOT bestProgress/elapsedTime -- and
+    // stays finite even at elapsedTime == 0 (kMinTimeToProgress = 0.5f floor).
+    // A single-jump update() (as used here) reaches meaningful progress and
+    // advances elapsedTime in the very same call, so timeAtBestProgress and
+    // elapsedTime coincide in THIS specific scenario -- that coincidence is
+    // exactly why the old (elapsedTime-based) formula could pass a test
+    // shaped like this one without actually being correct; see the dedicated
+    // multi-update regression test below for the scenario where they diverge.
     {
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -297,10 +306,13 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         car.reset(positionAtLapPosition(track, 0.2f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, 4.0f); // well above smallTimeEpsilon: max() is a no-op here
+        evaluator.update(car, progress, 0.0f, 4.0f); // well above kMinTimeToProgress: max() is a no-op here
+        assert(std::fabs(evaluator.getTimeAtBestProgress() - 4.0f) < kEps &&
+               "a single meaningful-progress jump must record timeAtBestProgress at that same elapsedTime");
         const float expectedRate = progress.getBestProgress() / 4.0f;
         assert(std::fabs(evaluator.getProgressRate() - expectedRate) < kEps &&
-               "progressRate must exactly match bestProgress / elapsedTime once elapsedTime is well above the epsilon floor"); // 10
+               "progressRate must exactly match bestProgress / timeAtBestProgress once timeAtBestProgress is well "
+               "above the kMinTimeToProgress floor"); // 10
 
         ai::FitnessEvaluator zeroTimeEvaluator;
         zeroTimeEvaluator.reset();
@@ -310,17 +322,31 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         zeroTimeProgress.reset(zeroTimeCar);
         zeroTimeCar.reset(positionAtLapPosition(track, 0.2f), kSpawnHeading); // 0.2 laps of progress since reset (within the plausibility gate)
         zeroTimeProgress.update(zeroTimeCar);
-        zeroTimeEvaluator.update(zeroTimeCar, zeroTimeProgress, 0.0f); // zero deltaTime -- elapsedTime stays 0
+        zeroTimeEvaluator.update(zeroTimeCar, zeroTimeProgress, 0.0f, 0.0f); // zero deltaTime -- elapsedTime AND timeAtBestProgress stay 0
         assert(std::isfinite(zeroTimeEvaluator.getProgressRate()) &&
-               "progressRate must remain finite when elapsedTime is exactly zero"); // 11
-        const float expectedZeroTimeRate = zeroTimeProgress.getBestProgress() / 0.1f; // documented smallTimeEpsilon
+               "progressRate must remain finite when timeAtBestProgress is exactly zero"); // 11
+        assert(zeroTimeEvaluator.getTimeAtBestProgress() == 0.0f &&
+               "zero deltaTime must record timeAtBestProgress as exactly 0, not skip the update");
+        const float expectedZeroTimeRate = zeroTimeProgress.getBestProgress() / 0.5f; // documented kMinTimeToProgress
         assert(std::fabs(zeroTimeEvaluator.getProgressRate() - expectedZeroTimeRate) < kEps &&
-               "progressRate at elapsedTime == 0 must use the documented smallTimeEpsilon floor");
+               "progressRate at timeAtBestProgress == 0 must use the documented kMinTimeToProgress floor");
     }
 
     // 12: progressRate never uses the Car's instantaneous speed -- driven
     // with real Car physics (nonzero, varying velocity) and cross-checked
-    // against the exact bestProgress/elapsedTime formula.
+    // against the evaluator's own exposed timeAtBestProgress state, which is
+    // itself derived only from FitnessEvaluator's elapsedTime bookkeeping and
+    // TrackProgress::getBestProgress() (see FitnessEvaluator.cpp), never
+    // Car::getSpeed(). An independent, physics-free formula prediction isn't
+    // meaningful here any more (unlike the old bestProgress/elapsedTime
+    // formula): timeAtBestProgress only advances on frames where forward
+    // progress exceeds kProgressImprovementEpsilon, which depends on exactly
+    // how fast this real, accelerating-from-rest car happens to be moving
+    // each frame -- so this check instead proves internal self-consistency
+    // (the exposed getter and the internal formula agree) plus the two
+    // structural invariants that actually matter: timeAtBestProgress can
+    // never exceed elapsedTime, and it must still be nonzero once the car
+    // has clearly been moving for a while.
     {
         car.reset(kSpawnPosition, kSpawnHeading);
         simulation::TrackProgress progress(track);
@@ -335,12 +361,18 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         {
             car.update(driveForward, kSimulationDt);
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
+            assert(evaluator.getTimeAtBestProgress() <= evaluator.getElapsedTime() + kEps &&
+                   "timeAtBestProgress must never exceed elapsedTime");
         }
         assert(car.getSpeed() > 1.0f && "setup must actually be moving (nonzero instantaneous speed) for this check");
-        const float expectedRate = progress.getBestProgress() / evaluator.getElapsedTime();
+        assert(evaluator.getTimeAtBestProgress() > 0.0f &&
+               "a full second of real forward acceleration must have recorded a nonzero timeAtBestProgress");
+        const float expectedRate =
+            progress.getBestProgress() / std::max(evaluator.getTimeAtBestProgress(), 0.5f); // kMinTimeToProgress
         assert(std::fabs(evaluator.getProgressRate() - expectedRate) < kEps &&
-               "progressRate must match the pure bestProgress/elapsedTime formula regardless of the car's instantaneous speed");
+               "progressRate must match bestProgress/max(timeAtBestProgress, kMinTimeToProgress) exactly, regardless "
+               "of the car's instantaneous speed");
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
@@ -379,7 +411,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             cumulativeP += remaining;
             car.reset(positionAtLapPosition(track, cumulativeP), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, lapTime);
+            evaluator.update(car, progress, 0.0f, lapTime);
         };
 
         // First lap: 3s total (all three laps' times must sum to well under
@@ -413,7 +445,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
     // 19, 20, 21 & 22: faster completed laps give a larger lap-speed bonus;
     // there is no lap-speed bonus at all before any lap is completed; and
     // the bonus stays finite and bounded (<= kMaxLapSpeedFactor *
-    // kLapSpeedBonusScale = 2 * 200 = 400) even for a near-instant lap.
+    // kLapSpeedBonusScale = 2 * 350 = 700) even for a near-instant lap.
     {
         auto completeOneLapIn = [&](float lapTime) -> float
         {
@@ -441,7 +473,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             p += remaining;
             localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
             localProgress.update(localCar);
-            evaluator.update(localCar, localProgress, lapTime);
+            evaluator.update(localCar, localProgress, 0.0f, lapTime);
             assert(localProgress.getLapCount() == 1 && "setup must complete exactly one lap");
             return evaluator.getLapSpeedBonus();
         };
@@ -453,7 +485,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         assert(bonusFast > bonusSlow && "a faster completed lap must give a larger lap-speed bonus"); // 19
         assert(std::isfinite(bonusFast) && std::isfinite(bonusSlow) && std::isfinite(bonusInstant) &&
                "lap-speed bonus must always remain finite"); // 21
-        constexpr float kMaxPossibleLapSpeedBonus = 400.0f; // kMaxLapSpeedFactor(2) * kLapSpeedBonusScale(200)
+        constexpr float kMaxPossibleLapSpeedBonus = 700.0f; // kMaxLapSpeedFactor(2) * kLapSpeedBonusScale(350)
         assert(bonusFast <= kMaxPossibleLapSpeedBonus + kEps && bonusInstant <= kMaxPossibleLapSpeedBonus + kEps &&
                "lap-speed bonus must stay bounded even for a near-instant lap"); // 22
     }
@@ -474,7 +506,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         {
             car.update(driveOffTrack, kSimulationDt);
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(!car.isAlive() && "driving straight for 5s must leave the road band and kill the car");
         assert(evaluator.isEvaluationFinished() &&
@@ -483,7 +515,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         const float fitnessAtFinish = evaluator.getFitness();
         const float elapsedAtFinish = evaluator.getElapsedTime();
-        evaluator.update(car, progress, 10.0f); // must be a no-op: evaluation already finished
+        evaluator.update(car, progress, 0.0f, 10.0f); // must be a no-op: evaluation already finished
         assert(evaluator.getFitness() == fitnessAtFinish && evaluator.getElapsedTime() == elapsedAtFinish &&
                "Collision must freeze fitness and elapsed time");
         car.reset(kSpawnPosition, kSpawnHeading);
@@ -507,7 +539,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, 1.0f);
+            evaluator.update(car, progress, 0.0f, 1.0f);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
@@ -518,7 +550,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         const float elapsedAtFinish = evaluator.getElapsedTime();
         car.reset(positionAtLapPosition(track, 0.5f), kSpawnHeading); // would otherwise be a big progress jump
         progress.update(car);
-        evaluator.update(car, progress, 10.0f);
+        evaluator.update(car, progress, 0.0f, 10.0f);
         assert(evaluator.getFitness() == fitnessAtFinish && evaluator.getElapsedTime() == elapsedAtFinish &&
                "TimeLimit must freeze fitness and elapsed time");
         car.reset(kSpawnPosition, kSpawnHeading);
@@ -536,7 +568,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
@@ -544,7 +576,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         const ai::EvaluationFinishReason reasonAtFinish = evaluator.getFinishReason();
         const float fitnessAtFinish = evaluator.getFitness(); // 0.0f: no progress was ever made
-        evaluator.update(car, progress, 10.0f);
+        evaluator.update(car, progress, 0.0f, 10.0f);
         assert(evaluator.getFitness() == fitnessAtFinish && evaluator.getFinishReason() == reasonAtFinish &&
                "NoProgress must freeze fitness and finish reason");
         car.reset(kSpawnPosition, kSpawnHeading);
@@ -566,21 +598,21 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         for (int i = 0; i < 120; ++i)
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(!evaluator.isEvaluationFinished() && "2 seconds of no movement must stay under the timeout");
 
         // A meaningful forward nudge must reset the no-progress timer.
         car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
 
         // A further 2 seconds of standing still (< 3s since the nudge) must
         // still not finish the evaluation, proving the timer reset.
         for (int i = 0; i < 120; ++i)
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(!evaluator.isEvaluationFinished() &&
                "meaningful progress must reset the no-progress timer, not merely delay the original deadline");
@@ -613,16 +645,20 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
         }
-        evaluator.update(car, progress, 5.0f);
+        evaluator.update(car, progress, 0.0f, 5.0f);
         assert(evaluator.hasCompletedLap() && evaluator.getFitness() > 0.0f &&
                "setup must have completed a lap with nonzero fitness");
+
+        assert(evaluator.getTimeAtBestProgress() > 0.0f &&
+               "setup must have actually established a nonzero timeAtBestProgress before reset");
 
         evaluator.reset();
         assert(!evaluator.hasCompletedLap() && evaluator.getBestLapTime() == 0.0f && evaluator.getLastLapTime() == 0.0f &&
                "reset must clear lap timing state back to the no-completed-lap sentinel");
         assert(evaluator.getFitness() == 0.0f && evaluator.getBaseProgressFitness() == 0.0f &&
                evaluator.getProgressRate() == 0.0f && evaluator.getProgressRateReward() == 0.0f &&
-               evaluator.getLapSpeedBonus() == 0.0f && "reset must clear every fitness component"); // 27
+               evaluator.getLapSpeedBonus() == 0.0f && evaluator.getTimeAtBestProgress() == 0.0f &&
+               "reset must clear every fitness component, including timeAtBestProgress"); // 27
         car.reset(kSpawnPosition, kSpawnHeading);
         progress.reset(car);
     }
@@ -644,7 +680,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             {
                 localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
                 localProgress.update(localCar);
-                localEvaluator.update(localCar, localProgress, kSimulationDt);
+                localEvaluator.update(localCar, localProgress, 0.0f, kSimulationDt);
                 fitnessTrace.push_back(localEvaluator.getFitness());
             }
         };
@@ -680,7 +716,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         const int checkpointsBefore = progress.getTotalCheckpointsPassed();
         const int lapCountBefore = progress.getLapCount();
 
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
 
         assert(car.getPosition().x == positionBefore.x && car.getPosition().y == positionBefore.y &&
                car.getVelocity().x == velocityBefore.x && car.getVelocity().y == velocityBefore.y &&
@@ -703,7 +739,7 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(evaluator.isEvaluationFinished() && "setup must have already finished the evaluation");
 
@@ -715,9 +751,321 @@ void verifyFitnessEvaluator(const simulation::Track& track)
 
         car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
         progress.update(car);
-        evaluator.update(car, progress, kSimulationDt);
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
         assert(evaluator.getFitness() > 0.0f && "the fresh evaluation after reset must respond normally to new progress");
         car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 32: the original bug this whole redesign targets -- two cars reach the
+    // SAME bestProgress via genuinely different real-time paces (each driven
+    // through several small update() calls, never one time-jump), then BOTH
+    // keep being evaluated further (more update() calls, no further
+    // meaningful progress) before their fitness is compared. The old
+    // elapsedTime-based progressRate would dilute toward the same value once
+    // both survived long enough after reaching that progress; timeAtBestProgress
+    // instead freezes at the moment each car's own progress was actually
+    // reached, so the car that got there faster still scores higher even
+    // though its FINAL elapsedTime is no longer what distinguishes them.
+    {
+        auto reachThenKeepRunning = [&](float targetProgress, int stepsToReach, float dtPerStep,
+                                         float extraRunningTime) -> float
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+
+            // Genuine incremental progress across several real update()
+            // calls -- each step's own bestProgress delta stays within
+            // TrackProgress's plausibility gate (see kStep elsewhere in this
+            // file) and comfortably above kProgressImprovementEpsilon, so
+            // timeAtBestProgress advances on every step, ending at exactly
+            // stepsToReach*dtPerStep -- the real "time to reach targetProgress".
+            for (int i = 1; i <= stepsToReach; ++i)
+            {
+                const float p = targetProgress * static_cast<float>(i) / static_cast<float>(stepsToReach);
+                localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
+                localProgress.update(localCar);
+                evaluator.update(localCar, localProgress, 0.0f, dtPerStep);
+            }
+            assert(std::fabs(evaluator.getTimeAtBestProgress() - static_cast<float>(stepsToReach) * dtPerStep) < kEps &&
+                   "setup must reach targetProgress with timeAtBestProgress exactly matching the real elapsed time");
+
+            // The car keeps running afterward without further MEANINGFUL
+            // progress -- elapsedTime keeps growing while timeAtBestProgress
+            // stays frozen. Kept comfortably under kNoProgressTimeout (3s)
+            // so the evaluation is still live when fitness is read below.
+            constexpr int kIdleSteps = 10;
+            const float idleDt = extraRunningTime / static_cast<float>(kIdleSteps);
+            for (int i = 0; i < kIdleSteps && !evaluator.isEvaluationFinished(); ++i)
+            {
+                localProgress.update(localCar); // car does not move; bestProgress unchanged
+                evaluator.update(localCar, localProgress, 0.0f, idleDt);
+            }
+            assert(!evaluator.isEvaluationFinished() &&
+                   "setup must keep the evaluation alive through the idle phase (well under kNoProgressTimeout)");
+            return evaluator.getFitness();
+        };
+
+        // Car A reaches 0.5 laps over 1.0s total (5 steps x 0.2s); Car B
+        // reaches the SAME 0.5 laps over 5.0s total (5 steps x 1.0s). Both
+        // then keep running for the SAME additional 2.0s with no further
+        // progress before being compared -- baseProgressFitness ends up
+        // identical for both (same bestProgress/checkpoints/laps reached),
+        // so any fitness difference is purely the speed term.
+        const float fitnessFast = reachThenKeepRunning(0.5f, 5, 0.2f, 2.0f);
+        const float fitnessSlow = reachThenKeepRunning(0.5f, 5, 1.0f, 2.0f);
+        assert(std::isfinite(fitnessFast) && std::isfinite(fitnessSlow) &&
+               "fitness must remain finite in the fast/slow-then-idle comparison");
+        assert(fitnessFast > fitnessSlow &&
+               "reaching identical progress faster must give strictly higher fitness, even after both cars keep "
+               "running afterward with no further progress -- the exact bug this redesign fixes"); // 32
+    }
+
+    // 33: the explicit safety invariant progressRateReward <= baseProgressFitness *
+    // kMaxProgressRateFraction (0.35) must hold unconditionally, and must
+    // actually CLAMP (not just happen to never be exercised) for a
+    // deliberately extreme "reach a little progress almost instantly" burst
+    // -- proving the cap does real work, not merely that the inequality is
+    // vacuously true whenever the rate reward is already small.
+    {
+        constexpr float kMaxProgressRateFractionMirror = 0.35f; // mirrors FitnessEvaluator.cpp's own constant
+        constexpr float kProgressRateScaleMirror = 300.0f;      // mirrors FitnessEvaluator.cpp's own constant
+
+        auto checkCapHolds = [&](float targetProgress, int stepsToReach, float dtPerStep, bool* outWasClamped)
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+
+            bool sawClamp = false;
+            for (int i = 1; i <= stepsToReach; ++i)
+            {
+                const float p = targetProgress * static_cast<float>(i) / static_cast<float>(stepsToReach);
+                localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
+                localProgress.update(localCar);
+                evaluator.update(localCar, localProgress, 0.0f, dtPerStep);
+
+                assert(std::isfinite(evaluator.getFitness()) && std::isfinite(evaluator.getProgressRateReward()) &&
+                       "fitness and progressRateReward must remain finite at every step");
+
+                const float cap = evaluator.getBaseProgressFitness() * kMaxProgressRateFractionMirror;
+                assert(evaluator.getProgressRateReward() <= cap + kEps &&
+                       "progressRateReward must never exceed kMaxProgressRateFraction of baseProgressFitness");
+
+                const float rawReward = evaluator.getProgressRate() * kProgressRateScaleMirror;
+                if (rawReward > cap + kEps)
+                {
+                    sawClamp = true;
+                    assert(std::fabs(evaluator.getProgressRateReward() - cap) < kEps &&
+                           "once the raw rate reward exceeds the cap, progressRateReward must equal the cap exactly");
+                }
+            }
+            if (outWasClamped != nullptr)
+            {
+                *outWasClamped = sawClamp;
+            }
+        };
+
+        checkCapHolds(0.5f, 5, 0.2f, nullptr);              // moderate, realistic pace -- cap should not need to bind
+        checkCapHolds(0.5f, 5, 5.0f, nullptr);              // slow pace -- rate reward small, cap trivially not binding
+        bool clampedDuringBurst = false;
+        checkCapHolds(0.05f, 1, 0.5f, &clampedDuringBurst); // deliberate burst: tiny progress at the
+                                                              // kMinTimeToProgress floor, designed to exceed the cap
+        assert(clampedDuringBurst &&
+               "setup must actually exercise the cap (rawProgressRateReward > cap) for the burst scenario -- "
+               "otherwise this test would not be proving the clamp does anything"); // 33
+    }
+
+    // 34: a steering command held perfectly constant across many frames
+    // (legitimate sustained cornering, even at full lock) incurs a
+    // dramatically smaller steering-smoothness penalty than one that flips
+    // sign every frame (bang-bang/oscillating) reaching the SAME progress --
+    // the penalty targets CHANGE, never magnitude alone (both spend nearly
+    // all their time at |steering|=1.0).
+    {
+        auto reachProgressWithSteeringPattern = [&](bool oscillate) -> float
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+
+            constexpr int kSteps = 40;
+            for (int i = 1; i <= kSteps; ++i)
+            {
+                const float p = 0.01f * static_cast<float>(i); // well within the plausibility gate per step
+                localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
+                localProgress.update(localCar);
+                const float steeringCommand = oscillate ? ((i % 2 == 0) ? 1.0f : -1.0f) : 1.0f;
+                evaluator.update(localCar, localProgress, steeringCommand, kSimulationDt);
+            }
+            return evaluator.getSteeringSmoothnessPenalty();
+        };
+
+        const float sustainedPenalty = reachProgressWithSteeringPattern(false);
+        const float oscillatingPenalty = reachProgressWithSteeringPattern(true);
+
+        assert(sustainedPenalty >= 0.0f && oscillatingPenalty >= 0.0f && "penalty must never be negative");
+        assert(oscillatingPenalty > sustainedPenalty * 2.0f &&
+               "flipping the steering command every frame must cost substantially more than holding it steady, even "
+               "though both reach identical progress and spend almost all their time at the same magnitude"); // 34
+    }
+
+    // 35: the penalty is an AVERAGE, not a running total -- doubling the
+    // episode length while repeating the exact same per-frame oscillation
+    // pattern must leave the raw (pre-cap) measurement essentially
+    // unchanged, so a longer-lived individual is never penalized more than a
+    // shorter-lived one purely for having survived with the same behavior.
+    // Compared via getAverageAbsSteeringDelta() (pre-cap) specifically so
+    // this isolates the averaging behavior from the cap (already verified
+    // separately in check 36 below).
+    {
+        auto measureAverageDeltaOverSteps = [&](int steps) -> float
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+
+            for (int i = 1; i <= steps; ++i)
+            {
+                const float p = 0.004f * static_cast<float>(i); // stays well under a full lap even at steps=200
+                localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
+                localProgress.update(localCar);
+                const float steeringCommand = (i % 2 == 0) ? 1.0f : -1.0f; // identical repeating pattern regardless of length
+                evaluator.update(localCar, localProgress, steeringCommand, kSimulationDt);
+            }
+            return evaluator.getAverageAbsSteeringDelta();
+        };
+
+        const float averageOver100 = measureAverageDeltaOverSteps(100);
+        const float averageOver200 = measureAverageDeltaOverSteps(200); // same pattern, twice as long
+
+        assert(std::isfinite(averageOver100) && std::isfinite(averageOver200) && "average delta must remain finite");
+
+        // Not asserted as EXACTLY equal: the very first sample's delta (from
+        // the initial 0 baseline) is a fixed, one-time amount that gets
+        // amortized over 1/steps of the total -- shrinking, but not
+        // literally vanishing, as steps grows (here: within ~1/100 = 0.01 of
+        // the alternating pattern's own steady-state average). kLengthInvarianceTolerance
+        // is set well above that expected, well-understood amortization gap
+        // (not loosened to paper over an actual bug) so this still tightly
+        // rules out the failure mode it targets: a cumulative-sum
+        // implementation would differ by roughly 2x between these two runs
+        // (~200 vs ~400), nowhere close to fitting under this tolerance.
+        constexpr float kLengthInvarianceTolerance = 0.02f;
+        assert(std::fabs(averageOver100 - averageOver200) < kLengthInvarianceTolerance &&
+               "the same repeating steering pattern must produce essentially the same average delta regardless of "
+               "how many frames it is sustained for -- proving this is an average, not a cumulative sum"); // 35
+    }
+
+    // 36: the explicit safety invariant steeringSmoothnessPenalty <=
+    // baseProgressFitness * kMaxSteeringPenaltyFraction (0.25) must hold
+    // unconditionally, and must actually CLAMP for a deliberately extreme
+    // full-amplitude every-frame flip -- proving the cap does real work.
+    {
+        constexpr float kMaxSteeringPenaltyFractionMirror = 0.25f; // mirrors FitnessEvaluator.cpp's own constant
+        constexpr float kSteeringSmoothnessPenaltyScaleMirror = 400.0f; // mirrors FitnessEvaluator.cpp's own constant
+
+        simulation::Car localCar(makeCarParams(), track);
+        localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress localProgress(track);
+        localProgress.reset(localCar);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        bool sawClamp = false;
+        for (int i = 1; i <= 40; ++i)
+        {
+            const float p = 0.005f * static_cast<float>(i); // deliberately small progress relative to the oscillation
+            localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            localProgress.update(localCar);
+            const float steeringCommand = (i % 2 == 0) ? 1.0f : -1.0f; // worst case: full-amplitude flip every frame
+            evaluator.update(localCar, localProgress, steeringCommand, kSimulationDt);
+
+            assert(std::isfinite(evaluator.getFitness()) && std::isfinite(evaluator.getSteeringSmoothnessPenalty()) &&
+                   "fitness and steeringSmoothnessPenalty must remain finite at every step");
+
+            const float cap = evaluator.getBaseProgressFitness() * kMaxSteeringPenaltyFractionMirror;
+            assert(evaluator.getSteeringSmoothnessPenalty() <= cap + kEps &&
+                   "steeringSmoothnessPenalty must never exceed kMaxSteeringPenaltyFraction of baseProgressFitness");
+
+            const float rawPenalty = evaluator.getAverageAbsSteeringDelta() * kSteeringSmoothnessPenaltyScaleMirror;
+            if (rawPenalty > cap + kEps)
+            {
+                sawClamp = true;
+                assert(std::fabs(evaluator.getSteeringSmoothnessPenalty() - cap) < kEps &&
+                       "once the raw penalty exceeds the cap, steeringSmoothnessPenalty must equal the cap exactly");
+            }
+        }
+        assert(sawClamp &&
+               "setup must actually exercise the cap (raw penalty > cap) for the full-amplitude flip scenario -- "
+               "otherwise this test would not be proving the clamp does anything"); // 36
+    }
+
+    // 37: fitness can never be driven negative by the steering-smoothness
+    // penalty, even under the most extreme oscillation combined with barely
+    // any progress -- the cap's algebraic guarantee
+    // (fitness >= base*(1-kMaxSteeringPenaltyFraction) >= 0) holds in practice.
+    {
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        for (int i = 1; i <= 20; ++i)
+        {
+            const float p = 0.002f * static_cast<float>(i); // minimal progress
+            car.reset(positionAtLapPosition(track, p), kSpawnHeading);
+            progress.update(car);
+            const float steeringCommand = (i % 2 == 0) ? 1.0f : -1.0f;
+            evaluator.update(car, progress, steeringCommand, kSimulationDt);
+            assert(evaluator.getFitness() >= 0.0f &&
+                   "fitness must never go negative, even under extreme oscillation with minimal progress"); // 37
+        }
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 38: reset() clears the steering-smoothness bookkeeping's internal
+    // baseline (m_previousSteeringCommand), not just the externally-visible
+    // penalty -- the NEXT evaluation's very first delta must be measured
+    // against 0 again, not against whatever steering value the PREVIOUS
+    // (reset) evaluation last saw.
+    {
+        car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+        simulation::TrackProgress progress(track);
+        progress.reset(car);
+        ai::FitnessEvaluator evaluator;
+        evaluator.reset();
+
+        car.reset(positionAtLapPosition(track, 0.05f), kSpawnHeading);
+        progress.update(car);
+        evaluator.update(car, progress, 1.0f, kSimulationDt); // leaves m_previousSteeringCommand at 1.0
+        assert(evaluator.getAverageAbsSteeringDelta() > 0.0f &&
+               "setup must have actually established a nonzero previous steering command before reset");
+
+        evaluator.reset();
+        progress.reset(car);
+        car.reset(positionAtLapPosition(track, 0.1f), kSpawnHeading);
+        progress.update(car);
+        // If the internal baseline were NOT reset (stuck at 1.0), feeding
+        // 1.0 again here would show a delta of 0, indistinguishable from a
+        // genuinely fresh baseline -- feed 0.0 instead, which only reads
+        // back as a zero delta if the baseline genuinely returned to 0.
+        evaluator.update(car, progress, 0.0f, kSimulationDt);
+        assert(evaluator.getAverageAbsSteeringDelta() == 0.0f &&
+               "reset must zero the internal previous-steering-command baseline, not just the visible penalty"); // 38
     }
 
     TraceLog(LOG_INFO, "Fitness evaluator verification: all deterministic checks passed");
@@ -751,7 +1099,7 @@ void verifyEarlyTermination(const simulation::Track& track)
             p += 0.02f; // >> kProgressImprovementEpsilon (0.001) every step
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, 1.0f);
+            evaluator.update(car, progress, 0.0f, 1.0f);
             assert(!evaluator.isEvaluationFinished() &&
                    "a car making meaningful forward progress every second must never hit the no-progress timeout"); // 1
         }
@@ -768,12 +1116,12 @@ void verifyEarlyTermination(const simulation::Track& track)
         progress.reset(car);
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
-        evaluator.update(car, progress, kSimulationDt); // registers the starting bestProgress (0.2)
+        evaluator.update(car, progress, 0.0f, kSimulationDt); // registers the starting bestProgress (0.2)
 
         for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i)
         {
             progress.update(car); // car does not move -- position held fixed
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
@@ -792,14 +1140,14 @@ void verifyEarlyTermination(const simulation::Track& track)
         progress.reset(car);
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
-        evaluator.update(car, progress, kSimulationDt); // registers the starting bestProgress (0.3)
+        evaluator.update(car, progress, 0.0f, kSimulationDt); // registers the starting bestProgress (0.3)
 
         for (int i = 0; i < 120 && !evaluator.isEvaluationFinished(); ++i) // 2s of backward/revisited movement
         {
             const float p = (i % 2 == 0) ? 0.1f : 0.25f; // both < 0.3 -- backward, or already-covered ground
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(!evaluator.isEvaluationFinished() &&
                "2 seconds of backward/revisited movement must not have reset the no-progress timer"); // 3
@@ -807,7 +1155,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         for (int i = 0; i < 400 && !evaluator.isEvaluationFinished(); ++i) // finish it out from here, no more movement
         {
             progress.update(car);
-            evaluator.update(car, progress, kSimulationDt);
+            evaluator.update(car, progress, 0.0f, kSimulationDt);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::NoProgress &&
@@ -834,7 +1182,7 @@ void verifyEarlyTermination(const simulation::Track& track)
             p += 0.002f; // meaningful (> kProgressImprovementEpsilon) but far too slow to reach 0.04 laps by 5s
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, 1.0f);
+            evaluator.update(car, progress, 0.0f, 1.0f);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::InsufficientInitialProgress &&
@@ -860,7 +1208,7 @@ void verifyEarlyTermination(const simulation::Track& track)
             p += 0.03f; // reaches 0.09 laps by 3s -- comfortably above kMinimumInitialProgress (0.04) before 5s
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, 1.0f);
+            evaluator.update(car, progress, 0.0f, 1.0f);
             assert(!evaluator.isEvaluationFinished() &&
                    "a normally progressing car must not be terminated by either early-termination rule"); // 5
         }
@@ -884,7 +1232,7 @@ void verifyEarlyTermination(const simulation::Track& track)
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
             progress.update(car);
-            evaluator.update(car, progress, 1.0f);
+            evaluator.update(car, progress, 0.0f, 1.0f);
         }
         assert(evaluator.isEvaluationFinished() &&
                evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
@@ -908,7 +1256,7 @@ void verifyEarlyTermination(const simulation::Track& track)
             for (int i = 0; i < 400 && !localEvaluator.isEvaluationFinished(); ++i)
             {
                 localProgress.update(localCar);
-                localEvaluator.update(localCar, localProgress, kSimulationDt);
+                localEvaluator.update(localCar, localProgress, 0.0f, kSimulationDt);
             }
             return localEvaluator.getFinishReason();
         };

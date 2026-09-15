@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -162,6 +163,22 @@ public:
     static float adjustCompatibilityThreshold(float currentThreshold, std::size_t speciesCount,
                                                const SpeciationConfig& config);
 
+    // Optional pure observer, invoked once per update() call -- after every
+    // individual's update() has run for this step, but BEFORE a
+    // just-finished generation's reproduce() call replaces m_individuals.
+    // This is the only point outside Population itself where a generation's
+    // final Car/TrackProgress/FitnessEvaluator state (and
+    // getBestIndividualIndex()) is both fully computed for this step and
+    // not yet torn down -- see telemetry::ChampionTelemetryRecorder, the one
+    // consumer, for why that moment matters. generationJustFinished mirrors
+    // this call's own isGenerationFinished() result (true exactly on the
+    // step reproduce() is about to run). Receives a const Population&, so
+    // it cannot mutate any state; setting/clearing it, or leaving it unset
+    // (the default, a no-op empty std::function), never changes update()'s
+    // own behavior, timing, or RNG usage in any way.
+    using PerStepObserver = std::function<void(const Population&, bool generationJustFinished)>;
+    void setPerStepObserver(PerStepObserver observer) { m_perStepObserver = std::move(observer); }
+
 private:
     bool isGenerationFinished() const;
 
@@ -201,6 +218,8 @@ private:
     training::GenerationMetrics m_lastGenerationMetrics;
 
     std::vector<Individual> m_individuals;
+
+    PerStepObserver m_perStepObserver;
 };
 
 } // namespace ai::neat

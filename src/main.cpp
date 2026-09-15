@@ -19,6 +19,7 @@
 
 #include "AppConfig.h"
 #include "input/ManualInput.h"
+#include "telemetry/ChampionTelemetry.h"
 #include "telemetry/HairpinTelemetry.h"
 #include "ui/DebugRenderer.h"
 #include "ui/HudRenderer.h"
@@ -125,6 +126,23 @@ int main()
     // or GenerationMetrics), disabled in one place via
     // telemetry::kHairpinTelemetryEnabled. See HairpinTelemetry.h.
     telemetry::HairpinTelemetryRecorder hairpinTelemetry(track, "results", kSimulationDt);
+
+    // Whole-run champion telemetry -- entirely separate from hairpinTelemetry
+    // above (different instrument, different question: "how does the WHOLE
+    // evaluation of the best car look", not "what happens right before one
+    // car fails in the first hairpin"). Disabled in one place via
+    // telemetry::kChampionTelemetryEnabled; which generations get captured
+    // is controlled by telemetry::kChampionTelemetryGenerations. Registered
+    // as Population's per-step observer rather than called after
+    // population.update() (contrast hairpinTelemetry.update() below) because
+    // it needs to see a just-finished generation's individuals BEFORE
+    // reproduce() (called from inside that same population.update()) replaces
+    // them -- see ChampionTelemetry.h's file comment and
+    // Population::setPerStepObserver()'s comment for exactly why.
+    telemetry::ChampionTelemetryRecorder championTelemetry("results", kSimulationDt);
+    population.setPerStepObserver(
+        [&championTelemetry](const ai::neat::Population& pop, bool generationJustFinished)
+        { championTelemetry.onPopulationStep(pop, generationJustFinished); });
 
     // A standalone manual-control car, entirely independent of `population`
     // -- lets the vehicle handling be driven and felt directly (TAB to

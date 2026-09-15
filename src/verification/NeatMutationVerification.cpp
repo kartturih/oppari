@@ -53,8 +53,8 @@ namespace verification
 namespace genome_mutator_verify
 {
 
-// 9 Input + 1 Bias + 3 Output nodes plus four connections with known
-// weights, one disabled (so mutation of disabled genes can be checked).
+// kInputCount Input + 1 Bias + 3 Output nodes plus four connections with
+// known weights, one disabled (so mutation of disabled genes can be checked).
 // Output 102 (brake) is left unconnected -- these tests only need a
 // phenotype-buildable genome, not a realistic driving genome.
 ai::neat::Genome makeTestGenome()
@@ -69,14 +69,14 @@ ai::neat::Genome makeTestGenome()
     {
         genome.addNode(NodeGene{i, NodeType::Input});
     }
-    genome.addNode(NodeGene{9, NodeType::Bias});
+    genome.addNode(NodeGene{ai::NeuralNetwork::kInputCount, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
     genome.addNode(NodeGene{102, NodeType::Output});
 
     genome.addConnection(ConnectionGene{0, 100, 0.5f, true, 0});
     genome.addConnection(ConnectionGene{1, 100, -0.3f, true, 1});
-    genome.addConnection(ConnectionGene{9, 101, 0.2f, false, 2}); // disabled on purpose
+    genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 0.2f, false, 2}); // disabled on purpose
     genome.addConnection(ConnectionGene{2, 101, 0.9f, true, 3});
     return genome;
 }
@@ -396,7 +396,7 @@ void verifyGenomeMutator()
     // 7: a disabled connection's weight is also eligible for mutation.
     {
         Genome genome = makeTestGenome();
-        const ConnectionGene* disabledBefore = genome.findConnection(9, 101);
+        const ConnectionGene* disabledBefore = genome.findConnection(ai::NeuralNetwork::kInputCount, 101);
         assert(disabledBefore != nullptr && !disabledBefore->isEnabled() &&
                "test genome must contain a disabled connection");
         const float disabledWeightBefore = disabledBefore->getWeight();
@@ -406,7 +406,7 @@ void verifyGenomeMutator()
         GenomeMutator mutator(11u);
         mutator.mutateWeights(genome, config);
 
-        const ConnectionGene* disabledAfter = genome.findConnection(9, 101);
+        const ConnectionGene* disabledAfter = genome.findConnection(ai::NeuralNetwork::kInputCount, 101);
         assert(disabledAfter->getWeight() != disabledWeightBefore &&
                "a disabled connection's weight must still be eligible for mutation");
         assert(!disabledAfter->isEnabled() && "mutating weights must not change the enabled state");
@@ -1091,7 +1091,7 @@ namespace add_node_verify
 
 // Minimal genome: one Input, one Output, one enabled connection. Used for
 // the plain structural-invariant checks that don't need a full
-// Observation-shaped (9 Input + 1 Bias + 3 Output) genome.
+// Observation-shaped (kInputCount Input + 1 Bias + 3 Output) genome.
 ai::neat::Genome makeSimpleSplitGenome()
 {
     using ai::neat::ConnectionGene;
@@ -1325,7 +1325,7 @@ void verifyAddNodeMutation()
             const bool result = mutator.mutateAddNode(genome, tracker, config);
             assert(result && "an eligible connection must always be found in makeTestGenome()");
 
-            const ConnectionGene* preExistingDisabled = genome.findConnection(9, 101);
+            const ConnectionGene* preExistingDisabled = genome.findConnection(ai::NeuralNetwork::kInputCount, 101);
             assert(preExistingDisabled != nullptr && !preExistingDisabled->isEnabled() &&
                    preExistingDisabled->getWeight() == 0.2f &&
                    "a connection that was already disabled must never be selected or altered");

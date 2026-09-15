@@ -1,6 +1,7 @@
 #include "ai/Observation.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "raylib.h"
 
@@ -10,12 +11,31 @@ namespace ai
 namespace
 {
 
-static_assert(simulation::Car::kSensorCount + 4 == kObservationSize,
-              "Observation expects one slot per sensor plus four vehicle-state slots");
+static_assert(simulation::Car::kSensorCount + 7 == kObservationSize,
+              "Observation expects one slot per sensor plus seven vehicle-state slots");
+
+// Wraps a radian angle into [-pi, pi]. Same formula as
+// telemetry::HairpinTelemetry's/telemetry::ChampionTelemetry's own local
+// wrapToPi() helpers -- kept as an independent copy here (small, TU-local
+// utility, same precedent as those two) rather than a shared header, but
+// deliberately identical in definition so the raw headingError this
+// observation normalizes matches what telemetry already logs.
+float wrapToPi(float angle)
+{
+    while (angle > PI)
+    {
+        angle -= 2.0f * PI;
+    }
+    while (angle < -PI)
+    {
+        angle += 2.0f * PI;
+    }
+    return angle;
+}
 
 } // namespace
 
-Observation buildObservation(const simulation::Car& car)
+Observation buildObservation(const simulation::Car& car, const simulation::TrackProgress& progress)
 {
     Observation observation;
 
@@ -31,6 +51,25 @@ Observation buildObservation(const simulation::Car& car)
     observation.values[6] = std::clamp(car.getForwardVelocity() / maxSpeed, -1.0f, 1.0f);
     observation.values[7] = std::clamp(car.getLateralVelocity() / maxSpeed, -1.0f, 1.0f);
     observation.values[8] = std::clamp(car.getSlipAngle() / static_cast<float>(PI), -1.0f, 1.0f);
+
+    observation.values[kActualSteerObservationIndex] =
+        std::clamp(car.getCurrentSteerAngle() / car.getParams().maxSteerAngle, -1.0f, 1.0f);
+    observation.values[kYawRateObservationIndex] =
+        std::clamp(car.getYawRate() / kYawRateNormalizationScale, -1.0f, 1.0f);
+
+    // Heading error: car heading minus the local track tangent direction,
+    // wrapped to [-pi,pi] then normalized by pi -- same formula (and same
+    // zero-tangent fallback, only possible before the very first
+    // reset()/update() has ever run on progress) as
+    // telemetry::HairpinTelemetry's/telemetry::ChampionTelemetry's own
+    // diagnostic headingError field, so this input and that telemetry column
+    // agree exactly. Orientation only -- never lateral offset, never a
+    // target position (see Observation.h's class comment).
+    const Vector2 trackTangent = progress.getTrackTangent();
+    const bool haveTrackTangent = (trackTangent.x != 0.0f || trackTangent.y != 0.0f);
+    const float trackDirectionAngle = haveTrackTangent ? std::atan2(trackTangent.y, trackTangent.x) : car.getHeading();
+    const float headingError = wrapToPi(car.getHeading() - trackDirectionAngle);
+    observation.values[kHeadingErrorObservationIndex] = std::clamp(headingError / static_cast<float>(PI), -1.0f, 1.0f);
 
     return observation;
 }

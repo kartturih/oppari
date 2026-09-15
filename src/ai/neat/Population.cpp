@@ -234,7 +234,16 @@ void Population::update(float deltaTime)
         individual.update(deltaTime);
     }
 
-    if (isGenerationFinished())
+    // Computed once and reused below -- identical to the previous single
+    // inline call, just hoisted so an attached observer can see the same
+    // answer reproduce() is about to act on.
+    const bool generationFinished = isGenerationFinished();
+    if (m_perStepObserver)
+    {
+        m_perStepObserver(*this, generationFinished);
+    }
+
+    if (generationFinished)
     {
         reproduce();
     }

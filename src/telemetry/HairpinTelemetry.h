@@ -125,11 +125,35 @@ struct HairpinTelemetrySample
     float frontGripUtilization = 0.0f;
     float rearGripUtilization = 0.0f;
 
-    // Diagnostic-only track-relative heading (never fed to the network, never
-    // used for control/fitness/termination) -- see the class comment.
+    // Track-relative heading, computed independently of (but with the same
+    // formula as) Observation's own normalized heading-error input -- see
+    // obsHeadingErrorNorm below, which reads the network's actual input
+    // value for direct comparison against this raw radian pair. wrongWay
+    // itself is still diagnostic-only (never used for control/fitness/
+    // termination) -- see the class comment.
     float trackDirectionAngle = 0.0f; // radians, world frame
     float headingError = 0.0f;        // radians, wrapped to [-pi, pi], heading - trackDirectionAngle
     bool wrongWay = false;            // |headingError| > kWrongWayHeadingErrorThresholdRad
+
+    // Actual (rate-limited) front-wheel steering angle, radians -- may
+    // differ from steeringCmd*CarParams::maxSteerAngle while the physical
+    // wheel is still catching up to a just-changed command (see
+    // CarParams::maxSteerRateRadPerSec). Appended at the end so existing
+    // column indices/order are unaffected.
+    float actualSteerAngle = 0.0f;
+
+    // Normalized versions of the two Observation slots added alongside
+    // actualSteerAngle above (ai::kActualSteerObservationIndex/
+    // kYawRateObservationIndex) -- appended at the very end, same rationale
+    // as actualSteerAngle.
+    float obsActualSteerNorm = 0.0f;
+    float obsYawRateNorm = 0.0f;
+
+    // Observation's own normalized heading-error input (ai::kHeadingErrorObservationIndex)
+    // -- the exact value the network receives, for direct comparison against
+    // the raw headingError/trackDirectionAngle pair above. Appended at the
+    // end, same rationale as obsActualSteerNorm/obsYawRateNorm.
+    float obsHeadingErrorNorm = 0.0f;
 };
 
 // abs(headingError) beyond this is flagged wrongWay -- diagnostic only (see

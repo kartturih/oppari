@@ -53,9 +53,10 @@ namespace verification
 namespace genome_crossover_verify
 {
 
-// 9 Input + 1 Bias + 3 Output, no connections -- the minimal interface
-// every phenotype-buildable genome in this suite needs; both parents share
-// it so the child inherits it regardless of which connections it gets.
+// kInputCount Input + 1 Bias + 3 Output, no connections -- the minimal
+// interface every phenotype-buildable genome in this suite needs; both
+// parents share it so the child inherits it regardless of which connections
+// it gets.
 ai::neat::Genome makeInterfaceGenome()
 {
     using ai::neat::Genome;
@@ -67,7 +68,7 @@ ai::neat::Genome makeInterfaceGenome()
     {
         genome.addNode(NodeGene{i, NodeType::Input});
     }
-    genome.addNode(NodeGene{9, NodeType::Bias});
+    genome.addNode(NodeGene{ai::NeuralNetwork::kInputCount, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
     genome.addNode(NodeGene{102, NodeType::Output});
@@ -164,7 +165,8 @@ void verifyGenomeCrossover()
 
         const Genome child = crossover.crossover(a, 1.0f, b, 1.0f, config);
         assert(child.connections().empty() && "no connections in either parent must yield no connections in the child");
-        assert(child.nodes().size() == 13 && "the child must contain exactly the 9 Input + 1 Bias + 3 Output nodes");
+        assert(child.nodes().size() == static_cast<std::size_t>(ai::NeuralNetwork::kInputCount) + 4 &&
+               "the child must contain exactly the kInputCount Input + 1 Bias + 3 Output nodes");
 
         child.validate();
         ai::NeuralNetwork net = ai::neat::buildPhenotype(child);
@@ -432,7 +434,8 @@ void verifyGenomeCrossover()
             assert(child.hasNode(i) && child.findNode(i)->getType() == NodeType::Input &&
                    "every Input node must be preserved"); // 20
         }
-        assert(child.hasNode(9) && child.findNode(9)->getType() == NodeType::Bias &&
+        assert(child.hasNode(ai::NeuralNetwork::kInputCount) &&
+               child.findNode(ai::NeuralNetwork::kInputCount)->getType() == NodeType::Bias &&
                "the Bias node must be preserved"); // 21
         assert(child.hasNode(100) && child.findNode(100)->getType() == NodeType::Output && child.hasNode(101) &&
                child.findNode(101)->getType() == NodeType::Output && child.hasNode(102) &&
@@ -532,7 +535,7 @@ void verifyGenomeCrossover()
     // parent's own storage order.
     {
         Genome parentA;
-        parentA.addNode(NodeGene{9, NodeType::Bias});
+        parentA.addNode(NodeGene{ai::NeuralNetwork::kInputCount, NodeType::Bias});
         parentA.addNode(NodeGene{102, NodeType::Output}); // GenomeCrossover::crossover() itself
                                                             // buildPhenotype()-validates its child
         parentA.addNode(NodeGene{101, NodeType::Output});
@@ -823,14 +826,14 @@ void verifyGenomeCrossoverCycleSafety()
         Genome parentA = makeInterfaceGenome();
         parentA.addNode(NodeGene{103, NodeType::Hidden});
         parentA.addNode(NodeGene{104, NodeType::Hidden});
-        parentA.addConnection(ConnectionGene{9, 100, 0.42f, true, 0});     // ordinary matching gene, both enabled
+        parentA.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 0.42f, true, 0}); // ordinary matching gene, both enabled
         parentA.addConnection(ConnectionGene{103, 104, 0.5f, true, 10});  // enabled in A only
         parentA.addConnection(ConnectionGene{104, 103, 0.5f, false, 11}); // disabled in A
 
         Genome parentB = makeInterfaceGenome();
         parentB.addNode(NodeGene{103, NodeType::Hidden});
         parentB.addNode(NodeGene{104, NodeType::Hidden});
-        parentB.addConnection(ConnectionGene{9, 100, 0.42f, true, 0});    // same ordinary matching gene
+        parentB.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 0.42f, true, 0}); // same ordinary matching gene
         parentB.addConnection(ConnectionGene{103, 104, 0.7f, false, 10}); // disabled in B
         parentB.addConnection(ConnectionGene{104, 103, 0.7f, true, 11}); // enabled in B only
 
@@ -891,7 +894,7 @@ void verifyGenomeCrossoverCycleSafety()
 
         // 7 (continued): the unrelated, always-enabled-in-both matching
         // gene must be completely unaffected.
-        const ConnectionGene* unrelated = child.findConnection(9, 100);
+        const ConnectionGene* unrelated = child.findConnection(ai::NeuralNetwork::kInputCount, 100);
         assert(unrelated != nullptr && unrelated->isEnabled() &&
                "an ordinary matching gene unrelated to the cycle must be inherited normally, untouched");
     }

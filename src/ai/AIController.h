@@ -3,6 +3,7 @@
 #include "ai/NeuralNetwork.h"
 #include "ai/Observation.h"
 #include "simulation/Car.h"
+#include "simulation/TrackProgress.h"
 
 namespace ai
 {
@@ -10,16 +11,31 @@ namespace ai
 // Closes the control loop: Car -> Observation -> NeuralNetwork -> CarInput.
 // Owns its NeuralNetwork; knows nothing about NEAT genetics. Pure runtime
 // adapter -- no mutation/crossover/training.
+//
+// No command-level steering smoothing lives here (an earlier experiment
+// added a downstream slew-rate limiter on CarInput.steering; removed after
+// it measurably hurt every driving metric in a full training comparison --
+// see the control-policy investigation this was built for). Adding uniform
+// latency to every steering change, needed or not, forced evolution to slow
+// the whole car down to tolerate its own now-sluggish steering, rather than
+// making the network itself learn smoother commands. Steering-command
+// smoothness is instead shaped through FitnessEvaluator's steering-change
+// penalty (see FitnessEvaluator.h) -- an evolutionary-pressure fix, not a
+// physical constraint, so a genuinely necessary single fast reaction is
+// still free, and only sustained oscillation actually costs fitness.
 class AIController
 {
 public:
     explicit AIController(NeuralNetwork network);
 
-    // Builds an Observation from car, evaluates the network, maps outputs to
-    // a CarInput. If the car is dead, returns a neutral CarInput without
+    // Builds an Observation from car/progress, evaluates the network, maps
+    // outputs to a CarInput. progress supplies only the local track
+    // tangent/direction (for the heading-error observation, see
+    // Observation.h) -- never a position/waypoint/target the controller
+    // could follow. If the car is dead, returns a neutral CarInput without
     // evaluating; getRawThrottleOutput()/getRawBrakeOutput()/
     // getLastObservation() keep reporting the last live evaluation.
-    simulation::CarInput update(const simulation::Car& car);
+    simulation::CarInput update(const simulation::Car& car, const simulation::TrackProgress& progress);
 
     // Raw network outputs from the most recent live update(), before mapping.
     float getRawSteeringOutput() const { return m_rawSteering; }

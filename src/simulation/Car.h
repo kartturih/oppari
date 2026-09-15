@@ -120,6 +120,23 @@ struct CarParams
 
     float maxSteerAngle = 0.42f; // radians at steering = +-1 (~28.6 deg)
 
+    // Maximum angular RATE (rad/s) the ACTUAL front-wheel steering angle can
+    // change, independent of how fast the steering COMMAND itself changes --
+    // models a finite-response steering system instead of the wheel angle
+    // snapping straight to steering*maxSteerAngle every single simulation
+    // step (see Car::m_currentSteerAngle's comment for the mechanics this
+    // drives). Chosen (see the steering-chatter investigation this was
+    // built for) so center-to-full-lock takes ~0.14s (~8-9 steps at
+    // kSimulationDt=1/60s) and full-lock-to-full-opposite-lock takes ~0.28s
+    // (~17 steps): fast enough to still carve the track's tightest hairpin
+    // well within one corner's traversal time, but categorically ruling out
+    // the single-STEP full -1<->+1 flip an un-rate-limited wheel angle
+    // allowed. The steering COMMAND (CarInput::steering, and everything
+    // upstream of it in AIController/NeuralNetwork) is completely unchanged
+    // by this -- it can still request +-1 instantly; only how fast the
+    // physical wheel can follow that request is limited here.
+    float maxSteerRateRadPerSec = 5.0f;
+
     // Per-axle lateral tire force curve, replacing the old plain
     // Fy = -axleMaxForce * tanh((corneringStiffness/axleMaxForce)*slipAngle)
     // (which only ever approached axleMaxForce asymptotically and NEVER
@@ -326,6 +343,10 @@ struct TireDebugInfo
     float throttleInput = 0.0f; // [0, 1]
     float brakeInput = 0.0f;    // [0, 1]
 
+    // The ACTUAL (rate-limited) front-wheel angle -- may lag behind
+    // steeringInput*CarParams::maxSteerAngle while the physical wheel is
+    // still catching up to a just-changed command; see
+    // CarParams::maxSteerRateRadPerSec and Car::m_currentSteerAngle.
     float steeringAngle = 0.0f;  // radians, front wheel angle
     float yawRate = 0.0f;        // rad/s
     float frontSlipAngle = 0.0f; // radians, wheel frame (includes steering) -- TRUE (instantaneous), not relaxed
@@ -446,6 +467,12 @@ public:
     float getForwardVelocity() const;
     float getLateralVelocity() const; // positive = rightward
     float getSlipAngle() const;       // heading vs. velocity direction, radians
+    float getYawRate() const { return m_angularVelocity; } // rad/s, body angular velocity
+
+    // The ACTUAL (rate-limited) front-wheel steering angle, radians -- see
+    // m_currentSteerAngle's comment. Distinct from any CarInput::steering
+    // command, which can change instantly; this lags behind it.
+    float getCurrentSteerAngle() const { return m_currentSteerAngle; }
 
     const TireDebugInfo& getTireDebugInfo() const { return m_tireDebug; }
 
@@ -465,6 +492,7 @@ private:
     Vector2 m_position = {0.0f, 0.0f};
     Vector2 m_velocity = {0.0f, 0.0f};
     float m_heading = 0.0f;
+    float m_angularVelocity = 0.0f; // rad/s, mirrors m_velocity's role for yaw rate
     bool m_alive = true;
 
     std::array<SensorReading, kSensorCount> m_sensors{};
@@ -478,6 +506,18 @@ private:
     // so a fresh spawn never inherits leftover deflection from a prior run.
     float m_frontSlipAngleRelaxed = 0.0f;
     float m_rearSlipAngleRelaxed = 0.0f;
+
+    // Persistent ACTUAL front-wheel steering angle, radians -- moves toward
+    // steering*CarParams::maxSteerAngle at up to maxSteerRateRadPerSec each
+    // update() (see the comment in update() itself), instead of snapping
+    // straight to the commanded target every step. Zeroed on reset(), same
+    // as m_front/rearSlipAngleRelaxed above, so a fresh spawn never inherits
+    // a stale wheel angle from a prior run. Deliberately left out of the
+    // move constructor's initializer list, matching the existing precedent
+    // set by m_front/rearSlipAngleRelaxed above (both moves only ever
+    // happen before physics has run, since Population reserves its
+    // Individuals vector up front -- see Population's constructor).
+    float m_currentSteerAngle = 0.0f;
 };
 
 } // namespace simulation

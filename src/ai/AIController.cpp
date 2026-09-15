@@ -46,14 +46,14 @@ AIController::AIController(NeuralNetwork network)
 {
 }
 
-simulation::CarInput AIController::update(const simulation::Car& car)
+simulation::CarInput AIController::update(const simulation::Car& car, const simulation::TrackProgress& progress)
 {
     if (!car.isAlive())
     {
         return simulation::CarInput{};
     }
 
-    m_lastObservation = buildObservation(car);
+    m_lastObservation = buildObservation(car, progress);
 
     const std::array<float, NeuralNetwork::kOutputCount> outputs = m_network.evaluate(m_lastObservation);
     m_rawSteering = outputs[kSteeringOutputIndex];

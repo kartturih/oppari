@@ -187,6 +187,7 @@ Car::Car(Car&& other) noexcept
     , m_position(other.m_position)
     , m_velocity(other.m_velocity)
     , m_heading(other.m_heading)
+    , m_angularVelocity(other.m_angularVelocity)
     , m_alive(other.m_alive)
     , m_sensors(other.m_sensors)
     , m_tireDebug(other.m_tireDebug)
@@ -204,10 +205,12 @@ void Car::reset(Vector2 spawnPosition, float spawnHeading)
     m_position = spawnPosition;
     m_velocity = {0.0f, 0.0f};
     m_heading = spawnHeading;
+    m_angularVelocity = 0.0f;
     m_alive = true;
     m_tireDebug = TireDebugInfo{};
     m_frontSlipAngleRelaxed = 0.0f;
     m_rearSlipAngleRelaxed = 0.0f;
+    m_currentSteerAngle = 0.0f;
     updateSensors();
 }
 
@@ -221,7 +224,26 @@ void Car::update(const CarInput& input, float dt)
     const float throttle = std::clamp(input.throttle, 0.0f, 1.0f);
     const float steering = std::clamp(input.steering, -1.0f, 1.0f);
     const float brake = std::clamp(input.brake, 0.0f, 1.0f);
-    const float steerAngle = steering * m_params.maxSteerAngle;
+
+    // Steering RATE limit: the ACTUAL front-wheel angle moves toward the
+    // commanded target at up to maxSteerRateRadPerSec, modeling a finite-
+    // response steering system rather than a wheel that can snap between
+    // any two angles within a single simulation step (see
+    // CarParams::maxSteerRateRadPerSec's comment for why/how this value was
+    // chosen). The steering COMMAND itself (`steering` above, and
+    // everything upstream of it -- CarInput, AIController, the network
+    // output) is completely untouched by this; only m_currentSteerAngle,
+    // the physical wheel's own persistent state, is rate-limited. Computed
+    // once per update() (not per force-substep below) since it's advancing
+    // over the full dt, not a per-substep quantity -- same granularity the
+    // old direct assignment already had (steerAngle was likewise computed
+    // once and reused across every substep).
+    const float targetSteerAngle = steering * m_params.maxSteerAngle;
+    const float maxSteerDelta = m_params.maxSteerRateRadPerSec * dt;
+    const float steerDelta = std::clamp(targetSteerAngle - m_currentSteerAngle, -maxSteerDelta, maxSteerDelta);
+    m_currentSteerAngle += steerDelta;
+    const float steerAngle = m_currentSteerAngle;
+
     const float cosSteer = std::cos(steerAngle);
     const float sinSteer = std::sin(steerAngle);
 
@@ -470,6 +492,7 @@ void Car::update(const CarInput& input, float dt)
         m_position = toRaylib(b2Body_GetPosition(m_bodyId));
         m_heading = b2Rot_GetAngle(b2Body_GetRotation(m_bodyId));
         m_velocity = toRaylib(b2Body_GetLinearVelocity(m_bodyId));
+        m_angularVelocity = b2Body_GetAngularVelocity(m_bodyId);
 
         applyCollision();
         if (!m_alive)
@@ -513,6 +536,7 @@ void Car::applyCollision()
         {
             m_alive = false;
             m_velocity = {0.0f, 0.0f};
+            m_angularVelocity = 0.0f;
             b2Body_SetLinearVelocity(m_bodyId, b2Vec2{0.0f, 0.0f});
             b2Body_SetAngularVelocity(m_bodyId, 0.0f);
             return;

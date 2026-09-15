@@ -67,6 +67,7 @@ void TrackProgress::reset(const Car& car)
     m_lastProjectionUsedRecovery = false;
 
     const Vector2 tangent = tangentAtSegment(projection.segmentIndex);
+    m_trackTangent = tangent;
     m_lastProjectionDebugInfo.point = projection.point;
     m_lastProjectionDebugInfo.tangent = tangent;
     m_lastProjectionDebugInfo.previousTangent = tangent;
@@ -148,8 +149,9 @@ void TrackProgress::update(const Car& car)
     const TrackProjection projection = projectWithLocalTracking(car.getPosition());
     const float newLapPosition = projection.distanceAlongTrack / m_track.getTotalLength();
 
+    m_trackTangent = tangentAtSegment(projection.segmentIndex);
     m_lastProjectionDebugInfo.point = projection.point;
-    m_lastProjectionDebugInfo.tangent = tangentAtSegment(projection.segmentIndex);
+    m_lastProjectionDebugInfo.tangent = m_trackTangent;
     m_lastProjectionDebugInfo.previousTangent = previousTangent;
     m_lastProjectionDebugInfo.previousIndex = previousIndex;
     m_lastProjectionDebugInfo.currentIndex = m_previousSegmentIndex;

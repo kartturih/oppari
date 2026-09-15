@@ -53,12 +53,13 @@ namespace verification
 namespace nn_verify
 {
 
-// Builds the 9 Input + 1 Bias + 3 Output nodes every test network needs.
-// Input node IDs are 0..8 (Observation slot order), bias is 9, steering
-// output is 100 (first Output -> output index 0), throttle output is 101
-// (second Output -> output index 1), brake output is 102 (third Output ->
-// output index 2). Deliberately not contiguous/sorted with any hidden node
-// IDs used below, so tests can prove evaluation doesn't depend on ID ordering.
+// Builds the kInputCount Input + 1 Bias + 3 Output nodes every test network
+// needs. Input node IDs are 0..(kInputCount-1) (Observation slot order),
+// bias is kInputCount, steering output is 100 (first Output -> output index
+// 0), throttle output is 101 (second Output -> output index 1), brake
+// output is 102 (third Output -> output index 2). Deliberately not
+// contiguous/sorted with any hidden node IDs used below, so tests can prove
+// evaluation doesn't depend on ID ordering.
 std::vector<ai::Node> makeBaseNodes()
 {
     std::vector<ai::Node> nodes;
@@ -66,7 +67,7 @@ std::vector<ai::Node> makeBaseNodes()
     {
         nodes.push_back(ai::Node{i, ai::NodeType::Input});
     }
-    nodes.push_back(ai::Node{9, ai::NodeType::Bias});
+    nodes.push_back(ai::Node{ai::NeuralNetwork::kInputCount, ai::NodeType::Bias});
     nodes.push_back(ai::Node{100, ai::NodeType::Output}); // steering
     nodes.push_back(ai::Node{101, ai::NodeType::Output}); // throttle
     nodes.push_back(ai::Node{102, ai::NodeType::Output}); // brake
@@ -126,7 +127,7 @@ void verifyNeuralNetwork()
 
     // 3: Bias -> Output affects output correctly (bias is always 1.0).
     {
-        ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{9, 100, 0.7f, true}});
+        ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{ai::NeuralNetwork::kInputCount, 100, 0.7f, true}});
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
         assert(std::fabs(out[0] - std::tanh(0.7f)) < kEps && "Bias->Output must equal tanh(1.0 * weight)");
     }
@@ -252,7 +253,7 @@ void verifyNeuralNetwork()
     // 14: a connection targeting Bias is rejected.
     {
         assert(throwsInvalidArgument([]() {
-            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, 9, 0.1f, true}});
+            ai::NeuralNetwork net(makeBaseNodes(), {ai::Connection{0, ai::NeuralNetwork::kInputCount, 0.1f, true}});
         }) && "a connection targeting the Bias node must be rejected");
     }
 
@@ -274,7 +275,7 @@ void verifyNeuralNetwork()
     {
         assert(throwsInvalidArgument([]() {
             std::vector<ai::Node> nodes = makeBaseNodes();
-            nodes.erase(nodes.begin()); // drops one Input, leaving 8
+            nodes.erase(nodes.begin()); // drops one Input, leaving kInputCount-1
             ai::NeuralNetwork net(nodes, {});
         }) && "fewer than kInputCount Input nodes must be rejected");
 
@@ -311,13 +312,14 @@ void verifyNeuralNetwork()
 namespace phenotype_verify
 {
 
-// 9 Inputs (0-8) + Bias (9) + 3 Outputs (100 = steering, 101 = throttle,
-// 102 = brake), added out of ID order -- proves buildPhenotype()'s slot
-// ordering depends on node ID, never insertion order.
+// kInputCount Inputs (0..kInputCount-1) + Bias (kInputCount) + 3 Outputs
+// (100 = steering, 101 = throttle, 102 = brake), added out of ID order --
+// proves buildPhenotype()'s slot ordering depends on node ID, never
+// insertion order.
 ai::neat::Genome makeBaseGenome()
 {
     ai::neat::Genome genome;
-    genome.addNode(ai::neat::NodeGene{9, ai::neat::NodeType::Bias});
+    genome.addNode(ai::neat::NodeGene{ai::NeuralNetwork::kInputCount, ai::neat::NodeType::Bias});
     genome.addNode(ai::neat::NodeGene{102, ai::neat::NodeType::Output});
     genome.addNode(ai::neat::NodeGene{101, ai::neat::NodeType::Output});
     genome.addNode(ai::neat::NodeGene{100, ai::neat::NodeType::Output});
@@ -366,6 +368,38 @@ void verifyPhenotypeBuilder()
     using ai::neat::NodeGene;
     using ai::neat::NodeType;
     constexpr float kEps = 1e-4f;
+
+    // 0: the phenotype builder accepts the current 12-input topology (5
+    // sensors + speed + forward/lateral velocity + slip angle + actual
+    // steering angle + yaw rate + heading error) -- pinned explicitly so a
+    // future Observation resize is caught here, not just implicitly by
+    // every other check in this function happening to use kInputCount already.
+    {
+        static_assert(ai::NeuralNetwork::kInputCount == 12, "phenotype builder tests assume the current 12-input topology");
+        Genome genome = makeBaseGenome();
+        assert(static_cast<int>(genome.nodes().size()) == ai::NeuralNetwork::kInputCount + 4 &&
+               "the base genome must contain exactly kInputCount Input + 1 Bias + 3 Output nodes");
+
+        // The bias node moved to the next free ID (kInputCount, now 12) when
+        // the heading-error input claimed index 11 -- explicitly confirm it
+        // is genuinely typed Bias (not silently absent or mistyped) and that
+        // every Input node is typed Input, not Bias -- i.e. no ID is
+        // claimed by both roles at once.
+        const ai::neat::NodeGene* biasNode = genome.findNode(ai::NeuralNetwork::kInputCount);
+        assert(biasNode != nullptr && biasNode->getType() == ai::neat::NodeType::Bias &&
+               "the Bias node must exist at exactly kInputCount, one past the last Input ID, without colliding");
+        for (int i = 0; i < ai::NeuralNetwork::kInputCount; ++i)
+        {
+            const ai::neat::NodeGene* inputNode = genome.findNode(i);
+            assert(inputNode != nullptr && inputNode->getType() == ai::neat::NodeType::Input &&
+                   "every ID in [0, kInputCount) must be a genuine Input node, never the Bias node in disguise");
+        }
+
+        ai::NeuralNetwork net = buildPhenotype(genome); // must not throw -- would if IDs actually collided
+        const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f &&
+               "a fully disconnected 12-input phenotype must still evaluate to exactly 0");
+    }
 
     // 1 & 3: a minimal valid Genome builds successfully -- only possible if
     // NodeGene types were mapped to the matching runtime NodeType.
@@ -436,7 +470,7 @@ void verifyPhenotypeBuilder()
     // it is not one of the kInputCount external Observation slots.
     {
         Genome genome = makeBaseGenome();
-        genome.addConnection(ConnectionGene{9, 100, 0.7f, true, 0});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 0.7f, true, 0});
         ai::NeuralNetwork net = buildPhenotype(genome);
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
         assert(std::fabs(out[0] - std::tanh(0.7f)) < kEps &&
@@ -486,7 +520,7 @@ void verifyPhenotypeBuilder()
     // arithmetic, kept as its own case per the required verification list).
     {
         Genome genome = makeBaseGenome();
-        genome.addConnection(ConnectionGene{9, 100, 1.1f, true, 0});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 1.1f, true, 0});
         ai::NeuralNetwork net = buildPhenotype(genome);
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
         assert(std::fabs(out[0] - std::tanh(1.1f)) < kEps && "Bias->Output must equal tanh(1.0 * weight)");
@@ -578,7 +612,7 @@ void verifyPhenotypeBuilder()
         genome.addNode(NodeGene{50, NodeType::Hidden});
         genome.addConnection(ConnectionGene{0, 50, 0.6f, true, 0});
         genome.addConnection(ConnectionGene{50, 100, -0.9f, true, 1});
-        genome.addConnection(ConnectionGene{9, 101, 0.2f, true, 2});
+        genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 0.2f, true, 2});
 
         ai::NeuralNetwork netA = buildPhenotype(genome);
         ai::NeuralNetwork netB = buildPhenotype(genome);

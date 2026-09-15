@@ -126,13 +126,13 @@ Genome makeCrashGenome()
     {
         genome.addNode(NodeGene{i, NodeType::Input});
     }
-    genome.addNode(NodeGene{9, NodeType::Bias});
+    genome.addNode(NodeGene{ai::NeuralNetwork::kInputCount, NodeType::Bias});
     genome.addNode(NodeGene{100, NodeType::Output});
     genome.addNode(NodeGene{101, NodeType::Output});
     genome.addNode(NodeGene{102, NodeType::Output});
-    genome.addConnection(ConnectionGene{9, 100, 1.0f, true, 0});
-    genome.addConnection(ConnectionGene{9, 101, 5.0f, true, 1});
-    genome.addConnection(ConnectionGene{9, 102, -5.0f, true, 2});
+    genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 100, 1.0f, true, 0});
+    genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 101, 5.0f, true, 1});
+    genome.addConnection(ConnectionGene{ai::NeuralNetwork::kInputCount, 102, -5.0f, true, 2});
     return genome;
 }
 

@@ -113,7 +113,9 @@ add_executable(neat_car_simulation
     src/training/GenerationMetrics.cpp
     src/training/TrainingLogger.cpp
     src/telemetry/HairpinTelemetry.cpp
+    src/telemetry/ChampionTelemetry.cpp
     src/verification/HairpinTelemetryVerification.cpp
+    src/verification/ChampionTelemetryVerification.cpp
 )
 
 target_include_directories(neat_car_simulation PRIVATE src)

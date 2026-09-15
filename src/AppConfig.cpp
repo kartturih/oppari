@@ -62,7 +62,7 @@ ai::neat::Genome createDemonstrationGenome()
     constexpr NodeId kSensorCenter = 2;
     constexpr NodeId kSensorRight30 = 3;
     constexpr NodeId kSensorRight60 = 4;
-    constexpr NodeId kBiasId = 9;
+    constexpr NodeId kBiasId = ai::NeuralNetwork::kInputCount; // just past the last Input node ID
     constexpr NodeId kSteeringOutputId = 100; // lower Output ID -> output slot 0
     constexpr NodeId kThrottleOutputId = 101; // middle Output ID -> output slot 1
     constexpr NodeId kBrakeOutputId = 102;    // higher Output ID -> output slot 2

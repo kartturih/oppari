@@ -102,7 +102,9 @@ std::string hairpinCsvHeaderLine()
            "sensor_m60_px,sensor_m30_px,sensor_0_px,sensor_p30_px,sensor_p60_px,min_forward_wall_distance_px,"
            "front_slip_angle_true,rear_slip_angle_true,front_slip_angle_relaxed,rear_slip_angle_relaxed,"
            "front_grip_utilization,rear_grip_utilization,"
-           "track_direction_angle,heading_error,wrong_way";
+           "track_direction_angle,heading_error,wrong_way,"
+           "actual_steer_angle,"
+           "obs_actual_steer_norm,obs_yaw_rate_norm,obs_heading_error_norm";
 }
 
 std::string hairpinSampleToCsvRow(const HairpinTelemetrySample& s)
@@ -125,7 +127,9 @@ std::string hairpinSampleToCsvRow(const HairpinTelemetrySample& s)
         << formatFloat(s.frontSlipAngleTrue) << ',' << formatFloat(s.rearSlipAngleTrue) << ','
         << formatFloat(s.frontSlipAngleRelaxed) << ',' << formatFloat(s.rearSlipAngleRelaxed) << ','
         << formatFloat(s.frontGripUtilization) << ',' << formatFloat(s.rearGripUtilization) << ','
-        << formatFloat(s.trackDirectionAngle) << ',' << formatFloat(s.headingError) << ',' << (s.wrongWay ? 1 : 0);
+        << formatFloat(s.trackDirectionAngle) << ',' << formatFloat(s.headingError) << ',' << (s.wrongWay ? 1 : 0) << ','
+        << formatFloat(s.actualSteerAngle) << ',' << formatFloat(s.obsActualSteerNorm) << ','
+        << formatFloat(s.obsYawRateNorm) << ',' << formatFloat(s.obsHeadingErrorNorm);
     return row.str();
 }
 
@@ -251,6 +255,9 @@ void HairpinTelemetryRecorder::pushSample(const ai::neat::Individual& individual
     sample.obsForwardVelNorm = observation.values[6];
     sample.obsLateralVelNorm = observation.values[7];
     sample.obsSlipNorm = observation.values[8];
+    sample.obsActualSteerNorm = observation.values[ai::kActualSteerObservationIndex];
+    sample.obsYawRateNorm = observation.values[ai::kYawRateObservationIndex];
+    sample.obsHeadingErrorNorm = observation.values[ai::kHeadingErrorObservationIndex];
 
     sample.sensorM60Px = sensors[0].distance;
     sample.sensorM30Px = sensors[1].distance;
@@ -272,6 +279,8 @@ void HairpinTelemetryRecorder::pushSample(const ai::neat::Individual& individual
     sample.trackDirectionAngle = trackDirectionAngle;
     sample.headingError = wrapToPi(sample.heading - trackDirectionAngle);
     sample.wrongWay = std::fabs(sample.headingError) > kWrongWayHeadingErrorThresholdRad;
+
+    sample.actualSteerAngle = tire.steeringAngle;
 
     const std::size_t capacity = m_buffer.size();
     m_buffer[m_writePos] = sample;

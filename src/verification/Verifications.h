@@ -21,6 +21,7 @@ void verifyCar(const simulation::Track& track);
 void verifySensors(const simulation::Track& track);
 void verifyObservation(const simulation::Track& track);
 void verifyVehiclePhysics(const simulation::Track& track);
+void verifySteeringRateLimit(const simulation::Track& track);
 void verifyAIController(const simulation::Track& track);
 
 void verifyNeuralNetwork();
@@ -57,6 +58,7 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
 void verifyTrainingSpeedDeterminism(const simulation::Track& track);
 
 void verifyHairpinTelemetry(const simulation::Track& track);
+void verifyChampionTelemetry(const simulation::Track& track);
 
 // Cross-file test helpers: each is defined alongside its owning verify*()
 // function (see the .cpp comment where it's defined) but also consumed by

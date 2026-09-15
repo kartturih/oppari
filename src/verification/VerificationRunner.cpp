@@ -12,6 +12,7 @@ void runAll(const simulation::Track& track)
     verifySensors(track);
     verifyObservation(track);
     verifyVehiclePhysics(track);
+    verifySteeringRateLimit(track);
     verifyNeuralNetwork();
     verifyNeatGenes();
     verifyGenome();
@@ -38,6 +39,7 @@ void runAll(const simulation::Track& track)
     verifyGenerationMetricsPopulationIntegration(track);
     verifyTrainingSpeedDeterminism(track);
     verifyHairpinTelemetry(track);
+    verifyChampionTelemetry(track);
 }
 
 } // namespace verification
