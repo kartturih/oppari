@@ -28,13 +28,14 @@ void reportSuspiciousProjectionJump(std::size_t highlightedIndex, const simulati
 {
     const simulation::TrackProgress::ProjectionDebugInfo& info = progress.getLastProjectionDebugInfo();
 
-    // A real car moves at most ~4.3px per frame (maxSpeed 260px/s at the
+    // A real car moves at most ~9.8px per frame (maxSpeed 590px/s at the
     // fixed 1/60s step) -- on the extreme track's centerline (~6.4px average
-    // sample spacing), that is under one sample per frame. 15 samples is
-    // already >20x that margin, so any LOCAL-mode index jump this large in
-    // a single update() cannot reflect real continuous movement -- it can
-    // only be local search snapping to a different, geometrically nearby
-    // candidate (exactly the failure mode under investigation).
+    // sample spacing), that is roughly 1.5 samples per frame. 15 samples is
+    // still a comfortable ~10x that margin, so any LOCAL-mode index jump
+    // this large in a single update() cannot reflect real continuous
+    // movement -- it can only be local search snapping to a different,
+    // geometrically nearby candidate (exactly the failure mode under
+    // investigation).
     constexpr int kSuspiciousIndexJumpThreshold = 15;
 
     // Below this cosine (~72.5 degrees), the new projection's forward

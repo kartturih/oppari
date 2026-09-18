@@ -51,7 +51,12 @@ using ui::selectHighlightedIndividual;
 
 constexpr int kPanelWidth = 400;
 constexpr int kScreenWidth = kSimWidth + kPanelWidth;
-constexpr int kScreenHeight = kSimHeight;
+// Taller than kSimHeight: the population panel's text (species stats, best-
+// individual breakdown, last-generation summary, controls) runs longer than
+// the simulation area is tall. The simulation area itself stays kSimHeight
+// (see the DrawRectangle(0, 0, kSimWidth, kSimHeight, ...) sim-area clear
+// below), only the window/panel grow to fit the panel's content.
+constexpr int kScreenHeight = 950;
 
 // FAST training-speed mode: how many fixed 1/60s simulation steps run per
 // rendered frame (rendering happens once after the whole batch, never mid-

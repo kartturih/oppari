@@ -50,7 +50,8 @@ GenomeComplexity computeGenomeComplexity(const ai::neat::Genome& genome);
 //   lapsCompletedCount/completionRate -- individuals with hasCompletedLap(), and their fraction
 //   bestGenome*/avgGenome*     -- GenomeComplexity of the best individual, and population averages
 //   generationDurationSeconds  -- longest FitnessEvaluator::getElapsedTime() this generation (can exceed
-//                                  30s by up to one simulation step, since the timeout is checked post-step)
+//                                  kMaxEvaluationTime by up to one simulation step, since the timeout is
+//                                  checked post-step)
 //   terminatedCollisionCount/terminatedMaxTimeCount/terminatedNoProgressCount/terminatedSlowStartCount
 //                              -- per-EvaluationFinishReason counts (always sum to population size)
 struct GenerationMetrics

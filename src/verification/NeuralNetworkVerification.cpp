@@ -109,8 +109,8 @@ void verifyNeuralNetwork()
     using namespace nn_verify;
     constexpr float kEps = 1e-4f;
 
-    // 1 & 9: exactly 9 inputs + 1 bias + 3 outputs can be constructed; a
-    // fully disconnected Output produces 0 (tanh of an empty sum).
+    // 1 & 9: exactly kInputCount inputs + 1 bias + 3 outputs can be
+    // constructed; a fully disconnected Output produces 0 (tanh of an empty sum).
     {
         ai::NeuralNetwork net(makeBaseNodes(), {});
         const auto out = net.evaluate(makeObservation(-1, 0.0f));

@@ -13,8 +13,9 @@ namespace
 constexpr float kSeamWrapThreshold = 0.5f;
 
 // Max plausible lapPosition delta (post seam-correction) per update() --
-// well above real per-frame movement (~4.3px at maxSpeed/60fps) but under
-// the seam-wrap boundary, so it reliably rejects teleport-style jumps.
+// well above real per-frame movement (~9.8px at maxSpeed 590px/s / 60fps)
+// but under the seam-wrap boundary, so it reliably rejects teleport-style
+// jumps.
 constexpr float kMaxPlausibleLapDeltaPerFrame = 0.2f;
 
 } // namespace

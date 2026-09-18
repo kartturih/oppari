@@ -99,9 +99,10 @@ constexpr float kMaxEvaluationTime = 60.0f; // seconds, absolute cap
 constexpr float kNoProgressTimeout = 3.0f;
 
 // Minimum bestProgress increase (laps) counting as "meaningful" for
-// kNoProgressTimeout. ~4.9px on the extreme track -- just above one frame's
-// worth of near-top-speed movement (~4.3px), so stationary jitter never
-// crosses it but real forward motion always does within a few frames.
+// kNoProgressTimeout. ~4.9px on the extreme track -- comfortably under one
+// frame's worth of near-top-speed movement (~9.8px at maxSpeed 590px/s), so
+// stationary jitter never crosses it but real forward motion always does,
+// typically within a single frame.
 constexpr float kProgressImprovementEpsilon = 0.001f;
 
 // One-shot deadline: bestProgress must reach kMinimumInitialProgress by

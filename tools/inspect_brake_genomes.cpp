@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "ai/NeuralNetwork.h"
+#include "ai/Observation.h"
 #include "ai/neat/CompatibilityConfig.h"
 #include "ai/neat/CrossoverConfig.h"
 #include "ai/neat/Genome.h"
@@ -34,18 +36,22 @@
 namespace
 {
 
+// Node IDs 0..(kInputCount-1) are Observation's Input slots (see
+// Observation.h), kInputCount itself is Bias, 100/101/102 are the fixed
+// Steering/Throttle/Brake Output IDs (see AppConfig.cpp's
+// createDemonstrationGenome()), and anything else is a Hidden node born from
+// mutation.
 std::string describeNode(int id)
 {
-    if (id >= 0 && id <= 4)
+    if (id >= 0 && id < ai::NeuralNetwork::kInputCount)
     {
-        static const char* sensorNames[5] = {"Sensor-60", "Sensor-30", "Sensor0", "Sensor+30", "Sensor+60"};
-        return sensorNames[id];
+        static const char* inputNames[ai::NeuralNetwork::kInputCount] = {
+            "Sensor-60",     "Sensor-30",     "Sensor0",       "Sensor+30",   "Sensor+60",
+            "SpeedNorm",     "ForwardVelNorm", "LateralVelNorm", "SlipNorm",
+            "ActualSteerNorm", "YawRateNorm",  "HeadingErrorNorm"};
+        return inputNames[id];
     }
-    if (id == 5) return "SpeedNorm";
-    if (id == 6) return "ForwardVelNorm";
-    if (id == 7) return "LateralVelNorm";
-    if (id == 8) return "SlipNorm";
-    if (id == 9) return "Bias";
+    if (id == ai::NeuralNetwork::kInputCount) return "Bias";
     if (id == 100) return "Steering(out)";
     if (id == 101) return "Throttle(out)";
     if (id == 102) return "Brake(out)";

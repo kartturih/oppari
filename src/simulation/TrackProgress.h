@@ -129,7 +129,9 @@ private:
     // Local-first, global-recovery projection; updates m_previousSegmentIndex.
     TrackProjection projectWithLocalTracking(Vector2 position);
 
-    // Forward tangent of the segment starting at segmentIndex. Debug-only.
+    // Forward tangent of the segment starting at segmentIndex. Feeds both
+    // m_trackTangent (production -- see getTrackTangent()) and
+    // ProjectionDebugInfo (debug-only).
     Vector2 tangentAtSegment(std::size_t segmentIndex) const;
 
     // Walks checkpoint state forward by forwardDelta (> 0, already gated).

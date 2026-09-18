@@ -78,7 +78,7 @@ void drawPopulationPanel(const ai::neat::Population& population, std::size_t hig
     int y = 20;
     const int lineHeight = 22;
 
-    DrawText("NEAT TRAINING - EXTREME TRACK", x, y, 20, RAYWHITE);
+    DrawText("NEAT TRAINING", x, y, 20, RAYWHITE);
     y += lineHeight * 2;
 
     char line[128];
