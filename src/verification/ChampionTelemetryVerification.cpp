@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,7 @@ using population_verify::makeTestPopulationConfig;
 
 using telemetry::championCsvHeaderLine;
 using telemetry::championSampleToCsvRow;
+using telemetry::championGenomeToText;
 using telemetry::championSummaryCsvHeaderLine;
 using telemetry::championSummaryRowToCsvRow;
 using telemetry::ChampionSummaryRow;
@@ -113,6 +115,73 @@ void verifyChampionTelemetry(const simulation::Track& track)
                "champion CSV header and row must have exactly the same number of columns");
     }
 
+    // 1b: the summary CSV carries the eight exact 60 Hz driving diagnostics as
+    // its LAST columns (appended, so every pre-existing column keeps its index),
+    // copied verbatim from the supplied summary; without one they are zeros.
+    {
+        ai::DrivingDiagnosticsSummary driving;
+        driving.averageAbsSteeringDelta = 0.125f;
+        driving.steeringReversalsPerSecond = 2.5f;
+        driving.steeringSaturationFraction = 0.75f;
+        driving.meanAbsSteering = 0.5f;
+        driving.meanLateralAcceleration = 640.0f;
+        driving.frontSlipBeyondPeakFraction = 0.25f;
+        driving.lap2PlusAverageSpeed = 262.5f;
+        driving.physicalBrakeUsageFraction = 0.0625f;
+        driving.brakeRequestDominantFraction = 0.125f;
+        driving.throttleRequestMin = 0.25f;
+        driving.throttleRequestMax = 0.75f;
+        driving.brakeRequestMin = 0.0f;
+        driving.brakeRequestMax = 0.5f;
+        driving.brakeOnsetSpeed = 300.0f;
+        driving.brakeOnsetPreview120 = -0.5f;
+        driving.brakeOnsetPreview300 = 0.375f;
+
+        const std::string header = championSummaryCsvHeaderLine();
+        const std::string tailHeader =
+            "evaluator_avg_abs_steering_delta,steering_reversals_per_second,steering_saturation_fraction,"
+            "mean_abs_steering_60hz,mean_lateral_accel,front_slip_beyond_peak_fraction,"
+            "lap2plus_average_speed,physical_brake_usage_fraction,"
+            "brake_request_dominant_fraction,throttle_request_min,throttle_request_max,"
+            "brake_request_min,brake_request_max,brake_onset_speed,"
+            "brake_onset_preview_120,brake_onset_preview_300";
+        assert(header.size() > tailHeader.size() &&
+               header.compare(header.size() - tailHeader.size(), tailHeader.size(), tailHeader) == 0 &&
+               "the driving-diagnostic and longitudinal-request columns must be the summary header's last sixteen, in documented order");
+        assert(header.find("progress_per_second,evaluator_avg_abs_steering_delta") != std::string::npos &&
+               "they must directly follow the pre-existing last column (progress_per_second)");
+
+        const ChampionSummaryRow row = computeChampionSummary(3, 5, {}, 1234.5f, ai::EvaluationFinishReason::CompletedLaps, &driving);
+        assert(row.driving.averageAbsSteeringDelta == 0.125f && row.driving.physicalBrakeUsageFraction == 0.0625f &&
+               "the supplied driving diagnostics must be copied into the row verbatim");
+        const std::string csvRow = championSummaryRowToCsvRow(row);
+        const std::string tailRow = "0.125,2.5,0.75,0.5,640,0.25,262.5,0.0625,0.125,0.25,0.75,0,0.5,300,-0.5,0.375";
+        assert(csvRow.size() > tailRow.size() && csvRow.compare(csvRow.size() - tailRow.size(), tailRow.size(), tailRow) == 0 &&
+               "the CSV row must end with the sixteen diagnostics, formatted like every other float");
+        assert(countCommas(header) == countCommas(csvRow) && "header and row column counts must still match");
+
+        const ChampionSummaryRow noDriving = computeChampionSummary(3, 5, {}, 1234.5f, ai::EvaluationFinishReason::CompletedLaps);
+        assert(noDriving.driving.meanLateralAcceleration == 0.0f && noDriving.driving.steeringReversalsPerSecond == 0.0f &&
+               "without a supplied summary the diagnostics must default to zero");
+    }
+
+    // 1c: championGenomeToText -- exact, deterministic plain-text genome dump
+    // (nodes first, then connections, in storage order; weights shortest-round-trip).
+    {
+        ai::neat::Genome genome;
+        genome.addNode(ai::neat::NodeGene{0, ai::neat::NodeType::Input});
+        genome.addNode(ai::neat::NodeGene{1, ai::neat::NodeType::Bias});
+        genome.addNode(ai::neat::NodeGene{7, ai::neat::NodeType::Hidden});
+        genome.addNode(ai::neat::NodeGene{100, ai::neat::NodeType::Output});
+        genome.addConnection(ai::neat::ConnectionGene{0, 7, -0.5f, true, 3});
+        genome.addConnection(ai::neat::ConnectionGene{7, 100, 1.25f, false, 9});
+        const std::string text = championGenomeToText(genome);
+        assert(text == "N 0 0\nN 1 1\nN 7 2\nN 100 3\nC 0 7 -0.5 1 3\nC 7 100 1.25 0 9\n" &&
+               "championGenomeToText must list every node then every connection, one per line, in the documented format");
+        assert(championGenomeToText(genome) == text && "championGenomeToText must be a pure, deterministic function");
+        assert(championGenomeToText(ai::neat::Genome{}).empty() && "an empty genome must dump to an empty string");
+    }
+
     // 2: summary CSV header/row also have exactly matching column counts,
     // including on the empty-buffer default row computeChampionSummary()
     // returns.
@@ -135,12 +204,12 @@ void verifyChampionTelemetry(const simulation::Track& track)
         samples[1].forwardVelocity = 180.0f;
         samples[2].forwardVelocity = 270.0f;
 
-        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 42.0f, ai::EvaluationFinishReason::TimeLimit);
+        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 42.0f, ai::EvaluationFinishReason::CompletedLaps);
         assert(std::fabs(row.averageSpeed - 200.0f) < 1e-3f && "average speed must be the plain mean of every sample's speed");
         assert(row.maxSpeed == 300.0f && "max speed must be the maximum sample speed");
         assert(row.medianSpeed == 200.0f && "median of {100,200,300} must be 200");
         assert(std::fabs(row.averageForwardSpeed - 180.0f) < 1e-3f && "average forward speed must be the mean forwardVelocity");
-        assert(row.finalFitness == 42.0f && row.finishReason == ai::EvaluationFinishReason::TimeLimit &&
+        assert(row.finalFitness == 42.0f && row.finishReason == ai::EvaluationFinishReason::CompletedLaps &&
                "finalFitness/finishReason must be passed through verbatim, not recomputed from the buffer");
     }
 
@@ -217,7 +286,7 @@ void verifyChampionTelemetry(const simulation::Track& track)
             makeSample(15.0f, 100.0f, 2.0f, 2, 10.0f, 10.0f), // lap 2 completed in 10.0s (new best)
             makeSample(16.0f, 100.0f, 2.0f, 2, 10.0f, 10.0f)  // final sample, no new completion
         };
-        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 0.0f, ai::EvaluationFinishReason::TimeLimit);
+        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 0.0f, ai::EvaluationFinishReason::CompletedLaps);
         assert(row.completedLaps == 2 && "must count exactly 2 lapCount increases");
         assert(std::fabs(row.averageCompletedLapTime - 11.0f) < 1e-3f && "average of the two completed lap times (12, 10) must be 11");
         assert(row.bestLapTime == 10.0f && "bestLapTime must be read from the final sample");
@@ -235,7 +304,7 @@ void verifyChampionTelemetry(const simulation::Track& track)
     {
         const std::vector<ChampionTelemetrySample> samples = {makeSample(0.0f, 100.0f, 0.0f),
                                                                 makeSample(50.0f, 100.0f, 2.5f)};
-        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 0.0f, ai::EvaluationFinishReason::TimeLimit);
+        const ChampionSummaryRow row = computeChampionSummary(1, 0, samples, 0.0f, ai::EvaluationFinishReason::CompletedLaps);
         assert(std::fabs(row.progressPerSecond - 0.05f) < 1e-4f && "2.5 laps over 50s must be 0.05 laps/second");
     }
 
@@ -277,6 +346,38 @@ void verifyChampionTelemetry(const simulation::Track& track)
         assert(std::filesystem::exists(dir / "champion_summary.csv") && "the summary CSV must exist once any generation is captured");
 
         std::filesystem::remove_all(scratchDir);
+    }
+
+    // 10b (J, K): the default target-generation schedule is exactly
+    // 100, 200, ..., 1000 -- one central list -- and only those generations are
+    // targeted; file names carry the real (0-based) generation number.
+    {
+        const std::vector<std::size_t> expected = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000};
+        assert(telemetry::kChampionTelemetryGenerations == expected &&
+               "the champion telemetry target generations must be exactly 100,200,...,1000"); // J
+        assert(telemetry::makeChampionTelemetryGenerations() == expected && "the schedule must be built deterministically"); // J
+
+        const ChampionTelemetryRecorder recorder("verification_scratch/champion_schedule_test", kSimulationDt);
+        for (std::size_t generation : expected)
+        {
+            assert(recorder.isTargetGeneration(generation) && "every scheduled generation must be a target"); // J
+        }
+        for (std::size_t generation : {std::size_t{0}, std::size_t{1}, std::size_t{99}, std::size_t{101}, std::size_t{133},
+                                       std::size_t{176}, std::size_t{234}, std::size_t{251}, std::size_t{299},
+                                       std::size_t{999}, std::size_t{1001}, std::size_t{1100}, std::size_t{5000}})
+        {
+            assert(!recorder.isTargetGeneration(generation) &&
+                   "generations outside the schedule (including the old 133/176/234/251 and anything past 1000) "
+                   "must not be targets"); // K
+        }
+        assert(!std::filesystem::exists("verification_scratch/champion_schedule_test") &&
+               "constructing a recorder must not create any output");
+
+        assert(telemetry::championCsvFileName(100) == "champion_gen0100.csv" &&
+               telemetry::championCsvFileName(1000) == "champion_gen1000.csv" &&
+               telemetry::championGenomeFileName(1000) == "champion_gen1000_genome.txt" &&
+               telemetry::championCsvFileName(0) == "champion_gen0000.csv" &&
+               "file names must carry the real generation number, zero-padded to 4 digits without truncation");
     }
 
     // 11: a disabled recorder never captures anything and never creates its
@@ -340,6 +441,43 @@ void verifyChampionTelemetry(const simulation::Track& track)
         const std::filesystem::path csvPath =
             std::filesystem::path(scratchDir) / "telemetry" / "champions" / "champion_gen0000.csv";
         assert(std::filesystem::exists(csvPath) && "the captured generation must have produced a raw CSV file");
+
+        // The captured champion's exact diagnostics are the population's own best
+        // individual's (same individual, same evaluation) -- field for field.
+        assert(captured.driving.averageAbsSteeringDelta == metrics.bestDriving.averageAbsSteeringDelta &&
+               captured.driving.steeringReversalsPerSecond == metrics.bestDriving.steeringReversalsPerSecond &&
+               captured.driving.steeringSaturationFraction == metrics.bestDriving.steeringSaturationFraction &&
+               captured.driving.meanAbsSteering == metrics.bestDriving.meanAbsSteering &&
+               captured.driving.meanLateralAcceleration == metrics.bestDriving.meanLateralAcceleration &&
+               captured.driving.frontSlipBeyondPeakFraction == metrics.bestDriving.frontSlipBeyondPeakFraction &&
+               captured.driving.lap2PlusAverageSpeed == metrics.bestDriving.lap2PlusAverageSpeed &&
+               captured.driving.physicalBrakeUsageFraction == metrics.bestDriving.physicalBrakeUsageFraction &&
+               "the champion summary's driving diagnostics must equal the generation metrics' best-individual diagnostics");
+        assert(captured.driving.meanAbsSteering >= 0.0f && captured.driving.meanAbsSteering <= 1.0f &&
+               captured.driving.meanLateralAcceleration >= 0.0f && "champion diagnostics must be valid");
+
+        // The champion genome is dumped next to its CSV, in the documented format.
+        const std::filesystem::path genomePath =
+            std::filesystem::path(scratchDir) / "telemetry" / "champions" / "champion_gen0000_genome.txt";
+        assert(std::filesystem::exists(genomePath) && "the captured generation must have produced a champion genome file");
+        {
+            std::ifstream genomeFile(genomePath);
+            std::string firstLine;
+            std::getline(genomeFile, firstLine);
+            assert(firstLine.rfind("# Champion genome -- generation 0", 0) == 0 &&
+                   "the genome file must start with its descriptive header comment");
+            std::size_t nodeLines = 0;
+            std::size_t connectionLines = 0;
+            std::string line;
+            while (std::getline(genomeFile, line))
+            {
+                nodeLines += (line.rfind("N ", 0) == 0) ? 1 : 0;
+                connectionLines += (line.rfind("C ", 0) == 0) ? 1 : 0;
+            }
+            const ai::neat::Genome baseline = createDemonstrationGenome();
+            assert(nodeLines >= baseline.nodes().size() && connectionLines >= 1 &&
+                   "the genome file must list the champion's nodes and connections");
+        }
 
         std::filesystem::remove_all(scratchDir);
     }

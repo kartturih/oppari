@@ -4,11 +4,13 @@
 #include <string>
 #include <vector>
 
+#include "ai/DrivingDiagnostics.h"
 #include "ai/FitnessEvaluator.h"
+#include "ai/neat/Genome.h"
 
 // Whole-run champion telemetry: captures dense per-frame trajectory data for
-// the population's best individual, across a small, hand-selected set of
-// generations, covering that individual's ENTIRE evaluation (spawn to
+// the population's best individual, across a fixed, evenly spaced set of
+// generations (see kChampionTelemetryGenerations), covering that individual's ENTIRE evaluation (spawn to
 // finish) -- not just a local region of the track like HairpinTelemetry.
 //
 // Pure observer, same contract as telemetry::HairpinTelemetryRecorder (see
@@ -63,13 +65,38 @@ inline constexpr bool kChampionTelemetryEnabled = true;
 // samples for identical trajectories.
 inline constexpr int kChampionTelemetrySampleInterval = 5;
 
-// Which generations to capture full champion telemetry for. Edit this list
-// to change what gets captured on a future run -- a generation not present
-// here, or never reached before the program exits, is simply skipped (see
-// ChampionTelemetryRecorder::onPopulationStep()). Deliberately small: this
-// is NOT dumped for every generation (see the class comment on
-// ChampionTelemetryRecorder).
-inline const std::vector<std::size_t> kChampionTelemetryGenerations = {133, 176, 234, 251, 300};
+// Which generations to capture full champion telemetry (per-frame CSV, summary
+// row, genome dump) for: every kChampionTelemetryGenerationInterval-th
+// generation from kChampionTelemetryFirstGeneration up to and including
+// kChampionTelemetryLastGeneration -- 100, 200, ..., 1000. This schedule is
+// SEPARATE from how long training runs: training itself has no generation
+// limit, generations after the last one simply produce no snapshot. Generation
+// numbers are the same 0-based numbers Population::getGeneration() and the
+// training CSV's `generation` column use, so champion_gen1000.csv is the
+// champion of the row with generation == 1000.
+inline constexpr std::size_t kChampionTelemetryFirstGeneration = 100;
+inline constexpr std::size_t kChampionTelemetryGenerationInterval = 100;
+inline constexpr std::size_t kChampionTelemetryLastGeneration = 1000;
+
+// The full target list built from the three constants above -- the ONE source
+// of truth for which generations are captured (ChampionTelemetryRecorder's
+// default constructor argument reads kChampionTelemetryGenerations).
+inline std::vector<std::size_t> makeChampionTelemetryGenerations()
+{
+    std::vector<std::size_t> generations;
+    for (std::size_t g = kChampionTelemetryFirstGeneration; g <= kChampionTelemetryLastGeneration;
+         g += kChampionTelemetryGenerationInterval)
+    {
+        generations.push_back(g);
+    }
+    return generations;
+}
+
+inline const std::vector<std::size_t> kChampionTelemetryGenerations = makeChampionTelemetryGenerations();
+
+// Simulated seconds of samples reserved per individual buffer when a capture
+// begins -- roughly one normal 3-lap evaluation. Only a memory pre-sizing hint.
+inline constexpr float kChampionTelemetryReserveSeconds = 60.0f;
 
 // Speed (px/s) below which a sample doesn't count toward "minimum MOVING
 // speed" -- distinguishes genuinely near-stationary samples (spawn, a dead
@@ -165,6 +192,23 @@ struct ChampionTelemetrySample
     // the raw headingError/trackDirectionAngle pair above. Appended at the
     // end, same rationale as obsActualSteerNorm/obsYawRateNorm.
     float obsHeadingErrorNorm = 0.0f;
+
+    // Observation's two track-direction PREVIEW inputs
+    // (ai::kPreviewNearObservationIndex/kPreviewFarObservationIndex): the
+    // same normalized heading-error formula as obsHeadingErrorNorm, against
+    // the track tangent ai::kPreviewNearDistance (120px) / kPreviewFarDistance
+    // (300px) farther along the centerline. The exact values the network
+    // receives. Appended at the end, same rationale as obsHeadingErrorNorm.
+    float obsPreviewHeadingError120Norm = 0.0f;
+    float obsPreviewHeadingError300Norm = 0.0f;
+
+    // Speed-sensitive steering authority in effect this frame (multiplier on
+    // CarParams::maxSteerAngle, see Car.h) and the wheel angle (radians) that
+    // steering_cmd = +-1 targeted at that speed. steering_cmd itself is still
+    // the raw network command in [-1, 1]; actual_steer_angle is the physical
+    // result after this and the steering-rate limit. Appended at the end.
+    float steeringAuthorityFactor = 1.0f;
+    float effectiveMaxSteerAngle = 0.0f;
 };
 
 // Deterministic column order, no trailing newline.
@@ -216,6 +260,16 @@ struct ChampionSummaryRow
     float averageCompletedLapTime = 0.0f; // 0 if fewer than 1 completed lap was observed in the buffer
 
     float progressPerSecond = 0.0f; // bestProgress / totalEvaluationTime
+
+    // Exact 60 Hz driving-quality diagnostics of this champion's evaluation
+    // (steering delta/reversals/saturation, lateral acceleration, front slip
+    // past peak, lap-2+ speed, physical brake usage, throttle/brake request
+    // ranges, brake-request-dominant fraction, brake onset speed/previews) -- see
+    // ai::DrivingDiagnosticsSummary for each definition. Unlike the statistics
+    // above these are NOT estimated from the sparse sample buffer: they come
+    // straight from the live Individual. All zero if not supplied. Appended
+    // at the end of the summary CSV.
+    ai::DrivingDiagnosticsSummary driving;
 };
 
 std::string championSummaryCsvHeaderLine();
@@ -231,9 +285,25 @@ std::string championSummaryRowToCsvRow(const ChampionSummaryRow& row);
 // speed/control/lap statistics are necessarily an estimate at the
 // configured sampling interval. Returns a default (all-zero) row if
 // orderedSamples is empty.
+// `driving`, if non-null, is copied into the row verbatim (see ChampionSummaryRow::driving).
 ChampionSummaryRow computeChampionSummary(std::size_t generation, std::size_t individualIndex,
                                            const std::vector<ChampionTelemetrySample>& orderedSamples,
-                                           float finalFitness, ai::EvaluationFinishReason finishReason);
+                                           float finalFitness, ai::EvaluationFinishReason finishReason,
+                                           const ai::DrivingDiagnosticsSummary* driving = nullptr);
+
+// Plain-text dump of a genome, one node/connection per line, so a champion can
+// be reloaded/analyzed later without re-running training:
+//   N <nodeId> <nodeType>                              nodeType: 0=Input 1=Bias 2=Hidden 3=Output
+//   C <sourceId> <targetId> <weight> <enabled> <innovation>
+// Nodes first (genome storage order), then connections (storage order).
+// Weights use training::formatFloat (shortest round-trippable). Pure function.
+std::string championGenomeToText(const ai::neat::Genome& genome);
+
+// File names of one captured generation's per-frame CSV and genome dump, e.g.
+// champion_gen0100.csv / champion_gen1000_genome.txt (generation zero-padded to
+// at least 4 digits, never truncated).
+std::string championCsvFileName(std::size_t generation);
+std::string championGenomeFileName(std::size_t generation);
 
 // Captures every individual's telemetry live during a targeted generation's
 // evaluation, then keeps only the champion's (see the file comment) --
@@ -263,17 +333,20 @@ public:
 
     bool isEnabled() const { return m_enabled; }
 
+    // True iff `generation` (0-based, as Population::getGeneration()) is in the target list.
+    bool isTargetGeneration(std::size_t generation) const;
+
     // Test-only introspection.
     std::size_t getCapturedGenerationCount() const { return m_capturedGenerations; }
     const std::vector<ChampionSummaryRow>& getSummaryRows() const { return m_summaryRows; }
     bool isCapturing() const { return m_isCapturing; }
 
 private:
-    bool isTargetGeneration(std::size_t generation) const;
     void beginCapture(std::size_t generation, std::size_t individualCount);
     void sampleIndividual(std::size_t individualIndex, const ai::neat::Individual& individual);
     void finishCapture(const ai::neat::Population& population);
     std::string buildCsvPath(std::size_t generation) const;
+    std::string buildGenomePath(std::size_t generation) const;
     void writeSummaryCsv() const;
 
     std::string m_resultsDir;

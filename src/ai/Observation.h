@@ -9,18 +9,23 @@ namespace ai
 {
 
 // Fixed-size, normalized snapshot of a Car's local perception/dynamics (plus
-// one track-relative orientation cue, see slot 11 below), used as
-// NeuralNetwork's input vector. Deliberately NOT a waypoint/racing-line
+// three track-relative ORIENTATION cues -- the current track direction, slot
+// 11, and the track direction 120px and 300px farther along, slots 12-13),
+// used as NeuralNetwork's input vector. Deliberately NOT a waypoint/racing-line
 // follower: no world position, no lateral offset from the centerline, no
-// lookahead/curvature, no target coordinates -- the network must still
-// discover steering magnitude, timing, throttle, braking, and its own line
-// through the track's width entirely itself.
-inline constexpr int kObservationSize = 12;
+// future point coordinates or bearing to one, no distance-to-corner, no
+// target speed -- the network must still discover steering magnitude,
+// timing, throttle, braking, and its own line through the track's width
+// entirely itself. The only preview it gets is which way the track will be
+// pointing ahead (orientation), never where anything is.
+inline constexpr int kObservationSize = 14;
 
 // Slots: 0..4 = sensor normalizedDistance at -60/-30/0/+30/+60 deg,
 // 5 = speed, 6 = forward velocity, 7 = lateral velocity, 8 = slip angle,
 // 9 = actual (rate-limited) steering angle, 10 = yaw rate, 11 = heading
-// error relative to the local track direction (all normalized).
+// error relative to the local track direction, 12 = heading error relative
+// to the track direction kPreviewNearDistance px ahead, 13 = same for
+// kPreviewFarDistance px ahead (all normalized).
 //
 // 9 and 10 close the loop the steering-rate limiter (see
 // CarParams::maxSteerRateRadPerSec) otherwise leaves open: without them the
@@ -44,6 +49,22 @@ inline constexpr int kYawRateObservationIndex = 10;
 // heading minus track tangent angle, wrapped to [-pi,pi]) rather than a
 // newly-invented one.
 inline constexpr int kHeadingErrorObservationIndex = 11;
+
+// 12 & 13: track-direction PREVIEW -- the same heading-error formula as slot
+// 11 (car heading minus track tangent direction, wrapped to [-pi,pi],
+// normalized by pi, clamped to [-1,1], same sign convention) but against the
+// tangent at a point kPreviewNearDistance / kPreviewFarDistance px farther
+// along the centerline than the car's currently projected position
+// (TrackProgress::getTrackTangentAhead(), wrapping across the lap seam). At
+// ~230px/s these look ~0.5s and ~1.3s ahead; the 300px far preview stays
+// inside the 400px sensor range. Still orientation only: unlike a bearing to
+// a future waypoint, this value carries no information about where the car
+// is laterally, nor how far away a corner is -- only what direction the
+// track will be pointing there, relative to the car's current heading.
+inline constexpr int kPreviewNearObservationIndex = 12;
+inline constexpr int kPreviewFarObservationIndex = 13;
+inline constexpr float kPreviewNearDistance = 120.0f; // px along the centerline
+inline constexpr float kPreviewFarDistance = 300.0f;  // px along the centerline
 
 // Fixed normalization scale (rad/s) for slot 10 -- chosen from real observed
 // yaw-rate magnitudes rather than an arbitrary round number. Hairpin-failure

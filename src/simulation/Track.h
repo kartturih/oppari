@@ -105,6 +105,14 @@ public:
     // 0 (wrapped into [0, getTotalLength())). For spawn placement/testing.
     Vector2 getPointAtDistance(float distanceAlongTrack) const;
 
+    // Unit forward tangent (direction of travel) of the centerline segment
+    // containing arc-length distanceAlongTrack, wrapped into [0, total
+    // length) exactly like getPointAtDistance() -- so a distance past the
+    // end of the lap (or negative) reads across the seam correctly. Same
+    // per-segment tangent definition TrackProgress::getTrackTangent() uses.
+    // {0,0} only for a degenerate zero-length segment. Read-only.
+    Vector2 getTangentAtDistance(float distanceAlongTrack) const;
+
     // Deterministic spawn pose at spawnDistanceAlongTrack along the
     // centerline; heading is that point's forward tangent. Constructor
     // throws if this position isn't drivable.

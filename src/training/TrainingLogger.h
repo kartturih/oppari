@@ -28,8 +28,11 @@ struct RunMetadata
     // main.cpp hardcodes one active track at compile time; passed as a literal.
     std::string trackName;
 
-    // Mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- update by hand if that ever changes.
-    float maxEvaluationTimeSeconds = 60.0f;
+    // Evaluation termination settings, defaulting to FitnessEvaluator.h's
+    // constants (a successful evaluation ends after targetLapCount laps;
+    // safetyTimeoutSeconds is only the failsafe).
+    int targetLapCount = ai::kTargetLapCount;
+    float safetyTimeoutSeconds = ai::kSafetyTimeoutSeconds;
 
     ai::neat::PopulationConfig populationConfig;
     ai::neat::MutationConfig mutationConfig;

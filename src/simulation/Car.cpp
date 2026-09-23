@@ -196,6 +196,29 @@ Car::Car(Car&& other) noexcept
     other.m_bodyId = b2_nullBodyId;
 }
 
+float steeringAuthorityForSpeed(const CarParams& params, float speed)
+{
+    const auto& speeds = params.steerAuthoritySpeeds;
+    const auto& factors = params.steerAuthorityFactors;
+    constexpr int kLast = CarParams::kSteerAuthorityPointCount - 1;
+
+    // Written as !(speed > first) so a NaN speed also lands on the first
+    // (full-authority) factor rather than propagating.
+    if (!(speed > speeds[0]))
+    {
+        return factors[0];
+    }
+    for (int i = 1; i <= kLast; ++i)
+    {
+        if (speed < speeds[i])
+        {
+            const float t = (speed - speeds[i - 1]) / (speeds[i] - speeds[i - 1]);
+            return factors[i - 1] + (factors[i] - factors[i - 1]) * t;
+        }
+    }
+    return factors[kLast];
+}
+
 void Car::reset(Vector2 spawnPosition, float spawnHeading)
 {
     b2Body_SetTransform(m_bodyId, toB2(spawnPosition), b2MakeRot(spawnHeading));
@@ -238,7 +261,18 @@ void Car::update(const CarInput& input, float dt)
     // over the full dt, not a per-substep quantity -- same granularity the
     // old direct assignment already had (steerAngle was likewise computed
     // once and reused across every substep).
-    const float targetSteerAngle = steering * m_params.maxSteerAngle;
+    //
+    // The TARGET angle scales with speed-sensitive steering authority (see
+    // CarParams::steerAuthoritySpeeds): the same +-1 command targets a smaller
+    // wheel angle the faster the car is going. Speed is the car's speed at the
+    // start of this update() (the previous step's result), a deterministic,
+    // already-stored value. The rate limiter below is unchanged and simply
+    // moves the wheel toward this target.
+    const float steeringAuthority = steeringAuthorityForSpeed(m_params, getSpeed());
+    const float effectiveMaxSteerAngle = m_params.maxSteerAngle * steeringAuthority;
+    m_tireDebug.steeringAuthority = steeringAuthority;
+    m_tireDebug.effectiveMaxSteerAngle = effectiveMaxSteerAngle;
+    const float targetSteerAngle = steering * effectiveMaxSteerAngle;
     const float maxSteerDelta = m_params.maxSteerRateRadPerSec * dt;
     const float steerDelta = std::clamp(targetSteerAngle - m_currentSteerAngle, -maxSteerDelta, maxSteerDelta);
     m_currentSteerAngle += steerDelta;

@@ -369,19 +369,21 @@ void verifyPhenotypeBuilder()
     using ai::neat::NodeType;
     constexpr float kEps = 1e-4f;
 
-    // 0: the phenotype builder accepts the current 12-input topology (5
+    // 0: the phenotype builder accepts the current 14-input topology (5
     // sensors + speed + forward/lateral velocity + slip angle + actual
-    // steering angle + yaw rate + heading error) -- pinned explicitly so a
+    // steering angle + yaw rate + heading error + 120px/300px track-direction
+    // preview) -- pinned explicitly so a
     // future Observation resize is caught here, not just implicitly by
     // every other check in this function happening to use kInputCount already.
     {
-        static_assert(ai::NeuralNetwork::kInputCount == 12, "phenotype builder tests assume the current 12-input topology");
+        static_assert(ai::NeuralNetwork::kInputCount == 14, "phenotype builder tests assume the current 14-input topology");
         Genome genome = makeBaseGenome();
         assert(static_cast<int>(genome.nodes().size()) == ai::NeuralNetwork::kInputCount + 4 &&
                "the base genome must contain exactly kInputCount Input + 1 Bias + 3 Output nodes");
 
-        // The bias node moved to the next free ID (kInputCount, now 12) when
-        // the heading-error input claimed index 11 -- explicitly confirm it
+        // The bias node sits at the next free ID (kInputCount, now 14) --
+        // it moved from 11 to 12 when heading error was added and from 12
+        // to 14 when the two preview inputs were -- explicitly confirm it
         // is genuinely typed Bias (not silently absent or mistyped) and that
         // every Input node is typed Input, not Bias -- i.e. no ID is
         // claimed by both roles at once.
@@ -395,10 +397,23 @@ void verifyPhenotypeBuilder()
                    "every ID in [0, kInputCount) must be a genuine Input node, never the Bias node in disguise");
         }
 
-        ai::NeuralNetwork net = buildPhenotype(genome); // must not throw -- would if IDs actually collided
+        // The Bias ID must also sit clear of every Output ID (100, 101, 102)
+        // -- and no node carries two roles.
+        static_assert(ai::NeuralNetwork::kOutputCount == 3, "the base genome has steering, throttle and brake outputs");
+        static_assert(ai::NeuralNetwork::kInputCount < 100, "bias ID must stay below the Output ID range (100+)");
+        for (int outputId : {100, 101, 102})
+        {
+            const ai::neat::NodeGene* outputNode = genome.findNode(outputId);
+            assert(outputNode != nullptr && outputNode->getType() == ai::neat::NodeType::Output &&
+                   outputId != ai::NeuralNetwork::kInputCount &&
+                   "Output IDs must exist as Output nodes and never collide with the bias ID"); // I
+        }
+
+        ai::NeuralNetwork net = buildPhenotype(genome); // must not throw -- would if IDs actually collided (H)
         const auto out = net.evaluate(makeObservation(-1, 0.0f));
+        assert(static_cast<int>(out.size()) == 3 && "the phenotype must expose exactly three outputs"); // H
         assert(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f &&
-               "a fully disconnected 12-input phenotype must still evaluate to exactly 0");
+               "a fully disconnected 14-input phenotype must still evaluate to exactly 0");
     }
 
     // 1 & 3: a minimal valid Genome builds successfully -- only possible if

@@ -414,8 +414,8 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             evaluator.update(car, progress, 0.0f, lapTime);
         };
 
-        // First lap: 3s total (all three laps' times must sum to well under
-        // FitnessEvaluator's kMaxEvaluationTime before TimeLimit triggers).
+        // First lap: 3s total (the third lap ends this evaluation with
+        // CompletedLaps, after its time has been recorded).
         driveOneLap(3.0f);
         assert(progress.getLapCount() == 1 && "the first full lap must complete exactly one lap");
         assert(evaluator.hasCompletedLap() && "completing a lap must set hasCompletedLap()"); // 15 (part 1)
@@ -521,30 +521,42 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
-    // 24: reaching the maximum evaluation time ends it with TimeLimit --
-    // progress is nudged forward every simulated second so the no-progress
-    // timeout cannot pre-empt it -- and fitness freezes from that point on.
+    // 24 (D): the safety timeout. A car that keeps making a little progress
+    // every simulated second (so the no-progress timeout cannot pre-empt it)
+    // but never completes kTargetLapCount laps is forcibly ended with
+    // SafetyTimeout at kSafetyTimeoutSeconds (180 s) -- NOT at the old 60 s --
+    // and fitness freezes from that point on.
     {
+        static_assert(ai::kSafetyTimeoutSeconds == 180.0f, "the failsafe is specified as 180 simulated seconds");
+        static_assert(ai::kTargetLapCount == 3, "a successful evaluation is specified as 3 completed laps");
+
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
         simulation::TrackProgress progress(track);
         progress.reset(car);
         ai::FitnessEvaluator evaluator;
         evaluator.reset();
 
-        // Loop bound and the elapsed-time threshold below match
-        // FitnessEvaluator's kMaxEvaluationTime (60.0f).
         float p = 0.0f;
-        for (int second = 0; second < 62 && !evaluator.isEvaluationFinished(); ++second)
+        int secondsRun = 0;
+        for (; secondsRun < 200 && !evaluator.isEvaluationFinished(); ++secondsRun)
         {
-            p += 0.01f;
+            p += 0.01f; // 1.8 laps over 180 s: never reaches 3 laps
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
             progress.update(car);
             evaluator.update(car, progress, 0.0f, 1.0f);
+            if (secondsRun == 60 || secondsRun == 61 || secondsRun == 100 || secondsRun == 178)
+            {
+                assert(!evaluator.isEvaluationFinished() &&
+                       "the old 60 s point (and anything before the failsafe) must no longer end an evaluation"); // B & C
+            }
         }
+        assert(progress.getLapCount() < ai::kTargetLapCount && "setup: this scenario must not complete the target laps");
         assert(evaluator.isEvaluationFinished() &&
-               evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
-               "reaching the maximum evaluation time must end the evaluation with TimeLimit");
-        assert(evaluator.getElapsedTime() >= 60.0f && "elapsed time at TimeLimit must reach the configured maximum"); // 32
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::SafetyTimeout &&
+               "reaching kSafetyTimeoutSeconds without the target laps must end the evaluation with SafetyTimeout");
+        assert(secondsRun == 180 && evaluator.getElapsedTime() >= ai::kSafetyTimeoutSeconds &&
+               evaluator.getElapsedTime() < ai::kSafetyTimeoutSeconds + 1.0f + kEps &&
+               "the safety timeout must trip at exactly 180 simulated seconds"); // D (32)
 
         const float fitnessAtFinish = evaluator.getFitness();
         const float elapsedAtFinish = evaluator.getElapsedTime();
@@ -552,7 +564,114 @@ void verifyFitnessEvaluator(const simulation::Track& track)
         progress.update(car);
         evaluator.update(car, progress, 0.0f, 10.0f);
         assert(evaluator.getFitness() == fitnessAtFinish && evaluator.getElapsedTime() == elapsedAtFinish &&
-               "TimeLimit must freeze fitness and elapsed time");
+               "SafetyTimeout must freeze fitness and elapsed time");
+        car.reset(kSpawnPosition, kSpawnHeading);
+    }
+
+    // 24b (A, B, C, H, I): completing the third lap ends the evaluation
+    // IMMEDIATELY with CompletedLaps -- even when that happens far past the old
+    // 60 s limit -- and the third lap's time, progress and fitness are all
+    // recorded on that same final step.
+    {
+        // Drives three laps, one full lap (with a small overshoot past the
+        // seam, see driveOneLap in the lap-timing test above) per evaluator
+        // step of lapSeconds simulated seconds, and reports the state after
+        // the second lap.
+        struct TwoLapState
+        {
+            float elapsed = 0.0f;
+            bool finished = true;
+            ai::EvaluationFinishReason reason = ai::EvaluationFinishReason::None;
+        };
+        auto run = [&](float lapSeconds, TwoLapState* afterTwoLaps) -> ai::FitnessEvaluator
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+
+            float cumulativeP = 0.0f;
+            auto driveOneLap = [&]()
+            {
+                constexpr float kStep = 0.15f;
+                float remaining = 1.02f;
+                while (remaining > kStep)
+                {
+                    cumulativeP += kStep;
+                    remaining -= kStep;
+                    localCar.reset(positionAtLapPosition(track, cumulativeP), kSpawnHeading);
+                    localProgress.update(localCar);
+                }
+                cumulativeP += remaining;
+                localCar.reset(positionAtLapPosition(track, cumulativeP), kSpawnHeading);
+                localProgress.update(localCar);
+                evaluator.update(localCar, localProgress, 0.0f, lapSeconds);
+            };
+
+            driveOneLap();
+            driveOneLap();
+            assert(localProgress.getLapCount() == 2 && "setup: two laps must be complete");
+            if (afterTwoLaps != nullptr)
+            {
+                afterTwoLaps->elapsed = evaluator.getElapsedTime();
+                afterTwoLaps->finished = evaluator.isEvaluationFinished();
+                afterTwoLaps->reason = evaluator.getFinishReason();
+            }
+
+            driveOneLap();
+            assert(localProgress.getLapCount() == 3 && "setup: the third lap must be complete");
+            return evaluator;
+        };
+
+        // Fast run (3 x 5 s) and slow run (3 x 40 s: two laps already at 80 s,
+        // i.e. past the old 60 s limit, finishing at 120 s).
+        for (float lapSeconds : {5.0f, 40.0f})
+        {
+            TwoLapState two;
+            const ai::FitnessEvaluator evaluator = run(lapSeconds, &two);
+
+            assert(!two.finished && two.reason == ai::EvaluationFinishReason::None &&
+                   "two completed laps must not end an evaluation, even past the old 60 s limit"); // B
+            assert(std::fabs(two.elapsed - 2.0f * lapSeconds) < kEps && "setup: elapsed time after two laps");
+
+            assert(evaluator.isEvaluationFinished() &&
+                   evaluator.getFinishReason() == ai::EvaluationFinishReason::CompletedLaps &&
+                   "completing the third lap must end the evaluation with CompletedLaps"); // A
+            assert(std::fabs(evaluator.getElapsedTime() - 3.0f * lapSeconds) < kEps &&
+                   "the evaluation must end on the very step the third lap completed"); // A
+            assert(evaluator.hasCompletedLap() && std::fabs(evaluator.getLastLapTime() - lapSeconds) < kEps &&
+                   std::fabs(evaluator.getBestLapTime() - lapSeconds) < kEps &&
+                   "the third lap's time must be recorded before the evaluation ends"); // H
+            // Progress and fitness include the completed third lap.
+            assert(evaluator.getBaseProgressFitness() >= 3.0f * 1000.0f + 3.0f * 150.0f &&
+                   "base progress fitness must include three laps' progress and lap rewards"); // H
+            assert(std::isfinite(evaluator.getFitness()) && evaluator.getFitness() >= 0.0f &&
+                   std::isfinite(evaluator.getProgressRateReward()) && std::isfinite(evaluator.getLapSpeedBonus()) &&
+                   "fitness must be finite and non-negative at CompletedLaps"); // I
+            assert(evaluator.getTimeAtBestProgress() > 0.0f &&
+                   evaluator.getTimeAtBestProgress() <= evaluator.getElapsedTime() &&
+                   "timeAtBestProgress must be a real time within the evaluation"); // H
+        }
+
+        // A faster three-lap completion must score higher than a slower one.
+        const ai::FitnessEvaluator fast = run(5.0f, nullptr);
+        const ai::FitnessEvaluator slow = run(40.0f, nullptr);
+        assert(fast.getFitness() > slow.getFitness() &&
+               "a faster three-lap completion must remain better than a slower one");
+
+        // After CompletedLaps the evaluation is frozen: further updates are no-ops.
+        ai::FitnessEvaluator frozen = run(5.0f, nullptr);
+        const float fitnessAtFinish = frozen.getFitness();
+        const float elapsedAtFinish = frozen.getElapsedTime();
+        car.reset(positionAtLapPosition(track, 0.2f), kSpawnHeading);
+        simulation::TrackProgress anyProgress(track);
+        anyProgress.reset(car);
+        frozen.update(car, anyProgress, 0.0f, 10.0f);
+        assert(frozen.getFitness() == fitnessAtFinish && frozen.getElapsedTime() == elapsedAtFinish &&
+               frozen.getFinishReason() == ai::EvaluationFinishReason::CompletedLaps &&
+               "CompletedLaps must freeze fitness, elapsed time and the finish reason");
         car.reset(kSpawnPosition, kSpawnHeading);
     }
 
@@ -898,10 +1017,14 @@ void verifyFitnessEvaluator(const simulation::Track& track)
             ai::FitnessEvaluator evaluator;
             evaluator.reset();
 
-            constexpr int kSteps = 40;
+            // 120 frames over 0.84 laps: long enough that the (unchanged) 25% cap,
+            // which grows with base progress, does not bind for the STABLE case
+            // -- so the comparison below sees real raw differences instead of
+            // both penalties saturating at the cap.
+            constexpr int kSteps = 120;
             for (int i = 1; i <= kSteps; ++i)
             {
-                const float p = 0.01f * static_cast<float>(i); // well within the plausibility gate per step
+                const float p = 0.007f * static_cast<float>(i); // well within the plausibility gate per step
                 localCar.reset(positionAtLapPosition(track, p), kSpawnHeading);
                 localProgress.update(localCar);
                 const float steeringCommand = oscillate ? ((i % 2 == 0) ? 1.0f : -1.0f) : 1.0f;
@@ -1068,8 +1191,320 @@ void verifyFitnessEvaluator(const simulation::Track& track)
                "reset must zero the internal previous-steering-command baseline, not just the visible penalty"); // 38
     }
 
+    // 39-43: steering-smoothness penalty at its baseline scale (400 -- a 4000
+    // trial was reverted): rawPenalty = averageAbsSteeringDelta * scale, capped at
+    // 25% of baseProgressFitness.
+    // Every scenario drives a fresh evaluator through the same forward-progress
+    // ramp (0.004 laps/frame) so only the steering commands differ.
+    {
+        constexpr float kScaleMirror = 400.0f;  // mirrors FitnessEvaluator.cpp's kSteeringSmoothnessPenaltyScale
+        constexpr float kCapMirror = 0.25f;     // mirrors FitnessEvaluator.cpp's kMaxSteeringPenaltyFraction
+
+        auto runSteering = [&](int steps, auto steeringAt) -> ai::FitnessEvaluator
+        {
+            simulation::Car localCar(makeCarParams(), track);
+            localCar.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
+            simulation::TrackProgress localProgress(track);
+            localProgress.reset(localCar);
+            ai::FitnessEvaluator evaluator;
+            evaluator.reset();
+            for (int i = 1; i <= steps; ++i)
+            {
+                localCar.reset(positionAtLapPosition(track, 0.004f * static_cast<float>(i)), kSpawnHeading);
+                localProgress.update(localCar);
+                evaluator.update(localCar, localProgress, steeringAt(i), kSimulationDt);
+            }
+            return evaluator;
+        };
+
+        // 39: the penalty is exactly averageAbsSteeringDelta * 400 while under
+        // the cap. Steering alternating 0.02/0.0 has an average delta of
+        // exactly 0.02 (every frame changes by 0.02, including the first from
+        // the 0 baseline) -> raw penalty 8, well under 25% of a ~930-point base.
+        {
+            const ai::FitnessEvaluator e = runSteering(200, [](int i) { return (i % 2 == 1) ? 0.02f : 0.0f; });
+            assert(std::fabs(e.getAverageAbsSteeringDelta() - 0.02f) < 1e-5f && "setup: average delta must be 0.02");
+            assert(kScaleMirror * e.getAverageAbsSteeringDelta() < e.getBaseProgressFitness() * kCapMirror &&
+                   "setup: the raw penalty must be under the cap so this checks the scale, not the cap");
+            assert(std::fabs(e.getSteeringSmoothnessPenalty() - 0.02f * kScaleMirror) < 1e-2f &&
+                   "uncapped steering penalty must be averageAbsSteeringDelta * 400 (= 8 here)"); // 39
+            // Independent of the mirror constant above: the absolute value pins the
+            // scale at exactly 400 (a 4000 scale would give 80 here).
+            assert(std::fabs(e.getSteeringSmoothnessPenalty() - 8.0f) < 1e-2f &&
+                   "kSteeringSmoothnessPenaltyScale must be 400 (avg delta 0.02 -> penalty 8)"); // 39
+            assert(std::fabs(e.getFitness() - (e.getBaseProgressFitness() + e.getProgressRateReward() + e.getLapSpeedBonus() -
+                                                 e.getSteeringSmoothnessPenalty())) < kEps &&
+                   "fitness must still be base + progressRate + lapSpeed - steeringSmoothness, nothing else"); // 39
+        }
+
+        // 40: the 25% cap is unchanged and still clamps -- a full-amplitude
+        // flip every frame (raw ~800) must be held to exactly 0.25 * base.
+        {
+            const ai::FitnessEvaluator e = runSteering(200, [](int i) { return (i % 2 == 0) ? 1.0f : -1.0f; });
+            assert(kScaleMirror * e.getAverageAbsSteeringDelta() > e.getBaseProgressFitness() * kCapMirror &&
+                   "setup: the raw penalty must exceed the cap");
+            assert(std::fabs(e.getSteeringSmoothnessPenalty() - e.getBaseProgressFitness() * kCapMirror) < kEps &&
+                   "a raw penalty above the cap must be held to exactly 25% of baseProgressFitness"); // 40
+            assert(e.getFitness() >= e.getBaseProgressFitness() * (1.0f - kCapMirror) - kEps &&
+                   "fitness must stay at least 75% of baseProgressFitness even at the cap");
+        }
+
+        // 41: zero steering change gives exactly zero penalty; a steering
+        // command HELD constant only ever pays its single initial turn-in
+        // (0 -> 0.5 over 200 frames = 0.5/200 * 400 = 1), never an ongoing cost.
+        {
+            const ai::FitnessEvaluator zero = runSteering(200, [](int) { return 0.0f; });
+            assert(zero.getAverageAbsSteeringDelta() == 0.0f && zero.getSteeringSmoothnessPenalty() == 0.0f &&
+                   "steering that never changes must cost exactly nothing"); // 41
+            const ai::FitnessEvaluator held = runSteering(200, [](int) { return 0.5f; });
+            assert(std::fabs(held.getSteeringSmoothnessPenalty() - (0.5f / 200.0f) * kScaleMirror) < 1e-2f &&
+                   "a constant, held steering command must pay only its one initial turn-in"); // 41
+        }
+
+        // 42: oscillating steering costs far more than stable steering at the
+        // new scale, over identical progress.
+        {
+            const ai::FitnessEvaluator stable = runSteering(200, [](int) { return 0.5f; });
+            const ai::FitnessEvaluator oscillating = runSteering(200, [](int i) { return (i % 2 == 0) ? 0.5f : -0.5f; });
+            assert(oscillating.getSteeringSmoothnessPenalty() > stable.getSteeringSmoothnessPenalty() * 5.0f &&
+                   "oscillating steering must cost much more than stable steering"); // 42
+        }
+
+        // 43: evaluation-length invariance and non-negativity still hold: the
+        // same repeating pattern for twice as many frames leaves the (uncapped)
+        // penalty unchanged, and neither penalty nor fitness ever goes negative.
+        {
+            auto pattern = [](int i) { return (i % 2 == 1) ? 0.02f : 0.0f; };
+            const ai::FitnessEvaluator shortRun = runSteering(100, pattern);
+            const ai::FitnessEvaluator longRun = runSteering(200, pattern);
+            assert(std::fabs(shortRun.getSteeringSmoothnessPenalty() - longRun.getSteeringSmoothnessPenalty()) < 1e-2f &&
+                   shortRun.getSteeringSmoothnessPenalty() > 0.0f &&
+                   "the same steering pattern for twice as many frames must give the same penalty"); // 43
+            for (const ai::FitnessEvaluator* e : {&shortRun, &longRun})
+            {
+                assert(e->getSteeringSmoothnessPenalty() >= 0.0f && e->getFitness() >= 0.0f &&
+                       "penalty and fitness must never be negative"); // 43
+            }
+        }
+    }
+
     TraceLog(LOG_INFO, "Fitness evaluator verification: all deterministic checks passed");
 }
+
+// Deterministic check of ai::DrivingDiagnostics (the read-only 60 Hz driving-quality
+// accumulator behind the training/champion logging) and its integration into
+// ai::neat::Individual. Diagnostics are reporting-only: this proves both that the
+// numbers are right AND that observing them never changes an Individual's fitness.
+void verifyDrivingDiagnostics(const simulation::Track& track)
+{
+    using ai::DrivingDiagnostics;
+    constexpr float kDt = 1.0f / 60.0f;
+    constexpr float kPeak = 0.2443f; // stands in for CarParams::frontPeakSlipAngle
+
+    // Feeds one frame with every non-listed input neutral.
+    auto feed = [&](DrivingDiagnostics& d, float steer, float brake, float speed, float yaw, float slip, int laps)
+    { d.update(steer, brake, speed, yaw, slip, kPeak, laps, kDt); };
+
+    // 1: a fresh accumulator reports all zeros (no division by zero).
+    {
+        DrivingDiagnostics d;
+        const ai::DrivingDiagnosticsSummary s = d.summary();
+        assert(s.steeringReversalsPerSecond == 0.0f && s.steeringSaturationFraction == 0.0f && s.meanAbsSteering == 0.0f &&
+               s.meanLateralAcceleration == 0.0f && s.frontSlipBeyondPeakFraction == 0.0f && s.lap2PlusAverageSpeed == 0.0f &&
+               s.physicalBrakeUsageFraction == 0.0f && "an accumulator with no samples must report zeros");
+    }
+
+    // 2: mean |steering| and the saturation fraction (|cmd| > 0.99).
+    {
+        DrivingDiagnostics d;
+        for (float steer : {1.0f, -1.0f, 0.5f, 0.0f}) feed(d, steer, 0.0f, 100.0f, 0.0f, 0.0f, 0);
+        const ai::DrivingDiagnosticsSummary s = d.summary();
+        assert(std::fabs(s.meanAbsSteering - 0.625f) < 1e-6f && "mean |steering| of {1,-1,0.5,0} must be 0.625");
+        assert(std::fabs(s.steeringSaturationFraction - 0.5f) < 1e-6f && "2 of 4 frames are saturated");
+        DrivingDiagnostics justUnder;
+        feed(justUnder, 0.99f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+        assert(justUnder.summary().steeringSaturationFraction == 0.0f && "exactly 0.99 is NOT above the saturation threshold");
+    }
+
+    // 3: steering sign reversals -- counted between frames beyond +-0.3 of
+    // opposite sign; the first committed sign is not a reversal; frames inside
+    // the +-0.3 band are ignored.
+    {
+        DrivingDiagnostics d;
+        // +, +, (ignored), -, -, (ignored), +, +, - => reversals at -, +, - = 3, over 9 frames
+        for (float steer : {0.5f, 0.8f, 0.1f, -0.4f, -0.6f, 0.2f, 0.5f, 0.31f, -0.31f}) feed(d, steer, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+        assert(d.getReversalCount() == 3 && "reversal count mismatch");
+        assert(std::fabs(d.summary().steeringReversalsPerSecond - 3.0f / (9.0f * kDt)) < 1e-3f &&
+               "reversals per second must be reversals / elapsed simulated seconds");
+
+        DrivingDiagnostics hover;
+        for (int i = 0; i < 60; ++i) feed(hover, (i % 2 == 0) ? 0.29f : -0.29f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+        assert(hover.getReversalCount() == 0 && "hovering inside the +-0.3 band must never count as reversals");
+
+        DrivingDiagnostics oneSided;
+        for (int i = 0; i < 30; ++i) feed(oneSided, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+        assert(oneSided.getReversalCount() == 0 && "a held steering command has no reversals");
+    }
+
+    // 4: mean lateral acceleration (speed * |yaw rate|), front slip beyond the
+    // peak (by magnitude, either sign), and physical brake usage (> 0.05).
+    {
+        DrivingDiagnostics d;
+        feed(d, 0.0f, 0.00f, 200.0f, 2.0f, 0.30f, 0);   // 400, beyond peak, no brake
+        feed(d, 0.0f, 0.05f, 100.0f, -1.0f, -0.30f, 0); // 100, beyond peak (negative slip), brake exactly 0.05 -> not used
+        feed(d, 0.0f, 0.06f, 300.0f, 0.0f, 0.10f, 0);   // 0, within peak, brake used
+        feed(d, 0.0f, 1.00f, 50.0f, 4.0f, 0.00f, 0);    // 200, within peak, brake used
+        const ai::DrivingDiagnosticsSummary s = d.summary();
+        assert(std::fabs(s.meanLateralAcceleration - (400.0f + 100.0f + 0.0f + 200.0f) / 4.0f) < 1e-3f &&
+               "mean lateral acceleration must be mean(speed * |yaw|)");
+        assert(std::fabs(s.frontSlipBeyondPeakFraction - 0.5f) < 1e-6f && "2 of 4 frames have |front slip| above the peak");
+        assert(std::fabs(s.physicalBrakeUsageFraction - 0.5f) < 1e-6f && "2 of 4 frames have brake above 0.05");
+    }
+
+    // 5: lap-2+ average speed uses only frames after the first completed lap.
+    {
+        DrivingDiagnostics d;
+        feed(d, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 0);
+        feed(d, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 0);
+        feed(d, 0.0f, 0.0f, 300.0f, 0.0f, 0.0f, 1);
+        feed(d, 0.0f, 0.0f, 200.0f, 0.0f, 0.0f, 2);
+        assert(std::fabs(d.summary().lap2PlusAverageSpeed - 250.0f) < 1e-3f && "lap-2+ speed must average only frames with lapCount >= 1");
+        DrivingDiagnostics none;
+        feed(none, 0.0f, 0.0f, 500.0f, 0.0f, 0.0f, 0);
+        assert(none.summary().lap2PlusAverageSpeed == 0.0f && "no completed lap must report 0, not the lap-1 speed");
+    }
+
+    // 6: the fractions/means are duration-invariant for a repeating pattern,
+    // and the reversal RATE is (approximately -- the very first committed sign
+    // is not a reversal) too.
+    {
+        auto run = [&](int periods)
+        {
+            DrivingDiagnostics d;
+            for (int p = 0; p < periods; ++p)
+                for (float steer : {0.5f, 0.5f, 0.5f, -1.0f, -1.0f}) feed(d, steer, 0.0f, 100.0f, 1.0f, 0.0f, 0);
+            return d.summary();
+        };
+        const ai::DrivingDiagnosticsSummary shortRun = run(10);
+        const ai::DrivingDiagnosticsSummary longRun = run(20);
+        assert(std::fabs(shortRun.meanAbsSteering - longRun.meanAbsSteering) < 1e-5f &&
+               std::fabs(shortRun.steeringSaturationFraction - longRun.steeringSaturationFraction) < 1e-6f &&
+               std::fabs(shortRun.meanLateralAcceleration - longRun.meanLateralAcceleration) < 1e-4f &&
+               "the same repeating pattern for twice as long must give the same means/fractions");
+        assert(std::fabs(shortRun.steeringReversalsPerSecond - longRun.steeringReversalsPerSecond) / longRun.steeringReversalsPerSecond < 0.05f &&
+               "the reversal rate must not depend on how long the pattern is sustained");
+    }
+
+    // 7: reset() clears everything.
+    {
+        DrivingDiagnostics d;
+        for (float steer : {1.0f, -1.0f, 1.0f}) feed(d, steer, 1.0f, 300.0f, 2.0f, 0.5f, 1);
+        d.reset();
+        assert(d.getFrameCount() == 0 && d.getReversalCount() == 0 && d.summary().meanAbsSteering == 0.0f &&
+               d.summary().lap2PlusAverageSpeed == 0.0f && "reset must clear all accumulated diagnostics");
+        // ... including the committed steering sign: the first frame after reset is not a reversal.
+        feed(d, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+        assert(d.getReversalCount() == 0 && "reset must also forget the previously committed steering sign");
+    }
+
+    // 7b: longitudinal-request diagnostics -- request ranges, brake-dominant
+    // fraction, and the first-brake-onset capture (speed + preview 120/300).
+    {
+        DrivingDiagnostics fresh;
+        const ai::DrivingDiagnosticsSummary z = fresh.summary();
+        assert(z.brakeRequestDominantFraction == 0.0f && z.brakeOnsetSpeed == 0.0f && z.throttleRequestMax == 0.0f &&
+               "a fresh accumulator must report zero longitudinal diagnostics");
+
+        DrivingDiagnostics d;
+        // (throttleReq, brakeReq, brakeCmd, speed, p120, p300)
+        d.recordLongitudinal(0.8f, 0.2f, 0.0f, 250.0f, 0.1f, 0.2f);  // sub-threshold brake
+        d.recordLongitudinal(0.4f, 0.4f, 0.0f, 260.0f, 0.1f, 0.2f);  // equal -> not dominant
+        d.recordLongitudinal(0.3f, 0.6f, 0.30f, 300.0f, -0.4f, 0.7f); // brake dominant, first onset
+        d.recordLongitudinal(0.2f, 0.9f, 0.70f, 280.0f, 0.5f, -0.6f); // brake dominant, later onset ignored
+        const ai::DrivingDiagnosticsSummary s = d.summary();
+        assert(std::fabs(s.brakeRequestDominantFraction - 0.5f) < 1e-6f && "2 of 4 frames have brakeRequest > throttleRequest");
+        assert(s.throttleRequestMin == 0.2f && s.throttleRequestMax == 0.8f && s.brakeRequestMin == 0.2f &&
+               s.brakeRequestMax == 0.9f && "request ranges must track min/max over all frames");
+        assert(s.brakeOnsetSpeed == 300.0f && s.brakeOnsetPreview120 == -0.4f && s.brakeOnsetPreview300 == 0.7f &&
+               "brake onset must capture speed and previews at the FIRST frame with brake above 0.05");
+
+        DrivingDiagnostics noBrake;
+        noBrake.recordLongitudinal(0.5f, 0.5f, 0.05f, 200.0f, 0.0f, 0.0f); // exactly 0.05 -> not onset
+        assert(noBrake.summary().brakeOnsetSpeed == 0.0f && "brake exactly at the usage threshold is not an onset");
+
+        d.reset();
+        assert(d.summary().brakeRequestDominantFraction == 0.0f && d.summary().brakeOnsetSpeed == 0.0f &&
+               d.summary().throttleRequestMax == 0.0f && "reset must clear the longitudinal diagnostics");
+    }
+
+    // 8: Individual integration. The diagnostics observe the exact same 60 Hz
+    // step as fitness, are reset with the Individual, are deterministic, and --
+    // crucially -- observing them never changes fitness: an Individual's fitness
+    // matches a plain Car -> TrackProgress -> FitnessEvaluator pipeline that
+    // has no diagnostics at all.
+    {
+        const ai::neat::Genome genome = app::createDemonstrationGenome();
+        ai::neat::Individual individual(genome, track, makeCarParams(), kSpawnPosition, kSpawnHeading);
+        ai::neat::Individual twin(genome, track, makeCarParams(), kSpawnPosition, kSpawnHeading);
+
+        simulation::Car refCar(makeCarParams(), track);
+        refCar.reset(kSpawnPosition, kSpawnHeading);
+        simulation::TrackProgress refProgress(track);
+        refProgress.reset(refCar);
+        ai::AIController refController(ai::neat::buildPhenotype(genome));
+        ai::FitnessEvaluator refFitness;
+        refFitness.reset();
+
+        for (int step = 0; step < 300; ++step)
+        {
+            individual.update(kSimulationDt);
+            twin.update(kSimulationDt);
+            if (!refFitness.isEvaluationFinished())
+            {
+                const simulation::CarInput input = refController.update(refCar, refProgress);
+                refCar.update(input, kSimulationDt);
+                refProgress.update(refCar);
+                refFitness.update(refCar, refProgress, input.steering, kSimulationDt);
+            }
+        }
+        assert(individual.getFitness() == refFitness.getFitness() &&
+               individual.getFitnessEvaluator().getElapsedTime() == refFitness.getElapsedTime() &&
+               "diagnostics must be observation-only: fitness must equal a diagnostics-free reference pipeline exactly");
+
+        const ai::DrivingDiagnosticsSummary s = individual.getDrivingSummary();
+        assert(s.averageAbsSteeringDelta == individual.getFitnessEvaluator().getAverageAbsSteeringDelta() &&
+               s.averageAbsSteeringDelta == refFitness.getAverageAbsSteeringDelta() &&
+               "the summary's averageAbsSteeringDelta must be the evaluator's own value");
+        assert(s.meanAbsSteering >= 0.0f && s.meanAbsSteering <= 1.0f && s.steeringSaturationFraction >= 0.0f &&
+               s.steeringSaturationFraction <= 1.0f && s.frontSlipBeyondPeakFraction >= 0.0f &&
+               s.frontSlipBeyondPeakFraction <= 1.0f && s.physicalBrakeUsageFraction >= 0.0f &&
+               s.physicalBrakeUsageFraction <= 1.0f && s.meanLateralAcceleration >= 0.0f &&
+               s.steeringReversalsPerSecond >= 0.0f && "every diagnostic must stay in its valid range");
+
+        const ai::DrivingDiagnosticsSummary t = twin.getDrivingSummary();
+        assert(s.averageAbsSteeringDelta == t.averageAbsSteeringDelta && s.steeringReversalsPerSecond == t.steeringReversalsPerSecond &&
+               s.steeringSaturationFraction == t.steeringSaturationFraction && s.meanAbsSteering == t.meanAbsSteering &&
+               s.meanLateralAcceleration == t.meanLateralAcceleration &&
+               s.frontSlipBeyondPeakFraction == t.frontSlipBeyondPeakFraction && s.lap2PlusAverageSpeed == t.lap2PlusAverageSpeed &&
+               s.physicalBrakeUsageFraction == t.physicalBrakeUsageFraction &&
+               s.brakeRequestDominantFraction == t.brakeRequestDominantFraction &&
+               s.throttleRequestMin == t.throttleRequestMin && s.throttleRequestMax == t.throttleRequestMax &&
+               s.brakeRequestMax == t.brakeRequestMax && s.brakeOnsetSpeed == t.brakeOnsetSpeed &&
+               "identical Individuals must produce bit-identical diagnostics");
+        assert(s.throttleRequestMin >= 0.0f && s.throttleRequestMax <= 1.0f && s.brakeRequestMin >= 0.0f &&
+               s.brakeRequestMax <= 1.0f && s.brakeRequestDominantFraction >= 0.0f &&
+               s.brakeRequestDominantFraction <= 1.0f && "request diagnostics must stay in [0, 1]");
+
+        individual.reset();
+        const ai::DrivingDiagnosticsSummary cleared = individual.getDrivingSummary();
+        assert(cleared.averageAbsSteeringDelta == 0.0f && cleared.meanAbsSteering == 0.0f &&
+               cleared.meanLateralAcceleration == 0.0f && cleared.steeringReversalsPerSecond == 0.0f &&
+               "Individual::reset() must clear its diagnostics along with fitness");
+    }
+
+    TraceLog(LOG_INFO, "Driving diagnostics verification: all deterministic checks passed");
+}
+
 
 // Checks the two early-termination rules layered onto FitnessEvaluator (see
 // its "Early termination" class-comment section) -- kNoProgressTimeout/
@@ -1094,7 +1529,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         evaluator.reset();
 
         float p = 0.0f;
-        for (int second = 0; second < 10; ++second) // 10s total, comfortably under kMaxEvaluationTime (60s)
+        for (int second = 0; second < 10; ++second) // 10s total, well before any time limit
         {
             p += 0.02f; // >> kProgressImprovementEpsilon (0.001) every step
             car.reset(positionAtLapPosition(track, p), kSpawnHeading);
@@ -1215,9 +1650,9 @@ void verifyEarlyTermination(const simulation::Track& track)
         assert(progress.getBestProgress() >= 0.04f && "setup: this scenario must actually clear kMinimumInitialProgress");
     }
 
-    // 6: a car that keeps making steady progress the whole time can still
-    // legitimately run all the way to the existing 60-second maximum --
-    // neither new rule can cut it short as long as progress keeps coming.
+    // 6: a car that keeps making steady progress the whole time is never cut
+    // short by either early-termination rule -- it runs all the way to the
+    // kSafetyTimeoutSeconds failsafe (it never completes the target laps here).
     {
         simulation::Car car(makeCarParams(), track);
         car.reset(positionAtLapPosition(track, 0.0f), kSpawnHeading);
@@ -1227,7 +1662,7 @@ void verifyEarlyTermination(const simulation::Track& track)
         evaluator.reset();
 
         float p = 0.0f;
-        for (int second = 0; second < 62 && !evaluator.isEvaluationFinished(); ++second)
+        for (int second = 0; second < 182 && !evaluator.isEvaluationFinished(); ++second)
         {
             p += 0.01f;
             car.reset(positionAtLapPosition(track, std::fmod(p, 1.0f)), kSpawnHeading);
@@ -1235,8 +1670,8 @@ void verifyEarlyTermination(const simulation::Track& track)
             evaluator.update(car, progress, 0.0f, 1.0f);
         }
         assert(evaluator.isEvaluationFinished() &&
-               evaluator.getFinishReason() == ai::EvaluationFinishReason::TimeLimit &&
-               "a car making steady progress the whole time must still be able to reach the 60s TimeLimit, "
+               evaluator.getFinishReason() == ai::EvaluationFinishReason::SafetyTimeout &&
+               "a car making steady progress the whole time must still be able to reach the 180 s SafetyTimeout, "
                "unaffected by either early-termination rule"); // 6
     }
 

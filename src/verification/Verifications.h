@@ -22,6 +22,7 @@ void verifySensors(const simulation::Track& track);
 void verifyObservation(const simulation::Track& track);
 void verifyVehiclePhysics(const simulation::Track& track);
 void verifySteeringRateLimit(const simulation::Track& track);
+void verifySteeringAuthority();
 void verifyAIController(const simulation::Track& track);
 
 void verifyNeuralNetwork();
@@ -46,6 +47,7 @@ void verifyImageBasedTrackSystem(const simulation::Track& track);
 
 void verifyFitnessEvaluator(const simulation::Track& track);
 void verifyEarlyTermination(const simulation::Track& track);
+void verifyDrivingDiagnostics(const simulation::Track& track);
 
 void verifyPopulation(const simulation::Track& track);
 void verifySpeciesAwareReproduction(const simulation::Track& track);

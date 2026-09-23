@@ -29,8 +29,10 @@ const char* finishReasonLabel(ai::EvaluationFinishReason reason)
             return "-";
         case ai::EvaluationFinishReason::Collision:
             return "Collision";
-        case ai::EvaluationFinishReason::TimeLimit:
-            return "TimeLimit";
+        case ai::EvaluationFinishReason::CompletedLaps:
+            return "CompletedLaps";
+        case ai::EvaluationFinishReason::SafetyTimeout:
+            return "SafetyTimeout";
         case ai::EvaluationFinishReason::NoProgress:
             return "NoProgress";
         case ai::EvaluationFinishReason::InsufficientInitialProgress:

@@ -3,6 +3,7 @@
 #include "raylib.h"
 
 #include "ai/AIController.h"
+#include "ai/DrivingDiagnostics.h"
 #include "ai/FitnessEvaluator.h"
 #include "ai/neat/Genome.h"
 #include "simulation/Car.h"
@@ -40,6 +41,18 @@ public:
     const simulation::TrackProgress& getProgress() const { return m_progress; }
     const ai::FitnessEvaluator& getFitnessEvaluator() const { return m_fitness; }
 
+    // Driving-quality diagnostics for this evaluation (steering reversals,
+    // saturation, lateral acceleration, ...), measured at the real 60 Hz
+    // control-step rate. Read-only reporting: nothing in fitness, control or
+    // selection ever reads it. averageAbsSteeringDelta is FitnessEvaluator's
+    // own value, merged in here.
+    ai::DrivingDiagnosticsSummary getDrivingSummary() const
+    {
+        ai::DrivingDiagnosticsSummary summary = m_diagnostics.summary();
+        summary.averageAbsSteeringDelta = m_fitness.getAverageAbsSteeringDelta();
+        return summary;
+    }
+
     // Read-only access to the controller's most recent raw network outputs
     // / observation (AIController::getRawSteeringOutput() etc.) -- debug/
     // telemetry only, never used to drive control from outside Individual.
@@ -53,6 +66,7 @@ private:
     ai::AIController m_controller;
     simulation::TrackProgress m_progress;
     ai::FitnessEvaluator m_fitness;
+    ai::DrivingDiagnostics m_diagnostics; // observation only -- see getDrivingSummary()
 };
 
 } // namespace ai::neat

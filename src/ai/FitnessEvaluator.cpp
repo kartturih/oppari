@@ -74,7 +74,10 @@ constexpr float kSmallTimeEpsilon = 0.1f;
 // magnitude as kProgressRateScale above, a reasonable starting point for a
 // term whose actual safety guarantee comes from kMaxSteeringPenaltyFraction
 // below, not from this scale being precisely tuned (same philosophy as
-// kProgressRateScale/kMaxProgressRateFraction).
+// kProgressRateScale/kMaxProgressRateFraction). (A 4000 trial was run and
+// reverted: at the ~0.08 average steering delta a sawing champion shows, 400
+// costs only ~33 points of a ~4700-point fitness -- deliberately a light
+// touch.)
 constexpr float kSteeringSmoothnessPenaltyScale = 400.0f;
 
 // Hard ceiling on steeringSmoothnessPenalty, as a fraction of
@@ -90,8 +93,6 @@ constexpr float kSteeringSmoothnessPenaltyScale = 400.0f;
 // gentler cap avoids over-suppressing early exploration before smoother
 // steering has had any chance to be discovered and rewarded.
 constexpr float kMaxSteeringPenaltyFraction = 0.25f;
-
-constexpr float kMaxEvaluationTime = 60.0f; // seconds, absolute cap
 
 // Seconds without meaningful forward progress before early termination
 // (catches circling/parked cars). Short enough to matter, long enough that
@@ -224,9 +225,15 @@ void FitnessEvaluator::update(const simulation::Car& car, const simulation::Trac
     {
         m_finishReason = EvaluationFinishReason::Collision;
     }
-    else if (m_elapsedTime >= kMaxEvaluationTime)
+    else if (currentLapCount >= kTargetLapCount)
     {
-        m_finishReason = EvaluationFinishReason::TimeLimit;
+        // Success: the third lap's progress, lap time and fitness were all
+        // just recorded above, so nothing is lost by finishing here.
+        m_finishReason = EvaluationFinishReason::CompletedLaps;
+    }
+    else if (m_elapsedTime >= kSafetyTimeoutSeconds)
+    {
+        m_finishReason = EvaluationFinishReason::SafetyTimeout;
     }
     else if (m_elapsedTime >= kInitialProgressDeadline && bestProgress < kMinimumInitialProgress)
     {

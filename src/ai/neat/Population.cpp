@@ -541,6 +541,7 @@ void Population::reproduce()
                 std::max(generationDurationSeconds, individual.getFitnessEvaluator().getElapsedTime());
         }
         metricsInput.generationDurationSeconds = generationDurationSeconds;
+        metricsInput.bestDriving = m_individuals[rankedIndices[0]].getDrivingSummary();
 
         metricsInput.speciesCount = speciesCount;
         if (speciesCount > 0)

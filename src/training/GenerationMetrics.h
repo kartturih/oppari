@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "ai/DrivingDiagnostics.h"
 #include "ai/FitnessEvaluator.h"
 #include "ai/neat/Genome.h"
 
@@ -49,11 +50,16 @@ GenomeComplexity computeGenomeComplexity(const ai::neat::Genome& genome);
 //   best/avgProgress           -- TrackProgress::getBestProgress() for the best individual / population mean
 //   lapsCompletedCount/completionRate -- individuals with hasCompletedLap(), and their fraction
 //   bestGenome*/avgGenome*     -- GenomeComplexity of the best individual, and population averages
-//   generationDurationSeconds  -- longest FitnessEvaluator::getElapsedTime() this generation (can exceed
-//                                  kMaxEvaluationTime by up to one simulation step, since the timeout is
-//                                  checked post-step)
-//   terminatedCollisionCount/terminatedMaxTimeCount/terminatedNoProgressCount/terminatedSlowStartCount
-//                              -- per-EvaluationFinishReason counts (always sum to population size)
+//   generationDurationSeconds  -- longest FitnessEvaluator::getElapsedTime() this generation (a
+//                                  safety-timeout evaluation can exceed kSafetyTimeoutSeconds by up to
+//                                  one simulation step, since the timeout is checked post-step)
+//   terminatedCollisionCount/terminatedSafetyTimeoutCount/terminatedNoProgressCount/
+//   terminatedSlowStartCount/terminatedCompletedLapsCount
+//                              -- per-EvaluationFinishReason counts (always sum to population size);
+//                                  CompletedLaps is the normal successful end (kTargetLapCount laps)
+//   bestDriving                -- the BEST individual's ai::DrivingDiagnosticsSummary (60 Hz driving-quality
+//                                  diagnostics: steering delta/reversals/saturation, lateral acceleration,
+//                                  front slip past peak, lap-2+ speed, physical brake usage). Reporting only.
 struct GenerationMetrics
 {
     std::size_t generation = 0;
@@ -85,9 +91,12 @@ struct GenerationMetrics
     float generationDurationSeconds = 0.0f;
 
     std::size_t terminatedCollisionCount = 0;
-    std::size_t terminatedMaxTimeCount = 0;
+    std::size_t terminatedSafetyTimeoutCount = 0;
     std::size_t terminatedNoProgressCount = 0;
     std::size_t terminatedSlowStartCount = 0;
+    std::size_t terminatedCompletedLapsCount = 0;
+
+    ai::DrivingDiagnosticsSummary bestDriving;
 };
 
 // Raw per-individual/per-species inputs buildGenerationMetrics() reduces.
@@ -118,6 +127,9 @@ struct GenerationMetricsInput
     std::size_t stagnantSpeciesExcluded = 0;
 
     float generationDurationSeconds = 0.0f;
+
+    // The best individual's (bestIndividualIndex) driving diagnostics.
+    ai::DrivingDiagnosticsSummary bestDriving;
 };
 
 // Throws std::invalid_argument if rawFitness is empty, any per-individual

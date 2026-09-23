@@ -115,7 +115,8 @@ int main()
     training::RunMetadata runMetadata;
     runMetadata.buildVersion = OPPARI_BUILD_VERSION;
     runMetadata.trackName = "extreme";
-    runMetadata.maxEvaluationTimeSeconds = 60.0f; // mirrors FitnessEvaluator.cpp's kMaxEvaluationTime -- see RunMetadata.h
+    runMetadata.targetLapCount = ai::kTargetLapCount;
+    runMetadata.safetyTimeoutSeconds = ai::kSafetyTimeoutSeconds;
     runMetadata.populationConfig = populationConfig;
     runMetadata.mutationConfig = mutationConfig;
     runMetadata.crossoverConfig = crossoverConfig;
@@ -162,6 +163,7 @@ int main()
     // progress is visible from console output too, not only the on-screen
     // panel. Reads Population's state only; never influences it.
     std::size_t lastLoggedGeneration = population.getGeneration();
+    bool brakeFirstUseLogged = false;
 
     // Runtime-selectable NORMAL/FAST training-speed mode (F to toggle -- see
     // the main loop below). FAST removes SetTargetFPS's real-time pacing and
@@ -265,6 +267,18 @@ int main()
                              static_cast<double>(metrics.avgFitness), static_cast<double>(metrics.medianFitness),
                              static_cast<int>(metrics.speciesCount), static_cast<int>(metrics.bestGenomeNodeCount),
                              static_cast<int>(metrics.bestGenomeConnectionGeneCount));
+
+                    // Observation only: announce (once) the first generation
+                    // whose best individual actually used the physical brake.
+                    if (!brakeFirstUseLogged &&
+                        metrics.bestDriving.physicalBrakeUsageFraction > 0.0f)
+                    {
+                        brakeFirstUseLogged = true;
+                        TraceLog(LOG_INFO, "First physical brake use by a champion: gen %d (%.2f%% of frames, onset %.0f px/s)",
+                                 static_cast<int>(metrics.generation),
+                                 static_cast<double>(metrics.bestDriving.physicalBrakeUsageFraction) * 100.0,
+                                 static_cast<double>(metrics.bestDriving.brakeOnsetSpeed));
+                    }
                 }
             }
         }

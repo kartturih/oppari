@@ -798,6 +798,52 @@ void verifyAddConnectionMutation()
                genome.connections()[0].getTargetId() == 1 && "the added connection must be exactly Input(0) -> Output(1)");
     }
 
+    // M: mutation can later connect to the two track-preview inputs
+    // (Input IDs 12 and 13), which start unconnected in the demonstration
+    // genome. Repeated add-connection mutation (probability forced to 1)
+    // must eventually attach both to the network -- the graph has only
+    // (kInputCount + 1 Bias) x 3 possible source/target pairs, so 60
+    // successful additions are more than enough to exhaust it.
+    {
+        Genome genome = app::createDemonstrationGenome();
+        for (const ai::neat::ConnectionGene& connection : genome.connections())
+        {
+            assert(connection.getSourceId() != ai::kPreviewNearObservationIndex &&
+                   connection.getSourceId() != ai::kPreviewFarObservationIndex &&
+                   "setup: the preview inputs must start unconnected");
+        }
+        ai::neat::NodeId maxNodeId = -1;
+        ai::neat::InnovationNumber maxInnovation = -1;
+        for (const ai::neat::NodeGene& node : genome.nodes())
+        {
+            maxNodeId = std::max(maxNodeId, node.getId());
+        }
+        for (const ai::neat::ConnectionGene& connection : genome.connections())
+        {
+            maxInnovation = std::max(maxInnovation, connection.getInnovationNumber());
+        }
+        InnovationTracker tracker(maxNodeId + 1, maxInnovation + 1);
+        MutationConfig config;
+        config.addConnectionProbability = 1.0f;
+        GenomeMutator mutator(13u);
+
+        bool nearConnected = false;
+        bool farConnected = false;
+        for (int attempt = 0; attempt < 60; ++attempt)
+        {
+            mutator.mutateAddConnection(genome, tracker, config);
+            for (const ai::neat::ConnectionGene& connection : genome.connections())
+            {
+                nearConnected = nearConnected || connection.getSourceId() == ai::kPreviewNearObservationIndex;
+                farConnected = farConnected || connection.getSourceId() == ai::kPreviewFarObservationIndex;
+            }
+        }
+        assert(nearConnected && farConnected &&
+               "add-connection mutation must be able to attach both preview inputs to the network"); // M
+        genome.validate();
+        (void)ai::neat::buildPhenotype(genome); // still a valid, buildable network
+    }
+
     // 22: Bias can be a source.
     {
         Genome genome = makeBiasToOutputGenome();

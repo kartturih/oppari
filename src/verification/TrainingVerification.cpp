@@ -152,8 +152,8 @@ void verifyTrainingMetrics()
         const GenomeComplexity complexityC{3, 4, 4};
         const GenomeComplexity complexityD{9, 14, 10}; // belongs to the best (highest-fitness) individual
         input.genomeComplexities = {complexityA, complexityB, complexityC, complexityD};
-        input.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::TimeLimit,
-                                ai::EvaluationFinishReason::TimeLimit, ai::EvaluationFinishReason::NoProgress};
+        input.finishReasons = {ai::EvaluationFinishReason::Collision, ai::EvaluationFinishReason::SafetyTimeout,
+                                ai::EvaluationFinishReason::CompletedLaps, ai::EvaluationFinishReason::NoProgress};
         input.bestIndividualIndex = 3; // rawFitness[3] == 40, the maximum
         input.speciesCount = 2;
         input.largestSpeciesSize = 3;
@@ -161,8 +161,14 @@ void verifyTrainingMetrics()
         input.bestSpeciesHistoricalFitness = 999.0f;
         input.stagnantSpeciesExcluded = 1;
         input.generationDurationSeconds = 12.5f;
+        input.bestDriving.averageAbsSteeringDelta = 0.07f;
+        input.bestDriving.steeringReversalsPerSecond = 3.0f;
+        input.bestDriving.physicalBrakeUsageFraction = 0.2f;
 
         const GenerationMetrics metrics = training::buildGenerationMetrics(input);
+        assert(metrics.bestDriving.averageAbsSteeringDelta == 0.07f && metrics.bestDriving.steeringReversalsPerSecond == 3.0f &&
+               metrics.bestDriving.physicalBrakeUsageFraction == 0.2f &&
+               "buildGenerationMetrics must pass the best individual's driving diagnostics through unchanged");
 
         assert(metrics.generation == 7 && "generation must pass through unchanged"); // 7
         assert(metrics.bestFitness == 40.0f && metrics.avgFitness == 25.0f && metrics.medianFitness == 25.0f &&
@@ -186,9 +192,10 @@ void verifyTrainingMetrics()
                std::fabs(metrics.avgGenomeConnectionGeneCount - expectedAvgConnections) < 1e-5f &&
                "avg genome node/connection counts must be the population mean"); // 15
         assert(metrics.generationDurationSeconds == 12.5f && "generationDurationSeconds must pass through unchanged"); // 16
-        assert(metrics.terminatedCollisionCount == 1 && metrics.terminatedMaxTimeCount == 2 &&
-               metrics.terminatedNoProgressCount == 1 && metrics.terminatedSlowStartCount == 0 &&
-               "finishReasons must be reduced into the four terminated*Count fields by simple counting"); // 21
+        assert(metrics.terminatedCollisionCount == 1 && metrics.terminatedSafetyTimeoutCount == 1 &&
+               metrics.terminatedCompletedLapsCount == 1 && metrics.terminatedNoProgressCount == 1 &&
+               metrics.terminatedSlowStartCount == 0 &&
+               "finishReasons must be reduced into the five terminated*Count fields by simple counting"); // 21
     }
 
     // 22-27: buildGenerationMetrics input validation. Every negative case
@@ -282,7 +289,8 @@ training::RunMetadata makeTestMetadata()
     training::RunMetadata metadata;
     metadata.buildVersion = "test-build";
     metadata.trackName = "test-track";
-    metadata.maxEvaluationTimeSeconds = 60.0f;
+    metadata.targetLapCount = ai::kTargetLapCount;
+    metadata.safetyTimeoutSeconds = ai::kSafetyTimeoutSeconds;
     return metadata;
 }
 
@@ -322,13 +330,25 @@ void verifyTrainingLogger()
            "formatFloat must format -Inf as \"-inf\"");
 
     // 3: csvHeaderLine() column count matches GenerationMetrics' own field
-    // count (26) exactly -- compatibility_threshold is appended last so
-    // every pre-existing column keeps its original index.
+    // count (37) exactly -- compatibility_threshold was appended after the
+    // original columns, then the eight best-individual driving diagnostics, then
+    // two brake-request columns, then terminated_completed_laps_count, so every
+    // pre-existing column keeps its index.
     const std::string header = training::csvHeaderLine();
-    assert(countFields(header) == 26 && "CSV header must have exactly 26 columns, one per GenerationMetrics field");
+    assert(countFields(header) == 37 && "CSV header must have exactly 37 columns, one per GenerationMetrics field");
     assert(header.substr(0, 10) == "generation" && "CSV header's first column must be \"generation\"");
-    assert(header.substr(header.size() - 23) == "compatibility_threshold" &&
-           "CSV header's last column must be \"compatibility_threshold\", appended after every existing column");
+    const std::string tailColumns =
+        "best_physical_brake_usage_fraction,best_brake_request_dominant_fraction,best_brake_onset_speed,"
+        "terminated_completed_laps_count";
+    assert(header.size() > tailColumns.size() &&
+           header.compare(header.size() - tailColumns.size(), tailColumns.size(), tailColumns) == 0 &&
+           "CSV header must end with the physical-brake-usage, brake-request-dominant, brake-onset-speed and "
+           "completed-laps columns");
+    assert(header.find(",terminated_safety_timeout_count,") != std::string::npos &&
+           header.find("max_time") == std::string::npos &&
+           "the old generic max_time termination column must be gone, replaced by terminated_safety_timeout_count");
+    assert(header.find(",compatibility_threshold,best_avg_abs_steering_delta,") != std::string::npos &&
+           "the driving-diagnostic columns must directly follow compatibility_threshold");
 
     // 4: generationMetricsToCsvRow() produces the same column COUNT as the
     // header, in the documented order, with every field's value recoverable
@@ -357,10 +377,21 @@ void verifyTrainingLogger()
         metrics.avgGenomeConnectionGeneCount = 20.4f;
         metrics.generationDurationSeconds = 30.0f;
         metrics.terminatedCollisionCount = 7;
-        metrics.terminatedMaxTimeCount = 8;
+        metrics.terminatedSafetyTimeoutCount = 8;
         metrics.terminatedNoProgressCount = 9;
         metrics.terminatedSlowStartCount = 10;
         metrics.compatibilityThresholdUsed = 2.7f;
+        metrics.bestDriving.averageAbsSteeringDelta = 0.125f;
+        metrics.bestDriving.steeringReversalsPerSecond = 2.5f;
+        metrics.bestDriving.steeringSaturationFraction = 0.75f;
+        metrics.bestDriving.meanAbsSteering = 0.5f;
+        metrics.bestDriving.meanLateralAcceleration = 640.0f;
+        metrics.bestDriving.frontSlipBeyondPeakFraction = 0.25f;
+        metrics.bestDriving.lap2PlusAverageSpeed = 262.5f;
+        metrics.bestDriving.physicalBrakeUsageFraction = 0.0625f;
+        metrics.bestDriving.brakeRequestDominantFraction = 0.125f;
+        metrics.bestDriving.brakeOnsetSpeed = 300.0f;
+        metrics.terminatedCompletedLapsCount = 11;
 
         const std::string row = training::generationMetricsToCsvRow(metrics);
         assert(countFields(row) == countFields(header) &&
@@ -373,17 +404,22 @@ void verifyTrainingLogger()
         {
             fields.push_back(field);
         }
-        assert(fields.size() == 26 && "split CSV row must yield exactly 26 fields"); // 5
+        assert(fields.size() == 37 && "split CSV row must yield exactly 37 fields"); // 5
         assert(fields[0] == "42" && "column 0 (generation) must be \"42\""); // 6
         assert(fields[1] == "812.4" && "column 1 (best_fitness) must be locale-independent \"812.4\""); // 7
         assert(fields[15] == "14" && "column 15 (best_genome_nodes) must be \"14\""); // 8
         assert(fields[16] == "31" && "column 16 (best_genome_connections) must be \"31\""); // 9
         assert(fields[20] == "30" && "column 20 (generation_duration_seconds) must be \"30\""); // 10
         assert(fields[21] == "7" && fields[22] == "8" && fields[23] == "9" && fields[24] == "10" &&
-               "columns 21-24 (terminated_collision/max_time/no_progress/slow_start_count) must be appended, "
+               "columns 21-24 (terminated_collision/safety_timeout/no_progress/slow_start_count) must be appended, "
                "in that order, after every pre-existing column"); // 10 (continued)
-        assert(fields[25] == "2.7" &&
-               "column 25 (compatibility_threshold) must be appended last, after every other column"); // 10 (continued)
+        assert(fields[25] == "2.7" && "column 25 (compatibility_threshold) must keep its original index"); // 10 (continued)
+        assert(fields[26] == "0.125" && fields[27] == "2.5" && fields[28] == "0.75" && fields[29] == "0.5" &&
+               fields[30] == "640" && fields[31] == "0.25" && fields[32] == "262.5" && fields[33] == "0.0625" &&
+               "columns 26-33 must be the eight best-individual driving diagnostics, in documented order"); // 10 (continued)
+        assert(fields[34] == "0.125" && fields[35] == "300" &&
+               "columns 34-35 must be best_brake_request_dominant_fraction and best_brake_onset_speed");
+        assert(fields[36] == "11" && "column 36 must be terminated_completed_laps_count, appended last");
     }
 
     // 11-16: TrainingLogger's real file behavior, against a scratch temp
@@ -407,6 +443,8 @@ void verifyTrainingLogger()
             {
                 return std::find(metadataLines.begin(), metadataLines.end(), expected) != metadataLines.end();
             };
+            assert(hasLine("target_lap_count = 3") && hasLine("safety_timeout_seconds = 180") &&
+                   "metadata must report the 3-lap target and the 180 s safety timeout");
             assert(hasLine("compatibility_threshold = 3") &&
                    "metadata must report the configured initial compatibility_threshold"); // 12b
             assert(hasLine("target_species_min = 5") && "metadata must report target_species_min"); // 12b
@@ -439,6 +477,21 @@ void verifyTrainingLogger()
                afterTwoRows[2] == training::generationMetricsToCsvRow(m1) &&
                "logged rows must appear in call order with no row lost or duplicated"); // 15
 
+        // 15b (L): the logger has no generation limit -- rows for generations
+        // beyond 300 (including 1000 and past it) append exactly like any other.
+        for (std::size_t generation : {std::size_t{299}, std::size_t{300}, std::size_t{301}, std::size_t{1000},
+                                       std::size_t{1001}, std::size_t{5000}})
+        {
+            training::GenerationMetrics late;
+            late.generation = generation;
+            late.bestFitness = 200.0f;
+            logger.logGeneration(late);
+        }
+        const std::vector<std::string> afterLateRows = readLines(logger.getCsvPath());
+        assert(afterLateRows.size() == 3 + 6 && "generations past 300 must keep being logged, one row each");
+        assert(afterLateRows[6].rfind("1000,", 0) == 0 && afterLateRows[8].rfind("5000,", 0) == 0 &&
+               "rows for generation 1000 and beyond must carry their real generation number"); // L
+
         // 16: a second TrainingLogger constructed immediately afterward,
         // pointed at the SAME resultsDir (almost certainly within the same
         // second), must never overwrite the first run's files -- it gets a
@@ -449,7 +502,7 @@ void verifyTrainingLogger()
                secondLogger.getCsvPath() != logger.getCsvPath() &&
                "two TrainingLoggers constructed against the same resultsDir must never collide on run id/CSV path"); // 16
         assert(std::filesystem::exists(logger.getCsvPath()) &&
-               readLines(logger.getCsvPath()).size() == 3 &&
+               readLines(logger.getCsvPath()).size() == 9 &&
                "constructing a second TrainingLogger must not touch the first run's existing CSV file"); // 16 (continued)
 
         std::filesystem::remove_all(dir, ec); // leave no trace in the OS temp directory
@@ -586,20 +639,21 @@ void verifyGenerationMetricsPopulationIntegration(const simulation::Track& track
     assert(metrics.stagnantSpeciesExcluded == expectedStagnantExcluded &&
            "GenerationMetrics::stagnantSpeciesExcluded must match Population::getReproductionStats()"); // 7
 
-    assert(metrics.generationDurationSeconds > 0.0f && metrics.generationDurationSeconds <= 60.0f + 1e-4f &&
-           "generation duration must be positive and bounded by the 60-second evaluation timeout"); // 8
+    assert(metrics.generationDurationSeconds > 0.0f && metrics.generationDurationSeconds <= ai::kSafetyTimeoutSeconds + 1e-4f &&
+           "generation duration must be positive and bounded by the safety timeout"); // 8
     assert(!std::isnan(metrics.bestFitness) && !std::isnan(metrics.avgFitness) && !std::isnan(metrics.avgProgress) &&
            "no metric field may be NaN"); // 9
 
     // 10: every individual's evaluation has finished with exactly one of
-    // the four EvaluationFinishReason values by the time a generation
-    // transition happens -- the four terminated*Count fields must always
+    // the five EvaluationFinishReason values by the time a generation
+    // transition happens -- the five terminated*Count fields must always
     // sum to exactly the population size.
-    const std::size_t terminatedTotal = metrics.terminatedCollisionCount + metrics.terminatedMaxTimeCount +
-                                         metrics.terminatedNoProgressCount + metrics.terminatedSlowStartCount;
+    const std::size_t terminatedTotal = metrics.terminatedCollisionCount + metrics.terminatedSafetyTimeoutCount +
+                                         metrics.terminatedNoProgressCount + metrics.terminatedSlowStartCount +
+                                         metrics.terminatedCompletedLapsCount;
     assert(terminatedTotal == population.size() &&
-           "terminatedCollisionCount + terminatedMaxTimeCount + terminatedNoProgressCount + terminatedSlowStartCount "
-           "must sum to exactly the population size"); // 10
+           "terminatedCollisionCount + terminatedSafetyTimeoutCount + terminatedNoProgressCount + "
+           "terminatedSlowStartCount + terminatedCompletedLapsCount must sum to exactly the population size"); // 10
 
     TraceLog(LOG_INFO, "Generation metrics / Population integration verification: all deterministic checks passed");
 }

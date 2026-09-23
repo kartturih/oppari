@@ -148,6 +148,7 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
     metrics.avgGenomeConnectionGeneCount = static_cast<float>(totalConnections) / static_cast<float>(count);
 
     metrics.generationDurationSeconds = input.generationDurationSeconds;
+    metrics.bestDriving = input.bestDriving;
 
     for (ai::EvaluationFinishReason reason : input.finishReasons)
     {
@@ -156,8 +157,11 @@ GenerationMetrics buildGenerationMetrics(const GenerationMetricsInput& input)
         case ai::EvaluationFinishReason::Collision:
             ++metrics.terminatedCollisionCount;
             break;
-        case ai::EvaluationFinishReason::TimeLimit:
-            ++metrics.terminatedMaxTimeCount;
+        case ai::EvaluationFinishReason::CompletedLaps:
+            ++metrics.terminatedCompletedLapsCount;
+            break;
+        case ai::EvaluationFinishReason::SafetyTimeout:
+            ++metrics.terminatedSafetyTimeoutCount;
             break;
         case ai::EvaluationFinishReason::NoProgress:
             ++metrics.terminatedNoProgressCount;

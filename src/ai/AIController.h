@@ -45,10 +45,36 @@ public:
     // Observation from the most recent live update() (default if none yet).
     const Observation& getLastObservation() const { return m_lastObservation; }
 
-    // Brake mapping, exposed for direct verification: neutral/negative raw
-    // output means no brake (0 is not "50% brake"), positive raw output
-    // ramps linearly up to full brake at +1.0.
+    // The network has separate throttle and brake outputs, each mapped to a
+    // [0, 1] REQUEST, and the two requests are then combined into one net
+    // longitudinal command (see combineLongitudinal()) -- so the CarInput can
+    // never carry throttle and brake at the same time.
+    //
+    // Request mappings, exposed for direct verification. Throttle:
+    // (raw + 1) / 2, so a neutral raw output (0) requests 50% throttle.
+    // Brake: neutral/negative raw output requests no brake (0 is not "50%
+    // brake"), positive raw output ramps linearly up to full brake at +1.0.
+    static float mapThrottle(float rawThrottle);
     static float mapBrake(float rawBrake);
+
+    // Throttle/brake pair actually sent to the car.
+    struct LongitudinalCommand
+    {
+        float throttle = 0.0f;
+        float brake = 0.0f;
+    };
+
+    // longitudinal = throttleRequest - brakeRequest, then
+    // throttle = max(0, longitudinal) and brake = max(0, -longitudinal), both
+    // clamped to [0, 1]. Equal requests cancel to (0, 0); no dead zone,
+    // smoothing or hysteresis. min(throttle, brake) is always 0. A brake
+    // request below the throttle request therefore acts as a throttle trim.
+    static LongitudinalCommand combineLongitudinal(float throttleRequest, float brakeRequest);
+
+    // The [0, 1] requests (post mapThrottle()/mapBrake(), pre-combination)
+    // from the most recent live update() -- diagnostics only.
+    float getThrottleRequest() const { return m_throttleRequest; }
+    float getBrakeRequest() const { return m_brakeRequest; }
 
 private:
     NeuralNetwork m_network;
@@ -56,6 +82,8 @@ private:
     float m_rawSteering = 0.0f;
     float m_rawThrottle = 0.0f;
     float m_rawBrake = 0.0f;
+    float m_throttleRequest = 0.0f;
+    float m_brakeRequest = 0.0f;
 };
 
 } // namespace ai

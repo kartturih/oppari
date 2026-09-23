@@ -13,6 +13,7 @@ void runAll(const simulation::Track& track)
     verifyObservation(track);
     verifyVehiclePhysics(track);
     verifySteeringRateLimit(track);
+    verifySteeringAuthority();
     verifyNeuralNetwork();
     verifyNeatGenes();
     verifyGenome();
@@ -30,6 +31,7 @@ void runAll(const simulation::Track& track)
     verifyImageBasedTrackSystem(track);
     verifyFitnessEvaluator(track);
     verifyEarlyTermination(track);
+    verifyDrivingDiagnostics(track);
     verifyPopulation(track);
     verifySpeciesAwareReproduction(track);
     verifyPersistentSpeciesAndStagnation(track);

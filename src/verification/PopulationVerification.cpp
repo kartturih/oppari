@@ -434,6 +434,26 @@ void verifyPopulation(const simulation::Track& track)
         assert(population.getInnovationTracker().getNextAvailableInnovation() > maxInnovation &&
                "the global InnovationTracker must start above every base connection innovation"); // 12
 
+        // I: the base genome has exactly kOutputCount Output nodes, the Bias
+        // ID collides with none of them, and the first Hidden node ID the
+        // tracker will hand out is strictly above every Output ID -- so a
+        // mutation-born Hidden node can never reuse an Output (or Bias) ID.
+        NodeId maxOutputId = -1;
+        int outputCount = 0;
+        for (const NodeGene& node : base.nodes())
+        {
+            if (node.getType() == ai::neat::NodeType::Output)
+            {
+                maxOutputId = std::max(maxOutputId, node.getId());
+                ++outputCount;
+                assert(node.getId() != ai::NeuralNetwork::kInputCount && "an Output ID must never equal the Bias ID");
+            }
+        }
+        assert(outputCount == ai::NeuralNetwork::kOutputCount && "the base genome must have exactly kOutputCount Outputs");
+        assert(maxOutputId > ai::NeuralNetwork::kInputCount && "Output IDs must sit above the Input/Bias ID range");
+        assert(population.getInnovationTracker().getNextAvailableNodeId() == maxOutputId + 1 &&
+               "the first Hidden node ID must begin immediately after the highest Output ID"); // I
+
         assert(population.getLastGenerationBestFitness() == 0.0f &&
                "a freshly constructed Population's last-generation best fitness must start at 0"); // 39 (initial value)
     }

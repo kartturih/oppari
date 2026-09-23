@@ -31,8 +31,10 @@ const char* finishReasonToString(ai::EvaluationFinishReason reason)
             return "none";
         case ai::EvaluationFinishReason::Collision:
             return "collision";
-        case ai::EvaluationFinishReason::TimeLimit:
-            return "timelimit";
+        case ai::EvaluationFinishReason::CompletedLaps:
+            return "completed_laps";
+        case ai::EvaluationFinishReason::SafetyTimeout:
+            return "safety_timeout";
         case ai::EvaluationFinishReason::NoProgress:
             return "noprogress";
         case ai::EvaluationFinishReason::InsufficientInitialProgress:
@@ -329,7 +331,7 @@ void HairpinTelemetryRecorder::evaluateAndMaybeDump(std::size_t generation, std:
 {
     if (finishReason != ai::EvaluationFinishReason::Collision && finishReason != ai::EvaluationFinishReason::NoProgress)
     {
-        return; // TimeLimit/InsufficientInitialProgress are not the hairpin failure this instrument targets
+        return; // CompletedLaps/SafetyTimeout/InsufficientInitialProgress are not the hairpin failure this instrument targets
     }
     if (m_filledCount == 0)
     {

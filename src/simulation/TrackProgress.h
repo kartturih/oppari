@@ -107,6 +107,15 @@ public:
     // call has ever run (never a live production state).
     Vector2 getTrackTangent() const { return m_trackTangent; }
 
+    // Unit forward track tangent at distanceAhead px farther along the
+    // centerline than the most recently projected position (wrapping across
+    // the lap seam) -- orientation only, for the preview observations (see
+    // ai::buildObservation()). Read-only: derived from the already-tracked
+    // lap position on demand, with no extra state, and never feeds progress,
+    // checkpoints or fitness. Before the first reset() it is measured from
+    // lap position 0.
+    Vector2 getTrackTangentAhead(float distanceAhead) const;
+
     // Raw arc-length-normalized lap position, [0,1) -- not anchored to spawn.
     float getLapPosition() const { return m_lapPosition; }
 

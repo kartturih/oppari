@@ -60,6 +60,11 @@ Vector2 TrackProgress::tangentAtSegment(std::size_t segmentIndex) const
     return Vector2{dx / len, dy / len};
 }
 
+Vector2 TrackProgress::getTrackTangentAhead(float distanceAhead) const
+{
+    return m_track.getTangentAtDistance(m_lapPosition * m_track.getTotalLength() + distanceAhead);
+}
+
 void TrackProgress::reset(const Car& car)
 {
     // Full global projection -- no previous segment to search around yet.

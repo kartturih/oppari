@@ -85,24 +85,14 @@ ai::neat::Genome createDemonstrationGenome()
     genome.addConnection(ConnectionGene{kBiasId, kThrottleOutputId, 0.6f, true, innovation++});
     genome.addConnection(ConnectionGene{kSensorCenter, kThrottleOutputId, 0.4f, true, innovation++});
     // Bias -> Brake, mildly negative: with no other wiring, raw brake
-    // output is tanh(-0.5) =~ -0.46, still clamped to 0 by mapBrake (any
-    // raw <= 0 means no brake) -- brakes start off, so generation 0 can
-    // still drive. -0.5, not the -5.0 this used to be, is deliberate: under
-    // the OLD brake mapping ((raw+1)*0.5), raw=0 meant 50% brake, so -5.0
-    // was needed to push the network's naturally-saturating tanh output
-    // convincingly past that midpoint. The CURRENT mapping already treats
-    // raw<=0 as fully off, so that -5.0 no longer does anything useful --
-    // it only adds ~4.5 units of dead zone (see mutation/evolvability
-    // investigation) that any other incoming signal must overcome before
-    // brake can become positive at all, since tanh saturates and gives
-    // selection no gradient to climb while deeply negative. -0.5 keeps the
-    // brake-off guarantee (still comfortably negative) while staying inside
-    // the range ordinary weight perturbation (perturbStrength=0.5) can
-    // plausibly cross in a handful of generations, and inside what a single
-    // newly-mutated incoming connection (weight in [-1,1]) or dynamics-input
-    // path could realistically contribute; NEAT discovers real braking
-    // points via mutation from here, the same way it discovers everything
-    // else.
+    // output is tanh(-0.5) =~ -0.46, which mapBrake clamps to 0 (any raw <= 0
+    // means no brake request) -- the brake request starts off, so generation 0
+    // can still drive. -0.5 is deliberately mild: tanh saturates, so a much
+    // more negative bias would give selection no gradient to climb before
+    // the brake request could ever turn positive, whereas -0.5 stays inside
+    // what ordinary weight perturbation (perturbStrength=0.5) or a single
+    // newly-mutated incoming connection (weight in [-1,1]) can cross. NEAT
+    // discovers any real braking via mutation from here, like everything else.
     genome.addConnection(ConnectionGene{kBiasId, kBrakeOutputId, -0.5f, true, innovation++});
 
     return genome;

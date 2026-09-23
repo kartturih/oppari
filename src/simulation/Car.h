@@ -118,7 +118,25 @@ struct CarParams
     float cgToFrontAxle = 12.0f;
     float cgToRearAxle = 12.0f;
 
-    float maxSteerAngle = 0.42f; // radians at steering = +-1 (~28.6 deg)
+    float maxSteerAngle = 0.42f; // radians at steering = +-1 at LOW speed (~28.6 deg); see steerAuthority* below
+
+    // Speed-sensitive steering authority: the steering command +-1 maps to
+    // maxSteerAngle * steeringAuthorityForSpeed(speed), a piecewise-linear
+    // multiplier on maxSteerAngle that is 1.0 up to the first speed and falls
+    // linearly through the following (speed, factor) points, then stays at the
+    // last factor. Motivation (see the champion physics analysis): at high
+    // speed the front tire is already at its force peak well below full lock
+    // (peak slip ~14 deg vs 24 deg of lock), so extra lock adds almost no
+    // lateral grip but a large forward-opposing force (front lateral force x
+    // sin(steer angle)) -- full lock at speed acted as an unrealistically
+    // strong pseudo-brake. Speeds are px/s, strictly increasing. Low speed is
+    // unaffected (hairpins keep the full 0.42 rad); to disable, set every
+    // factor to 1.0. The steering COMMAND itself is never touched, and the
+    // rate limiter below still governs how fast the wheel moves toward the
+    // (now speed-dependent) target angle.
+    static constexpr int kSteerAuthorityPointCount = 4;
+    std::array<float, kSteerAuthorityPointCount> steerAuthoritySpeeds = {220.0f, 300.0f, 400.0f, 500.0f};
+    std::array<float, kSteerAuthorityPointCount> steerAuthorityFactors = {1.00f, 0.85f, 0.70f, 0.60f};
 
     // Maximum angular RATE (rad/s) the ACTUAL front-wheel steering angle can
     // change, independent of how fast the steering COMMAND itself changes --
@@ -385,7 +403,22 @@ struct TireDebugInfo
     // Friction-circle utilization, sqrt(Fx^2+Fy^2)/axleMaxTireForce, [0,1].
     float frontGripUtilization = 0.0f;
     float rearGripUtilization = 0.0f;
+
+    // Speed-sensitive steering authority in effect for the most recent
+    // update() (see CarParams::steerAuthoritySpeeds), and the resulting
+    // maximum wheel angle (radians) that steering = +-1 targeted. Read-only
+    // diagnostics; nothing reads them back into physics, fitness or control.
+    float steeringAuthority = 1.0f;
+    float effectiveMaxSteerAngle = 0.0f;
 };
+
+// Piecewise-linear steering-authority multiplier in [min factor, 1] for a
+// car moving at `speed` px/s (negative speeds clamp like speed 0): the first
+// factor at or below the first speed, the last factor at or above the last
+// speed, linear interpolation between adjacent (speed, factor) points --
+// continuous, no jumps. Pure function of (params, speed); exposed so
+// verification can check the curve directly.
+float steeringAuthorityForSpeed(const CarParams& params, float speed);
 
 // Box2D-backed top-down car with front/rear bicycle-model tire forces,
 // driven purely through CarInput. Collision checks the four rotated-body
@@ -409,7 +442,7 @@ public:
     // Five forward sensors at fixed angles, cast in fixed steps to a fixed range.
     static constexpr int kSensorCount = 5;
     static constexpr float kSensorAngleDegrees[kSensorCount] = {-60.0f, -30.0f, 0.0f, 30.0f, 60.0f};
-    // Perception-range experiment: raised from the original 200px -- see
+    // Sensor range: raised from the original 200px -- see
     // the hairpin-telemetry investigation, which measured real cars
     // reaching ~480-495px/s on the start straight while useful forward
     // warning only appeared around 110-136px, well under the ~276-292px

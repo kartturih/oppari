@@ -6,13 +6,28 @@
 namespace ai
 {
 
-// Why an evaluation ended (None while still running). Completing a lap
-// never itself ends an evaluation -- the car keeps driving.
+// An evaluation's normal, successful end: the car has completed this many
+// laps. Fitness is frozen the moment the lap count reaches it.
+inline constexpr int kTargetLapCount = 3;
+
+// Absolute simulated-time failsafe (seconds) so an evaluation can never run
+// forever. NOT the intended way for a successful run to end -- that is
+// completing kTargetLapCount laps, which a car of any useful speed does
+// long before this (the current champion needs ~55 s).
+inline constexpr float kSafetyTimeoutSeconds = 180.0f;
+
+// Why an evaluation ended (None while still running).
+//   Collision                   -- the car died
+//   CompletedLaps               -- the car completed kTargetLapCount laps (success)
+//   SafetyTimeout               -- kSafetyTimeoutSeconds elapsed first (failsafe only)
+//   NoProgress                  -- no meaningful forward progress for kNoProgressTimeout
+//   InsufficientInitialProgress -- the one-shot slow-start deadline was missed
 enum class EvaluationFinishReason
 {
     None,
     Collision,
-    TimeLimit,
+    CompletedLaps,
+    SafetyTimeout,
     NoProgress,
     InsufficientInitialProgress
 };
@@ -92,19 +107,24 @@ enum class EvaluationFinishReason
 // completing a lap requires surviving it, so lapSpeedBonus can never reward
 // a crash the way an unbounded progressRateReward theoretically could.
 //
-// Early termination (independent of the formula above -- a terminated
-// evaluation's fitness is just whatever it had already accumulated, as if
-// kMaxEvaluationTime had hit early). Both are driven only by
-// TrackProgress::getBestProgress(), never speed/coordinates:
-//   1. No-progress timeout: ends the run if bestProgress hasn't grown by
-//      more than kProgressImprovementEpsilon for kNoProgressTimeout seconds
-//      (catches circling/parking; backward or revisited progress never
-//      resets the timer, since bestProgress is monotonic).
-//   2. Initial-progress deadline: a one-shot check at
-//      kInitialProgressDeadline seconds requiring bestProgress >=
-//      kMinimumInitialProgress (catches a car crawling just enough to dodge
-//      rule 1 while still stuck near spawn).
-// A car making genuine progress can still run to kMaxEvaluationTime.
+// Termination (a terminated evaluation's fitness is just whatever it had
+// already accumulated). Checked in this order each update(), after the
+// progress/lap/fitness bookkeeping for that same step (so the final step's
+// progress, lap time and fitness are always included):
+//   1. Collision: the car is no longer alive.
+//   2. Completed laps: TrackProgress::getLapCount() >= kTargetLapCount --
+//      the normal successful end. There is no time limit on a successful run
+//      other than the failsafe below.
+//   3. Safety timeout: kSafetyTimeoutSeconds of simulated time (failsafe only).
+//   4. Initial-progress deadline: a one-shot check at kInitialProgressDeadline
+//      seconds requiring bestProgress >= kMinimumInitialProgress (catches a
+//      car crawling just enough to dodge rule 5 while still stuck near spawn).
+//   5. No-progress timeout: ends the run if bestProgress hasn't grown by more
+//      than kProgressImprovementEpsilon for kNoProgressTimeout seconds
+//      (catches circling/parking; backward or revisited progress never resets
+//      the timer, since bestProgress is monotonic).
+// Rules 4-5 are driven only by TrackProgress::getBestProgress(), never
+// speed/coordinates.
 class FitnessEvaluator
 {
 public:

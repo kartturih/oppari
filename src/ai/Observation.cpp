@@ -11,8 +11,8 @@ namespace ai
 namespace
 {
 
-static_assert(simulation::Car::kSensorCount + 7 == kObservationSize,
-              "Observation expects one slot per sensor plus seven vehicle-state slots");
+static_assert(simulation::Car::kSensorCount + 9 == kObservationSize,
+              "Observation expects one slot per sensor, seven vehicle-state/heading slots, and two preview slots");
 
 // Wraps a radian angle into [-pi, pi]. Same formula as
 // telemetry::HairpinTelemetry's/telemetry::ChampionTelemetry's own local
@@ -70,6 +70,22 @@ Observation buildObservation(const simulation::Car& car, const simulation::Track
     const float trackDirectionAngle = haveTrackTangent ? std::atan2(trackTangent.y, trackTangent.x) : car.getHeading();
     const float headingError = wrapToPi(car.getHeading() - trackDirectionAngle);
     observation.values[kHeadingErrorObservationIndex] = std::clamp(headingError / static_cast<float>(PI), -1.0f, 1.0f);
+
+    // Preview heading errors (slots 12 & 13): identical formula and sign
+    // convention to slot 11 (car heading MINUS track direction), against the
+    // track tangent farther along the centerline instead of the local one.
+    // Same zero-tangent fallback (only possible for a degenerate segment)
+    // as slot 11 -- treated as "aligned", i.e. 0. Orientation only.
+    auto previewHeadingError = [&](float distanceAhead)
+    {
+        const Vector2 futureTangent = progress.getTrackTangentAhead(distanceAhead);
+        const bool haveFutureTangent = (futureTangent.x != 0.0f || futureTangent.y != 0.0f);
+        const float futureDirectionAngle =
+            haveFutureTangent ? std::atan2(futureTangent.y, futureTangent.x) : car.getHeading();
+        return std::clamp(wrapToPi(car.getHeading() - futureDirectionAngle) / static_cast<float>(PI), -1.0f, 1.0f);
+    };
+    observation.values[kPreviewNearObservationIndex] = previewHeadingError(kPreviewNearDistance);
+    observation.values[kPreviewFarObservationIndex] = previewHeadingError(kPreviewFarDistance);
 
     return observation;
 }

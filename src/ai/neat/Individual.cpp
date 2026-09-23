@@ -31,6 +31,16 @@ void Individual::update(float deltaTime)
     m_car.update(input, deltaTime);
     m_progress.update(m_car);
     m_fitness.update(m_car, m_progress, input.steering, deltaTime);
+
+    // Observation only (never read back by fitness/control): one 60 Hz sample
+    // of how this step was driven.
+    m_diagnostics.update(input.steering, input.brake, m_car.getSpeed(), m_car.getYawRate(),
+                         m_car.getTireDebugInfo().frontSlipAngle, m_car.getParams().frontPeakSlipAngle,
+                         m_progress.getLapCount(), deltaTime);
+    const Observation& observation = m_controller.getLastObservation();
+    m_diagnostics.recordLongitudinal(m_controller.getThrottleRequest(), m_controller.getBrakeRequest(), input.brake,
+                                     m_car.getSpeed(), observation.values[kPreviewNearObservationIndex],
+                                     observation.values[kPreviewFarObservationIndex]);
 }
 
 void Individual::reset()
@@ -38,6 +48,7 @@ void Individual::reset()
     m_car.reset(m_spawnPosition, m_spawnHeading);
     m_progress.reset(m_car);
     m_fitness.reset();
+    m_diagnostics.reset();
 }
 
 } // namespace ai::neat

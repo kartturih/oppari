@@ -479,6 +479,34 @@ Vector2 Track::getPointAtDistance(float distanceAlongTrack) const
     return Vector2{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
 }
 
+Vector2 Track::getTangentAtDistance(float distanceAlongTrack) const
+{
+    float distance = std::fmod(distanceAlongTrack, m_totalLength);
+    if (distance < 0.0f)
+    {
+        distance += m_totalLength;
+    }
+
+    // Last segment whose start distance is <= distance (m_cumulativeDistances[0]
+    // is 0 and distance >= 0, so upper_bound is never begin()). Also correct
+    // if `distance += total` above rounds up to exactly total: upper_bound
+    // then returns end() and the last (closing) segment is selected.
+    const auto next = std::upper_bound(m_cumulativeDistances.begin(), m_cumulativeDistances.end(), distance);
+    const std::size_t segmentIndex = static_cast<std::size_t>(next - m_cumulativeDistances.begin()) - 1;
+
+    const std::size_t sampleCount = m_centerline.size();
+    const Vector2& a = m_centerline[segmentIndex];
+    const Vector2& b = m_centerline[(segmentIndex + 1) % sampleCount];
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.0f)
+    {
+        return Vector2{0.0f, 0.0f};
+    }
+    return Vector2{dx / length, dy / length};
+}
+
 TrackDefinition createExtremeTrackDefinition(int simWidth, int simHeight, const std::string& visualImagePath,
                                               const std::string& maskImagePath)
 {

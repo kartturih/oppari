@@ -31,8 +31,10 @@ const char* finishReasonToString(ai::EvaluationFinishReason reason)
             return "none";
         case ai::EvaluationFinishReason::Collision:
             return "collision";
-        case ai::EvaluationFinishReason::TimeLimit:
-            return "timelimit";
+        case ai::EvaluationFinishReason::CompletedLaps:
+            return "completed_laps";
+        case ai::EvaluationFinishReason::SafetyTimeout:
+            return "safety_timeout";
         case ai::EvaluationFinishReason::NoProgress:
             return "noprogress";
         case ai::EvaluationFinishReason::InsufficientInitialProgress:
@@ -111,7 +113,9 @@ std::string championCsvHeaderLine()
            "track_direction_angle,heading_error,wrong_way,"
            "current_lap_elapsed_time,last_lap_time,best_lap_time,"
            "actual_steer_angle,"
-           "obs_actual_steer_norm,obs_yaw_rate_norm,obs_heading_error_norm";
+           "obs_actual_steer_norm,obs_yaw_rate_norm,obs_heading_error_norm,"
+           "obs_preview_heading_error_120_norm,obs_preview_heading_error_300_norm,"
+           "steering_authority_factor,effective_max_steer_angle";
 }
 
 std::string championSampleToCsvRow(const ChampionTelemetrySample& s)
@@ -134,7 +138,9 @@ std::string championSampleToCsvRow(const ChampionTelemetrySample& s)
         << formatFloat(s.trackDirectionAngle) << ',' << formatFloat(s.headingError) << ',' << (s.wrongWay ? 1 : 0) << ','
         << formatFloat(s.currentLapElapsedTime) << ',' << formatFloat(s.lastLapTime) << ',' << formatFloat(s.bestLapTime)
         << ',' << formatFloat(s.actualSteerAngle) << ',' << formatFloat(s.obsActualSteerNorm) << ','
-        << formatFloat(s.obsYawRateNorm) << ',' << formatFloat(s.obsHeadingErrorNorm);
+        << formatFloat(s.obsYawRateNorm) << ',' << formatFloat(s.obsHeadingErrorNorm) << ','
+        << formatFloat(s.obsPreviewHeadingError120Norm) << ',' << formatFloat(s.obsPreviewHeadingError300Norm) << ','
+        << formatFloat(s.steeringAuthorityFactor) << ',' << formatFloat(s.effectiveMaxSteerAngle);
     return row.str();
 }
 
@@ -146,7 +152,13 @@ std::string championSummaryCsvHeaderLine()
            "longest_continuous_low_speed_duration_seconds,"
            "average_throttle,percent_time_throttle_above_half,average_brake,percent_time_brake_above_005,"
            "percent_time_brake_above_025,percent_time_throttle_and_brake_overlap,average_abs_steering,"
-           "completed_laps,best_lap_time,average_completed_lap_time,progress_per_second";
+           "completed_laps,best_lap_time,average_completed_lap_time,progress_per_second,"
+           "evaluator_avg_abs_steering_delta,steering_reversals_per_second,steering_saturation_fraction,"
+           "mean_abs_steering_60hz,mean_lateral_accel,front_slip_beyond_peak_fraction,"
+           "lap2plus_average_speed,physical_brake_usage_fraction,"
+           "brake_request_dominant_fraction,throttle_request_min,throttle_request_max,"
+           "brake_request_min,brake_request_max,brake_onset_speed,"
+           "brake_onset_preview_120,brake_onset_preview_300";
 }
 
 std::string championSummaryRowToCsvRow(const ChampionSummaryRow& r)
@@ -164,19 +176,32 @@ std::string championSummaryRowToCsvRow(const ChampionSummaryRow& r)
         << formatFloat(r.percentTimeBrakeAbove005) << ',' << formatFloat(r.percentTimeBrakeAbove025) << ','
         << formatFloat(r.percentTimeThrottleAndBrakeOverlap) << ',' << formatFloat(r.averageAbsSteering) << ','
         << r.completedLaps << ',' << formatFloat(r.bestLapTime) << ',' << formatFloat(r.averageCompletedLapTime) << ','
-        << formatFloat(r.progressPerSecond);
+        << formatFloat(r.progressPerSecond) << ',' << formatFloat(r.driving.averageAbsSteeringDelta) << ','
+        << formatFloat(r.driving.steeringReversalsPerSecond) << ',' << formatFloat(r.driving.steeringSaturationFraction)
+        << ',' << formatFloat(r.driving.meanAbsSteering) << ',' << formatFloat(r.driving.meanLateralAcceleration) << ','
+        << formatFloat(r.driving.frontSlipBeyondPeakFraction) << ',' << formatFloat(r.driving.lap2PlusAverageSpeed)
+        << ',' << formatFloat(r.driving.physicalBrakeUsageFraction) << ','
+        << formatFloat(r.driving.brakeRequestDominantFraction) << ',' << formatFloat(r.driving.throttleRequestMin) << ','
+        << formatFloat(r.driving.throttleRequestMax) << ',' << formatFloat(r.driving.brakeRequestMin) << ','
+        << formatFloat(r.driving.brakeRequestMax) << ',' << formatFloat(r.driving.brakeOnsetSpeed) << ','
+        << formatFloat(r.driving.brakeOnsetPreview120) << ',' << formatFloat(r.driving.brakeOnsetPreview300);
     return row.str();
 }
 
 ChampionSummaryRow computeChampionSummary(std::size_t generation, std::size_t individualIndex,
                                            const std::vector<ChampionTelemetrySample>& orderedSamples,
-                                           float finalFitness, ai::EvaluationFinishReason finishReason)
+                                           float finalFitness, ai::EvaluationFinishReason finishReason,
+                                           const ai::DrivingDiagnosticsSummary* driving)
 {
     ChampionSummaryRow row;
     row.generation = generation;
     row.individualIndex = individualIndex;
     row.finalFitness = finalFitness;
     row.finishReason = finishReason;
+    if (driving != nullptr)
+    {
+        row.driving = *driving;
+    }
 
     if (orderedSamples.empty())
     {
@@ -319,6 +344,32 @@ ChampionSummaryRow computeChampionSummary(std::size_t generation, std::size_t in
     return row;
 }
 
+std::string championGenomeToText(const ai::neat::Genome& genome)
+{
+    std::ostringstream out;
+    for (const ai::neat::NodeGene& node : genome.nodes())
+    {
+        out << "N " << node.getId() << ' ' << static_cast<int>(node.getType()) << '\n';
+    }
+    for (const ai::neat::ConnectionGene& connection : genome.connections())
+    {
+        out << "C " << connection.getSourceId() << ' ' << connection.getTargetId() << ' '
+            << training::formatFloat(connection.getWeight()) << ' ' << (connection.isEnabled() ? 1 : 0) << ' '
+            << connection.getInnovationNumber() << '\n';
+    }
+    return out.str();
+}
+
+std::string championCsvFileName(std::size_t generation)
+{
+    return "champion_gen" + zeroPad(generation, 4) + ".csv";
+}
+
+std::string championGenomeFileName(std::size_t generation)
+{
+    return "champion_gen" + zeroPad(generation, 4) + "_genome.txt";
+}
+
 ChampionTelemetryRecorder::ChampionTelemetryRecorder(std::string resultsDir, float simulationDt, bool enabled,
                                                        std::vector<std::size_t> targetGenerations)
     : m_resultsDir(std::move(resultsDir))
@@ -339,12 +390,12 @@ void ChampionTelemetryRecorder::beginCapture(std::size_t generation, std::size_t
     m_capturingGeneration = generation;
     m_stepIndexInGeneration = 0;
 
-    // ~60s (kMaxEvaluationTime, FitnessEvaluator.cpp) worth of samples at the
-    // configured interval, plus slack for the extra per-individual finish
-    // sample -- a reservation only (never a hard cap; push_back still grows
-    // it if an evaluation somehow runs long).
-    const std::size_t reserveHint =
-        static_cast<std::size_t>(60.0f / (m_simulationDt * static_cast<float>(kChampionTelemetrySampleInterval))) + 16;
+    // kChampionTelemetryReserveSeconds worth of samples at the configured
+    // interval, plus slack for the extra per-individual finish sample -- a
+    // reservation only (never a hard cap; push_back still grows it up to the
+    // kSafetyTimeoutSeconds failsafe if an evaluation runs long).
+    const std::size_t reserveHint = static_cast<std::size_t>(
+        kChampionTelemetryReserveSeconds / (m_simulationDt * static_cast<float>(kChampionTelemetrySampleInterval))) + 16;
 
     m_buffers.assign(individualCount, {});
     for (std::vector<ChampionTelemetrySample>& buffer : m_buffers)
@@ -410,6 +461,10 @@ void ChampionTelemetryRecorder::sampleIndividual(std::size_t individualIndex, co
     sample.obsActualSteerNorm = observation.values[ai::kActualSteerObservationIndex];
     sample.obsYawRateNorm = observation.values[ai::kYawRateObservationIndex];
     sample.obsHeadingErrorNorm = observation.values[ai::kHeadingErrorObservationIndex];
+    sample.obsPreviewHeadingError120Norm = observation.values[ai::kPreviewNearObservationIndex];
+    sample.obsPreviewHeadingError300Norm = observation.values[ai::kPreviewFarObservationIndex];
+    sample.steeringAuthorityFactor = tire.steeringAuthority;
+    sample.effectiveMaxSteerAngle = tire.effectiveMaxSteerAngle;
 
     sample.sensorM60Px = sensors[0].distance;
     sample.sensorM30Px = sensors[1].distance;
@@ -437,8 +492,14 @@ std::string ChampionTelemetryRecorder::buildCsvPath(std::size_t generation) cons
 {
     const std::filesystem::path dir = std::filesystem::path(m_resultsDir) / "telemetry" / "champions";
     std::filesystem::create_directories(dir);
-    const std::string filename = "champion_gen" + zeroPad(generation, 4) + ".csv";
-    return (dir / filename).string();
+    return (dir / championCsvFileName(generation)).string();
+}
+
+std::string ChampionTelemetryRecorder::buildGenomePath(std::size_t generation) const
+{
+    const std::filesystem::path dir = std::filesystem::path(m_resultsDir) / "telemetry" / "champions";
+    std::filesystem::create_directories(dir);
+    return (dir / championGenomeFileName(generation)).string();
 }
 
 void ChampionTelemetryRecorder::writeSummaryCsv() const
@@ -497,8 +558,35 @@ void ChampionTelemetryRecorder::finishCapture(const ai::neat::Population& popula
         }
     }
 
+    // The champion's genome, as plain text next to its CSV, so it can be
+    // analyzed/replayed later without re-running training. Write-only: a
+    // failure here is only logged, and nothing in training reads it back.
+    {
+        const std::string genomePath = buildGenomePath(m_capturingGeneration);
+        std::ofstream genomeFile(genomePath, std::ios::out | std::ios::trunc);
+        if (!genomeFile.is_open())
+        {
+            TraceLog(LOG_WARNING, "ChampionTelemetry: failed to open %s for writing", genomePath.c_str());
+        }
+        else
+        {
+            genomeFile << "# Champion genome -- generation " << m_capturingGeneration << ", individual " << bestIndex
+                       << ", fitness " << training::formatFloat(bestIndividual.getFitness()) << "\n"
+                       << "# N <nodeId> <nodeType: 0=Input 1=Bias 2=Hidden 3=Output>\n"
+                       << "# C <sourceId> <targetId> <weight> <enabled> <innovation>\n"
+                       << championGenomeToText(bestIndividual.getGenome());
+            genomeFile.flush();
+            if (!genomeFile.good())
+            {
+                TraceLog(LOG_WARNING, "ChampionTelemetry: error while writing %s", genomePath.c_str());
+            }
+        }
+    }
+
+    const ai::DrivingDiagnosticsSummary drivingSummary = bestIndividual.getDrivingSummary();
     m_summaryRows.push_back(computeChampionSummary(m_capturingGeneration, bestIndex, samples, bestIndividual.getFitness(),
-                                                     bestIndividual.getFitnessEvaluator().getFinishReason()));
+                                                     bestIndividual.getFitnessEvaluator().getFinishReason(),
+                                                     &drivingSummary));
     writeSummaryCsv();
 
     ++m_capturedGenerations;
